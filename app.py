@@ -85,6 +85,7 @@ from export_controller import ExportController
 from plot_controller import PlotController
 from session_controller import SessionController
 from detection_controller import DetectionController
+from signal_controller import SignalController
 
 # ── ecg.io ────────────────────────────────────────────────────────────────────
 from loaders import (
@@ -246,6 +247,7 @@ class ECGApp(ctk.CTk):
         self.plot_ctrl = PlotController(self)
         self.session_ctrl = SessionController(self)
         self.detection_ctrl = DetectionController(self)
+        self.signal_ctrl = SignalController(self)
 
         self._batch_bc_outdir: ctk.CTkEntry
         self._batch_bc_channel: ctk.CTkEntry
@@ -3437,8 +3439,8 @@ class ECGApp(ctk.CTk):
         """
         return self.session_ctrl.snapshot_params()
 
-    @staticmethod
     def _compute_preview_bundle(
+        self,
         sig_raw:     np.ndarray,
         fs:          int,
         params:      dict,
@@ -3454,187 +3456,7 @@ class ECGApp(ctk.CTk):
         * Background workers call this method and return the bundle.
         * Only the main thread writes instance variables.
         """
-        def _prog(pct: int, msg: str) -> None:
-            if progress_cb:
-                progress_cb(pct, msg)
-
-        no_filter = params.get("no_filter", False)
-        sig = sig_raw.copy()
-
-        _prog(5, "Normalising raw signal…")
-        signal_raw_norm = normalize(sig)
-
-        if no_filter:
-            log.info("_compute_preview_bundle: no_filter=True — skipping bandpass/notch/ecg_clean")
-        else:
-            _prog(10, "Bandpass filtering…")
-            try:
-                sig = bandpass(sig, fs, params["lp"], params["hp"])
-            except Exception as exc:
-                log.warning("bandpass skipped: %s", exc)
-
-            if params["notch"]:
-                _prog(25, "Notch filtering…")
-                try:
-                    sig = notch(sig, fs)
-                except Exception as exc:
-                    log.warning("notch skipped: %s — check fs vs notch frequency", exc)
-
-            _prog(35, "NeuroKit2 clean…")
-            try:
-                assert nk is not None  # NK_AVAILABLE guard checked by caller
-                sig = nk.ecg_clean(sig, sampling_rate=fs,
-                                   method=params["clean_method"])
-            except Exception as exc:
-                log.warning("nk.ecg_clean skipped: %s", exc)
-
-        _prog(45, "Normalising filtered signal…")
-        sig = normalize(np.asarray(sig, dtype=float))
-
-        # ── Manual polarity override ─────────────────────────────────────
-        # If the user has explicitly toggled "Inverser signal", flip the
-        # signal before auto-polarity detection.  fix_polarity will then
-        # find the (now correct) positive R peaks and not re-flip.
-        if params.get("invert_signal", False):
-            sig = -sig
-            log.info("_compute_preview_bundle: user-requested signal inversion applied")
-
-        def _polarity_prog(pct: int, msg: str) -> None:
-            _prog(45 + int(pct * 0.50), msg)
-
-        # ── Detection method ─────────────────────────────────────────────
-        det_method = params.get("detection_method", "auto")
-
-        if "wavelet" in det_method.lower() or "cwt" in det_method.lower():
-            # ── Wavelet (CWT) pipeline ────────────────────────────────────
-            # fix_polarity AVANT la détection : le détecteur wavelet (comme SG)
-            # travaille sur la dérivée positive → il faut que les R-peaks soient
-            # positifs dans le signal, sinon seuls les artefacts positifs sont détectés.
-            _prog(48, "Polarity correction…")
-            sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"])
-            _prog(50, "CWT — séparation bruit / QRS / J-wave…")
-            try:
-                peaks_wt, proms_wt, t_amp_wt = detect_peaks_wavelet(
-                    sig,
-                    fs=fs,
-                    min_rr_ms=params["min_rr_ms"],
-                    peak_distance_ms=params.get("peak_distance_ms", MouseECG.PEAK_DISTANCE_MS),
-                )
-            except ImportError:
-                log.warning(
-                    "PyWavelets non installé — "
-                    "pip install PyWavelets  (fallback: auto)"
-                )
-                peaks_wt  = np.array([], dtype=int)
-                proms_wt  = np.array([])
-                t_amp_wt  = 0.0
-            except Exception as exc:
-                log.warning("Wavelet detection failed, falling back to auto: %s", exc)
-                peaks_wt  = np.array([], dtype=int)
-                proms_wt  = np.array([])
-                t_amp_wt  = 0.0
-
-            _prog(95, f"Wavelet candidates: {len(peaks_wt):,}")
-            return {
-                "signal_raw_norm": signal_raw_norm,
-                "signal_flt":      sig,
-                "no_filter_mode":  no_filter,
-                "all_cands":       peaks_wt,
-                "all_proms":       proms_wt if len(proms_wt) else np.ones(len(peaks_wt)),
-                "inverted":        inverted,
-            }
-
-        if "sg" in det_method.lower() or "deriv" in det_method.lower():
-            # ── SG + Derivative pipeline ──────────────────────────────────
-            # fix_polarity automatique si l'utilisateur n'a pas déjà inversé
-            # manuellement (évite la double inversion). Le détecteur SG
-            # requiert des R positifs (upstroke = dérivée positive).
-            if not params.get("invert_signal", False):
-                _prog(48, "Polarity correction…")
-                sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"])
-            else:
-                inverted = False  # utilisateur a géré la polarité manuellement
-            _prog(50, "SG derivative detection…")
-            try:
-                sg_window_ms = float(params.get("sg_window_ms", 20.0))
-            except (TypeError, ValueError):
-                sg_window_ms = 20.0
-
-            try:
-                peaks_sg, proms_sg, t_amp_sg = detect_peaks_sg_derivative(
-                    sig,
-                    fs=fs,
-                    sg_window_ms=sg_window_ms,
-                    min_rr_ms=params["min_rr_ms"],
-                    peak_distance_ms=params.get("peak_distance_ms", MouseECG.PEAK_DISTANCE_MS),
-                    target_fs=float(params.get("sg_target_fs", 10000)),
-                )
-            except Exception as exc:
-                log.warning("SG+derivative detection failed, falling back to auto: %s", exc)
-                peaks_sg = np.array([], dtype=int)
-                proms_sg = np.array([])
-                t_amp_sg = 0.0
-
-            _prog(95, f"SG+Deriv candidates: {len(peaks_sg):,}")
-            return {
-                "signal_raw_norm": signal_raw_norm,
-                "signal_flt":      sig,
-                "no_filter_mode":  no_filter,
-                "all_cands":       peaks_sg,
-                "all_proms":       proms_sg if len(proms_sg) else np.ones(len(peaks_sg)),
-                "inverted":        False,
-            }
-
-        if "envelope" in det_method.lower() or "max" in det_method.lower():
-            # ── Envelope Max pipeline ─────────────────────────────────────
-            # Détection par maximum local d'amplitude — robuste aux signaux
-            # saturés (ADC clipping) et aux morphologies atypiques où la
-            # dérivée SG est peu discriminante.
-            # fix_polarity requis : le détecteur sélectionne les maxima → les
-            # R-peaks doivent être des extrema positifs dans le signal.
-            if not params.get("invert_signal", False):
-                _prog(48, "Polarity correction…")
-                sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"])
-            else:
-                inverted = False
-            _prog(55, "Envelope Max detection…")
-            try:
-                peaks_em, proms_em, t_amp_em = detect_peaks_envelope_max(
-                    sig,
-                    fs=fs,
-                    min_rr_ms=params["min_rr_ms"],
-                    peak_distance_ms=params.get("peak_distance_ms", MouseECG.PEAK_DISTANCE_MS),
-                )
-            except Exception as exc:
-                log.warning("Envelope Max detection failed, falling back to auto: %s", exc)
-                peaks_em = np.array([], dtype=int)
-                proms_em = np.array([])
-                t_amp_em = 0.0
-
-            _prog(95, f"Envelope Max candidates: {len(peaks_em):,}")
-            return {
-                "signal_raw_norm": signal_raw_norm,
-                "signal_flt":      sig,
-                "no_filter_mode":  no_filter,
-                "all_cands":       peaks_em,
-                "all_proms":       proms_em if len(proms_em) else np.ones(len(peaks_em)),
-                "inverted":        inverted,
-            }
-            
-        # ── Auto (NeuroKit2) pipeline — original path ─────────────────────
-        sig_out, inverted, cands, proms = fix_polarity(
-            sig, fs, params["min_rr_ms"], progress_cb=_polarity_prog)
-
-        _prog(95, f"Candidates found: {len(cands):,}")
-
-        return {
-            "signal_raw_norm": signal_raw_norm,
-            "signal_flt":      sig_out,
-            "no_filter_mode":  no_filter,
-            "all_cands":       cands,
-            "all_proms":       proms,
-            "inverted":        inverted,
-        }
+        return self.signal_ctrl.compute_preview_bundle(sig_raw, fs, params, progress_cb)
 
     def _prepare_signal(
         self,
@@ -3655,16 +3477,7 @@ class ECGApp(ctk.CTk):
         The background preview path uses ``_compute_preview_bundle`` directly
         and writes to self only from ``_on_preview_done`` (main thread).
         """
-        if self._signal_raw is None:
-            return
-        bundle = self._compute_preview_bundle(
-            self._signal_raw, self._fs, params, progress_cb)
-        self._signal_raw_norm  = bundle["signal_raw_norm"]
-        self._signal_flt       = bundle["signal_flt"]
-        self._no_filter_mode   = bundle["no_filter_mode"]
-        self._all_cands        = bundle["all_cands"]
-        self._all_proms        = bundle["all_proms"]
-        self._signal_inverted  = bundle.get("inverted", False)
+        self.signal_ctrl.prepare_signal(params, progress_cb)
 
     def _run_detection(self, thresh: float | None = None) -> int:
         """Apply current threshold to pre-computed candidates.
@@ -3873,15 +3686,7 @@ class ECGApp(ctk.CTk):
         must click '1 ▶ Preview Detection' to run the actual DSP + detection
         pipeline (see _preview / _preview_worker).
         """
-        if not self._filepath:
-            return
-        params = self._snapshot_params()
-        self._start_async(
-            self.btn_preview, "Loading…", "Loading raw signal…",
-            lambda: self._load_raw_worker(params),
-            self._on_raw_load_done,
-            pass_result=True,
-        )
+        self.signal_ctrl.load_raw_only()
 
     def _load_raw_worker(self, params: dict) -> dict:
         """Background worker — loads the file, returns the RAW signal only.
@@ -3890,48 +3695,7 @@ class ECGApp(ctk.CTk):
         (file read + time-window crop). It stops before any filtering,
         polarity correction, or detection call.
         """
-        if self._filepath is None:
-            raise ValueError("No file loaded.")
-
-        def _prog(pct: int, msg: str) -> None:
-            self.after(0, lambda p=pct, m=msg: self._set_progress(p, m))
-
-        _prog(10, "Loading signal from file…")
-        sig, detected_ch, _, detected_fs = load_mat_signal(
-            self._filepath, params["channel"])
-
-        fs = int(detected_fs) if detected_fs is not None else params["fs"]
-
-        t0 = params["t_start"]
-        t1 = params["t_end"]
-        i0 = int(t0 * fs) if t0 > 0 else 0
-        i1 = int(t1 * fs) if t1 > 0 else len(sig)
-        sig = sig[i0:i1]
-
-        if sig.std() < 1e-10:
-            raise ValueError("Signal is flat — wrong channel.")
-
-        n_samples = len(sig)
-        dur_s     = n_samples / fs
-        _prog(70, f"Signal loaded — {dur_s:.0f} s  ({n_samples:,} samples)")
-
-        # ONLY processing step: z-score normalisation for display scale.
-        # This is not a "filter" — it never changes morphology, polarity,
-        # or which sample is the maximum; it's purely an axis convenience,
-        # identical to what "Show raw signal" already displayed pre-preview.
-        signal_raw_norm = normalize(sig)
-        _prog(100, "Raw signal ready")
-
-        return {
-            "fs":           fs,
-            "signal_raw":   sig,
-            "signal_raw_norm": signal_raw_norm,
-            "dur_s":        dur_s,
-            "detected_ch":  detected_ch,
-            "detected_fs":  detected_fs,
-            "requested_ch": params["channel"],
-            "fs_from_file": detected_fs is not None,
-        }
+        return self.signal_ctrl.load_raw_worker(params)
 
     def _on_raw_load_done(self, bundle: dict) -> None:
         """Write raw-only state on the main thread and draw the raw trace.
@@ -3943,106 +3707,11 @@ class ECGApp(ctk.CTk):
         "not previewed yet" guards (which already check for None) behave
         correctly until the user clicks Preview Detection.
         """
-        fs        = bundle["fs"]
-        sig_raw   = bundle["signal_raw"]
-        n_samples = len(sig_raw)
-
-        self._fs               = fs
-        self._signal_raw       = sig_raw
-        self._signal_raw_norm  = bundle["signal_raw_norm"]
-        self._signal_flt       = None
-        self._time             = np.arange(n_samples) / fs
-        self._all_cands        = None
-        self._all_proms        = None
-        self._no_filter_mode   = True
-        self._signal_inverted  = False
-        self._raw_only_loaded  = True
-        self._nav_pos          = 0.0
-        self._ds_time          = None
-        self._ds_sig           = None
-        self._ds_sig_max       = None
-        self._ds_sig_mid       = None
-        self._ds_raw_sig       = None
-        self._ds_raw_sig_max   = None
-        self._ds_raw_sig_mid   = None
-        self._ov_ylim          = None
-        self._rpeaks_ok            = None
-        self._rpeaks_rej           = None
-        self._thresh_amp           = 0.0
-        self._rpeaks_manual_excl   = np.array([], dtype=int)
-        self._rpeaks_manual_added  = np.array([], dtype=int)
-        self._manual_excluded.clear()
-        self._manual_added.clear()
-        self._results       = None
-        self._epoch_df      = None
-        self._annotations   = []
-        self._wave_template = None
-        self._session_dirty = False
-        self._generation    = getattr(self, "_generation", 0) + 1
-        self._reset_kpis()
-        self._reset_result_plots()
-        self._reset_tab_status_labels()
-
-        if bundle["detected_ch"] != bundle["requested_ch"]:
-            if self.ent_channel is not None:
-                try:
-                    self.ent_channel.delete(0, "end")
-                    self.ent_channel.insert(0, bundle["detected_ch"])
-                except Exception as _exc:
-                    log.debug("Could not update channel entry: %s", _exc)
-            self.lbl_file.configure(  # type: ignore[union-attr]
-                text=f"Auto: {bundle['detected_ch']}", text_color=ORANGE)
-        if bundle["fs_from_file"]:
-            self._apply_detected_fs(bundle["detected_fs"])
-        else:
-            try:
-                self.lbl_fs_source.configure(
-                    text="Tip: fs not found in file — set manually above",
-                    text_color=ORANGE)
-            except Exception as e:
-                log.debug("lbl_fs_source configure failed: %s", e)
-
-        if self.lbl_npeaks is not None:
-            self.lbl_npeaks.configure(  # type: ignore[union-attr]
-                text="Peaks detected: — (click Preview Detection)", text_color=MUTED)
-        if self.btn_review_art is not None:
-            self.btn_review_art.configure(state="disabled")  # type: ignore[union-attr]
-
-        dur = bundle["dur_s"]
-        self._set_status(
-            f"Raw signal loaded — {dur:.0f} s  |  {fs} Hz  "
-            "→ click '1 ▶ Preview Detection' to filter and detect peaks.", BLUE)
-        self.tabs.set("Detection")
-        self._update_ann_count()
-        self._nav_pos = 0.0
-        self._sync_nav_pos_entry()
-        if self.lbl_sig_duration is not None:
-            self.lbl_sig_duration.configure(  # type: ignore[union-attr]
-                text=f"durée totale : {dur:.1f} s", text_color=MUTED)
-        self._draw_detail()
-
-        self._analysis_t_start = 0.0
-        self._analysis_t_end   = 0.0
-        if self.lbl_analysis_window is not None:
-            self.lbl_analysis_window.configure(  # type: ignore[union-attr]
-                text=f"Raw signal loaded  ·  {dur:.1f} s  ·  not yet analysed",
-                text_color=MUTED)
+        self.signal_ctrl.on_raw_load_done(bundle)
 
     def _preview(self) -> None:
         """Load, filter, and detect peaks — fast, no HRV."""
-        if not self._filepath:
-            messagebox.showwarning("No file", "Open a .mat file first.")
-            return
-        # Snapshot widget values on the main thread before spawning background work.
-        params = self._snapshot_params()
-        # pass_result=True: worker returns a bundle; _on_preview_done receives it.
-        # This ensures ALL shared state writes happen on the main thread only.
-        self._start_async(
-            self.btn_preview, "Loading…", "Loading signal…",
-            lambda: self._preview_worker(params),
-            self._on_preview_done,
-            pass_result=True,
-        )
+        self.signal_ctrl.preview()
 
     def _preview_worker(self, params: dict) -> dict:
         """Background worker — MUST NOT write to self.
@@ -4051,85 +3720,11 @@ class ECGApp(ctk.CTk):
         All instance-variable writes happen in ``_on_preview_done`` on the
         main thread, preventing data races with Tk resize/redraw callbacks.
         """
-        if self._filepath is None:
-            raise ValueError("No file loaded.")
-
-        def _prog(pct: int, msg: str) -> None:
-            """Thread-safe progress update — schedules on the main thread."""
-            self.after(0, lambda p=pct, m=msg: self._set_progress(p, m))
-
-        _prog(2, "Loading signal from file…")
-        sig, detected_ch, _, detected_fs = load_mat_signal(
-            self._filepath, params["channel"])
-
-        # Determine effective fs
-        if detected_fs is not None:
-            fs = int(detected_fs)
-        else:
-            fs = params["fs"]
-
-        # Estimation automatique min_rr supprimée.
-
-        t0 = params["t_start"]
-        t1 = params["t_end"]
-        i0 = int(t0 * fs) if t0 > 0 else 0
-        i1 = int(t1 * fs) if t1 > 0 else len(sig)
-        sig = sig[i0:i1]
-
-        if sig.std() < 1e-10:
-            raise ValueError("Signal is flat — wrong channel.")
-
-        n_samples = len(sig)
-        dur_s     = n_samples / fs
-        _prog(5, f"Signal loaded — {dur_s:.0f} s  ({n_samples:,} samples)")
-
-        # _compute_preview_bundle does all DSP — pure, no self writes
-        def _prep_prog(pct: int, msg: str) -> None:
-            _prog(5 + int(pct * 0.85), msg)
-
-        signal_bundle = self._compute_preview_bundle(sig, fs, params, _prep_prog)
-
-        # Run threshold detection on the computed candidates (pure computation)
-        thresh = params["thresh"]
-        accepted, rejected, thresh_amp = apply_threshold(
-            signal_bundle["signal_flt"],
-            signal_bundle["all_cands"],
-            signal_bundle["all_proms"],
-            thresh,
-            fs=fs,
-        )
-
-        _prog(100, "Done")
-
-        return {
-            # Signal identity
-            "fs":              fs,
-            "signal_raw":      sig,
-            "dur_s":           dur_s,
-            "detected_ch":     detected_ch,
-            "detected_fs":     detected_fs,
-            "requested_ch":    params["channel"],
-            "fs_from_file":    detected_fs is not None,
-            "thresh":          thresh,
-            # Prepared signal bundle
-            **signal_bundle,
-            # Detection results
-            "rpeaks_ok":       accepted,
-            "rpeaks_rej":      rejected,
-            "thresh_amp":      thresh_amp,
-            "recommended_min_rr_ms": None,
-        }
+        return self.signal_ctrl.preview_worker(params)
 
     def _apply_detected_fs(self, fs: float) -> None:
         """Update the fs entry and source label on the main thread."""
-        try:
-            self.ent_fs.delete(0, "end")
-            self.ent_fs.insert(0, str(int(fs)))
-        except Exception as _exc:
-            log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 5605, _exc)
-        self.lbl_fs_source.configure(
-            text=f"✓ Auto-detected from file: {int(fs)} Hz",
-            text_color=GREEN)
+        self.signal_ctrl.apply_detected_fs(fs)
 
     def _on_preview_done(self, bundle: dict) -> None:
         """Atomically write all signal state on the main thread, then draw.
@@ -4139,118 +3734,7 @@ class ECGApp(ctk.CTk):
         _start_async after the background worker finishes), it is guaranteed to
         execute on the Tk main thread with no concurrent background writes.
         """
-        fs        = bundle["fs"]
-        sig_raw   = bundle["signal_raw"]
-        n_samples = len(sig_raw)
-
-        # ── Atomic state update (main thread) ────────────────────────────────
-        self._fs              = fs
-        self._signal_raw      = sig_raw
-        self._signal_raw_norm = bundle["signal_raw_norm"]
-        self._signal_flt      = bundle["signal_flt"]
-        self._time            = np.arange(n_samples) / fs
-        self._all_cands       = bundle["all_cands"]
-        self._all_proms       = bundle["all_proms"]
-        self._no_filter_mode  = bundle["no_filter_mode"]
-        self._signal_inverted = bundle.get("inverted", False)
-        self._raw_only_loaded = False
-        # recommended_min_rr_ms supprimé — ent_minrr non modifié automatiquement.
-        self._nav_pos         = 0.0
-        self._ds_time         = None
-        self._ds_sig          = None
-        self._ds_sig_max      = None
-        self._ds_sig_mid      = None
-        self._ds_raw_sig      = None
-        self._ds_raw_sig_max  = None
-        self._ds_raw_sig_mid  = None
-        self._ov_ylim         = None   # clear y-zoom on new signal
-        # Peak detection results (computed in worker from pure candidates)
-        self._rpeaks_ok           = bundle["rpeaks_ok"]
-        self._rpeaks_rej          = bundle["rpeaks_rej"]
-        self._thresh_amp          = bundle["thresh_amp"]
-        self._rpeaks_manual_excl  = np.array([], dtype=int)
-        self._rpeaks_manual_added = np.array([], dtype=int)
-        # Reset manual peak edits — new file, clean slate
-        self._manual_excluded.clear()
-        self._manual_added.clear()
-        # Invalidate all previous analysis state — new file, clean slate
-        self._results       = None
-        self._epoch_df      = None
-        self._annotations   = []    # annotations belong to a specific file
-        self._wave_template = None  # template may not suit new signal
-        self._session_dirty = False
-        # Increment generation so any in-flight bg workers discard their results
-        self._generation    = getattr(self, "_generation", 0) + 1
-        # Reset UI to blank state
-        self._reset_kpis()
-        self._reset_result_plots()
-        self._reset_tab_status_labels()
-
-        # ── UI feedback for auto-detected channel / fs ────────────────────────
-        def _subject_from_channel(name: str) -> Optional[str]:
-            digits = "".join(ch for ch in name if ch.isdigit())
-            return digits if digits else None
-
-        if bundle["detected_ch"] != bundle["requested_ch"]:
-            if self.ent_channel is not None:
-                try:
-                    self.ent_channel.delete(0, "end")
-                    self.ent_channel.insert(0, bundle["detected_ch"])
-                except Exception as _exc:
-                    log.debug("Could not update channel entry: %s", _exc)
-
-            if self.ent_subject is not None:
-                subject_id = _subject_from_channel(bundle["detected_ch"])
-                current_subject = self.ent_subject.get().strip()
-                if subject_id and (not current_subject or current_subject.lower().startswith("subject")):
-                    try:
-                        self.ent_subject.delete(0, "end")
-                        self.ent_subject.insert(0, subject_id)
-                    except Exception as _exc:
-                        log.debug("Could not update subject entry: %s", _exc)
-
-            self.lbl_file.configure(  # type: ignore[union-attr]
-                text=f"Auto: {bundle['detected_ch']}", text_color=ORANGE)
-        if bundle["fs_from_file"]:
-            self._apply_detected_fs(bundle["detected_fs"])
-        else:
-            try:
-                self.lbl_fs_source.configure(
-                    text="Tip: fs not found in file — set manually above",
-                    text_color=ORANGE)
-            except Exception as e:
-                log.debug("lbl_fs_source configure failed: %s", e)
-
-        # Update peak count label and quality score
-        n = len(self._rpeaks_ok)  # type: ignore[union-attr]
-        color = GREEN if n > 10 else RED
-        if self.lbl_npeaks is not None:
-            self.lbl_npeaks.configure(text=f"Peaks detected: {n}", text_color=color)  # type: ignore[union-attr]
-        if self.btn_review_art is not None:
-            self.btn_review_art.configure(state="normal" if n > 4 else "disabled")  # type: ignore[union-attr]
-        self._update_signal_quality(self._rpeaks_ok)  # type: ignore[union-attr]
-
-        dur = bundle["dur_s"]
-        self._set_status(
-            f"Signal ready — {n} peaks  |  {dur:.0f} s  |  {fs} Hz  "
-            "→ adjust threshold then Run Full Analysis.", GREEN)
-        self.tabs.set("Detection")
-        self._update_ann_count()   # reflect cleared annotations immediately
-        # Sync nav bar
-        self._nav_pos = 0.0
-        self._sync_nav_pos_entry()
-        if self.lbl_sig_duration is not None:
-            self.lbl_sig_duration.configure(  # type: ignore[union-attr]
-                text=f"durée totale : {dur:.1f} s", text_color=MUTED)
-        self._draw_detail()
-
-        # Reset analysis window on new signal load and update feedback label
-        self._analysis_t_start = 0.0
-        self._analysis_t_end   = 0.0
-        if self.lbl_analysis_window is not None:
-            self.lbl_analysis_window.configure(  # type: ignore[union-attr]
-                text=f"Full signal  ·  {n} peaks  ·  {dur:.1f} s",
-                text_color=MUTED)
+        self.signal_ctrl.on_preview_done(bundle)
 
     def _windowed_peaks(self) -> "Optional[np.ndarray]":
         """Return a copy of _rpeaks_ok filtered to the current analysis window.
@@ -4263,18 +3747,7 @@ class ECGApp(ctk.CTk):
         _compute_epochs, _compute_rolling_hrv) — they all call this instead of
         doing ``self._rpeaks_ok.copy()`` directly.
         """
-        if self._rpeaks_ok is None or self._fs is None:
-            return None
-        rp = self._rpeaks_ok.copy()
-        t0 = self._analysis_t_start
-        t1 = self._analysis_t_end
-        if t0 <= 0 and t1 <= 0:
-            return rp          # no window — full signal
-        fs   = self._fs
-        mask = rp / fs >= t0
-        if t1 > 0:
-            mask &= rp / fs <= t1
-        return rp[mask]
+        return self.signal_ctrl.windowed_peaks()
 
     def _apply_analysis_window(self) -> None:
         """Read the analysis window entries and store in _analysis_t_start/_end.
@@ -4283,73 +3756,11 @@ class ECGApp(ctk.CTk):
         Does NOT re-run detection or analysis — the window is applied on
         the next Core Analysis run.
         """
-        if self.ent_analysis_t0 is None or self.ent_analysis_t1 is None:
-            return
-
-        try:
-            t0_raw = self.ent_analysis_t0.get().strip()  # type: ignore[union-attr]
-            t1_raw = self.ent_analysis_t1.get().strip()  # type: ignore[union-attr]
-            t0 = float(t0_raw) if t0_raw else 0.0
-            t1 = float(t1_raw) if t1_raw else 0.0
-        except ValueError:
-            self._set_status("Invalid window — enter numeric values.", RED)
-            return
-
-        # Validate
-        if t1 > 0 and t0 >= t1:
-            self._set_status("La borne de début doit être inférieure à la borne de fin.", RED)
-            return
-        if self._time is not None and t1 > float(self._time[-1]) + 0.1:
-            self._set_status(
-                f"La borne de fin dépasse la durée du signal ({self._time[-1]:.1f} s).", ORANGE)
-
-        self._analysis_t_start = t0
-        self._analysis_t_end   = t1
-
-        # Feedback: count peaks in window
-        if self._rpeaks_ok is not None and self._fs is not None:
-            fs = self._fs
-            t_end_eff = float(self._time[-1]) if (self._time is not None and t1 == 0) else t1
-            mask = (self._rpeaks_ok / fs >= t0)
-            if t1 > 0:
-                mask &= (self._rpeaks_ok / fs <= t1)
-            n = int(mask.sum())
-            dur = (t_end_eff - t0) if t1 > 0 else (float(self._time[-1]) - t0 if self._time is not None else 0)
-            label_txt = (f"✓  {n} peaks  ·  {t0:.1f} s → {t_end_eff:.1f} s  ({dur:.1f} s)"
-                         if t0 > 0 or t1 > 0
-                         else f"✓  {n} peaks  ·  full signal")
-            color = GREEN if n >= 5 else ORANGE
-        else:
-            label_txt = "✓  Window applied — run analysis"
-            color = MUTED
-
-        if self.lbl_analysis_window is not None:
-            self.lbl_analysis_window.configure(  # type: ignore[union-attr]
-                text=label_txt, text_color=color)
-
-        self._set_status(
-            "Analysis window updated — re-run Core Analysis.", BLUE)
+        self.signal_ctrl.apply_analysis_window()
 
     def _reset_analysis_window(self) -> None:
         """Reset analysis window to full signal."""
-        self._analysis_t_start = 0.0
-        self._analysis_t_end   = 0.0
-        if self.ent_analysis_t0 is not None:
-            self.ent_analysis_t0.delete(0, "end")  # type: ignore[union-attr]
-        if self.ent_analysis_t1 is not None:
-            self.ent_analysis_t1.delete(0, "end")  # type: ignore[union-attr]
-        if self.lbl_analysis_window is not None:
-            # Recompute peak count for full signal
-            if self._rpeaks_ok is not None:
-                n = len(self._rpeaks_ok)
-                dur = float(self._time[-1]) if self._time is not None else 0
-                self.lbl_analysis_window.configure(  # type: ignore[union-attr]
-                    text=f"✓  Full signal  ·  {n} peaks  ·  {dur:.1f} s",
-                    text_color=GREEN)
-            else:
-                self.lbl_analysis_window.configure(  # type: ignore[union-attr]
-                    text="", text_color=MUTED)
-        self._set_status("Analysis window reset — full signal.", MUTED)
+        self.signal_ctrl.reset_analysis_window()
 
     def _run_analysis(self) -> None:
         if not NK_AVAILABLE:
@@ -5046,56 +4457,11 @@ class ECGApp(ctk.CTk):
         Returns (t_slice, raw_slice_norm, filt_slice_norm), or None if the
         raw signal isn't loaded yet or the window is too short to filter.
         """
-        if self._signal_raw is None or self._fs is None or self._time is None:
-            return None
-        fs = self._fs
-
-        margin = 1.0  # seconds — absorbs filtfilt edge transients
-        lo_t = max(0.0, t_start - margin)
-        hi_t = min(float(self._time[-1]), t_end + margin)
-        lo_i = int(lo_t * fs)
-        hi_i = int(hi_t * fs)
-        if hi_i - lo_i < int(0.5 * fs):
-            return None  # too short to filter meaningfully
-
-        seg_raw = np.asarray(self._signal_raw[lo_i:hi_i], dtype=float)
-
-        lp_v         = self._safe_float(self.ent_lp, MouseECG.BP_LO_HZ)
-        hp_v         = self._safe_float(self.ent_hp, MouseECG.BP_HI_HZ)
-        notch_on     = bool(self.sw_notch.get()) if self.sw_notch is not None else False
-        clean_method = self.cb_clean.get() if self.cb_clean is not None else "neurokit"
-
-        seg = seg_raw.copy()
-        try:
-            seg = bandpass(seg, fs, lp_v, hp_v)
-        except Exception as exc:
-            log.debug("filter preview: bandpass skipped — %s", exc)
-        if notch_on:
-            try:
-                seg = notch(seg, fs)
-            except Exception as exc:
-                log.debug("filter preview: notch skipped — %s", exc)
-        try:
-            if nk is not None:
-                seg = nk.ecg_clean(seg, sampling_rate=fs, method=clean_method)
-        except Exception as exc:
-            log.debug("filter preview: ecg_clean skipped — %s", exc)
-
-        seg      = normalize(np.asarray(seg, dtype=float))
-        raw_norm = normalize(seg_raw)
-
-        # Trim the margin back off — only the visible window is returned
-        off0 = int(round((t_start - lo_t) * fs))
-        off1 = off0 + int(round((t_end - t_start) * fs))
-        off1 = min(off1, len(seg), len(raw_norm))
-        off0 = min(off0, off1)
-        t_slice = self._time[lo_i:hi_i][off0:off1]
-        return t_slice, raw_norm[off0:off1], seg[off0:off1]
+        return self.signal_ctrl.compute_filter_preview_segment(t_start, t_end)
 
     def _on_filter_preview_toggle(self) -> None:
         """Toggle the before/after filter overlay and redraw."""
-        self._filter_preview_on = bool(self.sw_filter_preview.get()) if self.sw_filter_preview is not None else False
-        self._draw_detail()
+        self.signal_ctrl.on_filter_preview_toggle()
 
     def _refresh_filter_preview(self) -> None:
         """Recompute the filter-preview overlay with current widget values.
@@ -5105,8 +4471,7 @@ class ECGApp(ctk.CTk):
         only re-evaluated on these discrete commit events, matching how
         the rest of the sidebar (Preview Detection button) already works.
         """
-        if self._filter_preview_on:
-            self._draw_detail()
+        self.signal_ctrl.refresh_filter_preview()
 
     def _draw_detail(self, t_start: float | None = None) -> None:
         """Draw the time-windowed detail view with peak markers.
@@ -5491,21 +4856,7 @@ class ECGApp(ctk.CTk):
 
 
     def _load_path(self, path: str) -> None:
-        if not os.path.exists(path):
-            messagebox.showerror("Not found", f"File not found:\n{path}")
-            return
-        # Full reset before loading a new file so the app looks exactly like
-        # it did at startup — no stale results, plots, or arrhythmia cards
-        # from the previous recording.
-        self._reset_for_new_file()
-        self._filepath = path
-        self._recording_notes = get_notes(path) if _DB_AVAILABLE else ""
-        self.lbl_file.configure(text=os.path.basename(path), text_color=GREEN)  # type: ignore[union-attr]
-        self._add_recent(path)
-        # ── Try to restore a previously saved session ───────────────
-        if self._try_restore_session(path):
-            return   # session restored — skip raw load
-        self._load_raw_only()
+        self.signal_ctrl.load_path(path)
 
     def _reset_for_new_file(self) -> None:
         """Reset ALL analysis state and UI to the startup blank slate.
@@ -5520,163 +4871,7 @@ class ECGApp(ctk.CTk):
         already live in the UI, causing AttributeError on the next snapshot.
         Only data variables are reset here.
         """
-        # ── 1. Data-only state reset (no widget refs) ─────────────────────
-        self._filepath             = None
-        self._signal_raw           = None
-        self._signal_raw_norm      = None
-        self._signal_flt           = None
-        self._time                 = None
-        # _fs intentionally kept (same rig)
-        self._rpeaks_ok            = None
-        self._rpeaks_rej           = None
-        self._all_cands            = None
-        self._all_proms            = None
-        self._thresh_amp           = 0.0
-        self._results              = None
-        self._epoch_df             = None
-        self._rolling_hrv_df       = None
-        self._analysis_t_start      = 0.0
-        self._analysis_t_end        = 0.0
-        if self._hover_after_id is not None:
-            try:
-                self.after_cancel(self._hover_after_id)
-            except Exception:
-                pass
-        self._hover_samp       = None
-        self._hover_samp_near  = False
-        self._hover_after_id   = None
-        self._arrhythmia_events    = []
-        self._arrhythmia_tsv       = ""
-        self._arr_selected_idx     = -1
-        self._arr_nav_pos          = 0.0
-        self._arr_win              = 3.0
-        self._arr_edit_mode        = False
-        self._sig_quality          = None
-        self._artifact_report      = None
-        self._ds_time              = None
-        self._ds_sig               = None
-        self._ds_sig_max           = None
-        self._ds_sig_mid           = None
-        self._ds_raw_sig           = None
-        self._ds_raw_sig_max       = None
-        self._ds_raw_sig_mid       = None
-        self._manual_excluded      = set()
-        self._rpeaks_manual_excl   = None
-        self._manual_added         = set()
-        self._rpeaks_manual_added  = None
-        self._edit_mode            = False
-        self._edit_undo            = []
-        self._edit_redo            = []
-        self._nav_pos              = 0.0
-        self._signal_inverted      = False
-        self._raw_only_loaded      = False
-        self._thr_debounce_id      = None
-        self._annotations          = []
-        self._tsv_store            = {}
-        self._wave_template        = None
-        self._session_dirty        = False
-        self._generation           = getattr(self, "_generation", 0) + 1  # invalidate async workers
-
-        # ── 2. Result plots → placeholder ────────────────────────────────
-        for slot in self._slots.values():
-            try:
-                slot._draw_fn = None
-                slot._show_placeholder()
-            except Exception as e:
-                log.debug("slot placeholder reset failed: %s", e)
-
-        # ── 3. KPI bar ────────────────────────────────────────────────────
-        for lbl in self._kpi.values():
-            try:
-                lbl.configure(text="—", text_color=MUTED)
-            except Exception as e:
-                log.debug("KPI label reset failed: %s", e)
-
-        # ── 4. Status labels ──────────────────────────────────────────────
-        self._set_status("File loaded — run Detection", MUTED)
-        self._set_progress(0, "")
-        if self.lbl_file is not None:
-            self.lbl_file.configure(text="Loading…", text_color=MUTED)  # type: ignore[union-attr]
-
-        # ── 5. Sidebar detection status ───────────────────────────────────
-        if self.lbl_npeaks is not None:
-            self.lbl_npeaks.configure(  # type: ignore[union-attr]
-                text="Run detection", text_color=MUTED)
-
-        # ── 6. Disable per-tab on-demand buttons ─────────────────────────
-        for btn_attr in ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl",
-                         "btn_run_arrhythmia", "btn_save_session"):
-            w = getattr(self, btn_attr, None)
-            if w is not None:
-                try:
-                    w.configure(state="disabled")
-                except Exception as e:
-                    log.debug("widget disable failed: %s", e)
-
-        # ── 7. Per-tab status labels ──────────────────────────────────────
-        if self.lbl_freq_status is not None:
-            self.lbl_freq_status.configure(  # type: ignore[union-attr]
-                text="  Run Core Analysis first", text_color=MUTED)
-        if self.lbl_nonlin_status is not None:
-            self.lbl_nonlin_status.configure(  # type: ignore[union-attr]
-                text="  Run Core Analysis first", text_color=MUTED)
-        if self.lbl_ivl_status is not None:
-            self.lbl_ivl_status.configure(  # type: ignore[union-attr]
-                text="  Run Core Analysis first", text_color=MUTED)
-        if self.lbl_arrhythmia_status is not None:
-            self.lbl_arrhythmia_status.configure(  # type: ignore[union-attr]
-                text="  Run Core Analysis first", text_color=MUTED)
-        if self.lbl_roll_status is not None:
-            self.lbl_roll_status.configure(  # type: ignore[union-attr]
-                text="  Run Core Analysis first", text_color=MUTED)
-
-        # ── 8. Textboxes ──────────────────────────────────────────────────
-        for tb_attr in ("txt_rr", "txt_td", "txt_fd"):
-            tb = getattr(self, tb_attr, None)
-            if tb is not None:
-                try:
-                    self._set_textbox(tb, "")
-                except Exception as e:
-                    log.debug("_set_textbox clear failed: %s", e)
-
-        # ── 9. Arrhythmia event cards ─────────────────────────────────────
-        if self._arr_card_widgets is not None:
-            for w in self._arr_card_widgets:
-                try:
-                    w.destroy()
-                except Exception:
-                    pass
-            self._arr_card_widgets.clear()
-        if self.lbl_arr_event_title is not None:
-            try:
-                self.lbl_arr_event_title.configure(  # type: ignore[union-attr]
-                    text="← Click on an episode", text_color=MUTED)
-            except Exception as e:
-                log.debug("lbl_arr_event_title reset failed: %s", e)
-
-        # ── 9b. Interpretation cards ──────────────────────────────────────
-        # Détruire TOUS les enfants du scroll (groupes + cartes) pour éviter
-        # que des frames grises orphelines restent visibles après un nouveau fichier.
-        # interpretation tab removed — no-op
-        self._interp_cards = {}
-        self._interp_ref_labels = {}
-
-        # ── 10. Session UI ────────────────────────────────────────────────
-        self._update_session_ui(has_session=False)
-
-        # ── 11. Disconnect RR click handler ──────────────────────────────
-        if self._rr_click_cid is not None:
-            try:
-                self._slots["rr"].canvas.mpl_disconnect(self._rr_click_cid)
-            except Exception as e:
-                log.debug("mpl_disconnect (rr_click_cid) failed: %s", e)
-            self._rr_click_cid = None
-
-        # ── 12. Switch to Detection tab so user lands in the right place ──
-        try:
-            self.tabs.set("Detection")
-        except Exception as e:
-            log.debug("tabs.set Detection (reset) failed: %s", e)
+        self.signal_ctrl.reset_for_new_file()
 
     def _try_restore_session(self, path: str) -> bool:
         """If a saved session exists for *path*, offer to restore it.
