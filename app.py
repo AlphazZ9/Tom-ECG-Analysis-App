@@ -80,6 +80,7 @@ from analysis import (
 )
 from wave_template import WaveTemplate, detect_waves_on_beat
 from state import SignalState, DetectionState, AnalysisState, UIState, SessionState
+from navigation_controller import NavigationController
 
 # ── ecg.io ────────────────────────────────────────────────────────────────────
 from loaders import (
@@ -235,6 +236,8 @@ class ECGApp(ctk.CTk):
         self.analysis = AnalysisState()
         self.ui = UIState()
         self.session = SessionState()
+
+        self.nav_ctrl = NavigationController(self)
 
         self._batch_bc_outdir: ctk.CTkEntry
         self._batch_bc_channel: ctk.CTkEntry
@@ -2910,48 +2913,7 @@ class ECGApp(ctk.CTk):
 
     def _select_arrhythmia_event(self, idx: int) -> None:
         """Highlight selected card and load the ECG window for this event."""
-        events = self._arrhythmia_events
-        if not events or idx < 0 or idx >= len(events):
-            return
-
-        # Highlight selected card, reset others
-        for i, w in enumerate(self._arr_card_widgets):
-            try:
-                w.configure(border_color=BLUE_DARK if i == idx else BORDER)
-            except Exception as e:
-                log.debug("card border_color configure failed: %s", e)
-
-        self._arr_selected_idx = idx
-        ev = events[idx]
-
-        # Compute window: centre on episode with ±1.5 s padding
-        try:
-            win = float(self.ent_arr_win.get())
-        except Exception:
-            win = 3.0
-        self._arr_win = max(0.5, win)
-
-        padding = max(self._arr_win * 0.25, 0.5)
-        ep_dur  = max(ev.duration_s, 0.1)
-        t_centre = ev.t_start + ep_dur / 2
-        t_start  = max(0.0, t_centre - self._arr_win / 2)
-        if self._time is not None:
-            t_start = min(t_start, max(0.0, float(self._time[-1]) - self._arr_win))
-        # Expand window if episode is longer than current win
-        if ep_dur + 2 * padding > self._arr_win:
-            self._arr_win = min(ep_dur + 2 * padding, 30.0)
-            t_start = max(0.0, ev.t_start - padding)
-
-        self._arr_nav_pos = t_start
-        self._draw_arr_detail()
-
-        # Update title bar
-        sev_icon = {"alert": "🔴", "warning": "🟠", "info": "🔵"}.get(ev.severity, "·")
-        self.lbl_arr_event_title.configure(  # type: ignore[union-attr]
-            text=f"{sev_icon}  #{idx+1}  {ev.kind.replace('_',' ').title()}"
-                 f"  —  {ev.t_start:.2f} s → {ev.t_end:.2f} s  ({ev.hr_mean:.0f} bpm)",
-            text_color=TEXT,
-        )
+        self.nav_ctrl.select_arrhythmia_event(idx)
 
     def _draw_arr_detail(self) -> None:
         """Draw ECG strip for the selected arrhythmia event, with editable R peaks."""
@@ -3197,12 +3159,7 @@ class ECGApp(ctk.CTk):
     # ── ◀ ▶ navigation ───────────────────────────────────────
 
     def _arr_navigate(self, direction: int) -> None:
-        if self._time is None:
-            return
-        step = self._arr_win * 0.7
-        max_t = max(0.0, float(self._time[-1]) - self._arr_win)
-        self._arr_nav_pos = max(0.0, min(max_t, self._arr_nav_pos + direction * step))
-        self._draw_arr_detail()
+        self.nav_ctrl.arr_navigate(direction)
 
     # ── sync undo/redo buttons in arrhythmia tab ─────────────
 
@@ -4114,11 +4071,11 @@ class ECGApp(ctk.CTk):
 
     def _on_overview_click(self, event) -> None:
         """Stub — overview removed."""
-        pass
+        self.nav_ctrl.on_overview_click(event)
 
     def _on_overview_scroll(self, event) -> None:
         """Stub — overview removed."""
-        pass
+        self.nav_ctrl.on_overview_scroll(event)
 
     # ── Detail scroll-wheel zoom ──────────────────────────────
 
@@ -4132,41 +4089,7 @@ class ECGApp(ctk.CTk):
         The y-axis is intentionally unchanged — vertical zoom is handled by
         the matplotlib toolbar's Zoom-to-rectangle tool.
         """
-        if event.xdata is None or self._time is None:
-            return
-
-        ax = event.inaxes
-        if ax is None:
-            return
-
-        x_min, x_max = ax.get_xlim()
-        cur_win  = x_max - x_min
-        cursor_x = float(event.xdata)
-        factor   = 0.8 if event.button == "up" else 1.25   # up = zoom in
-
-        new_win  = max(0.5, min(float(self._time[-1]), cur_win * factor))
-        # Keep the point under the cursor stationary
-        frac     = (cursor_x - x_min) / max(cur_win, 1e-6)
-        new_xmin = cursor_x - frac * new_win
-        new_xmax = new_xmin + new_win
-        # Clamp to signal bounds
-        new_xmin = max(0.0, new_xmin)
-        new_xmax = min(float(self._time[-1]), new_xmin + new_win)
-        new_xmin = new_xmax - new_win   # re-apply after xmax clamp
-
-        # Update nav state so subsequent arrow navigation is coherent
-        self._nav_pos = max(0.0, new_xmin)
-        self._sync_nav_pos_entry()
-
-        # Update the window entry box (fire-and-forget; it is only read on the next draw)
-        try:
-            self.ent_window.delete(0, "end")
-            self.ent_window.insert(0, f"{new_win:.2f}")
-        except Exception as _exc:
-            log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 5262, _exc)
-
-        ax.set_xlim(new_xmin, new_xmax)
-        self._slots["detail"].canvas.draw_idle()
+        self.nav_ctrl.on_detail_scroll(event)
 
     # ── Undo / Redo for manual peak edits ────────────────────
 
@@ -6091,90 +6014,30 @@ class ECGApp(ctk.CTk):
 
     def _kb_navigate(self, direction: int) -> None:
         """Keyboard left/right arrow navigation — only active on Detection tab."""
-        try:
-            if self.tabs.get() != "Detection":
-                return
-        except Exception:
-            return
-        self._navigate(direction)
+        self.nav_ctrl.kb_navigate(direction)
 
     def _navigate(self, direction: int) -> None:
         """Shift the detail view left/right by 80 % of the window width."""
-        if self._time is None or len(self._time) == 0:
-            return
-        try:
-            win = float(self.ent_window.get())
-            if not (0 < win < 1e6):
-                win = 10.0
-        except (ValueError, TypeError):
-            win = 10.0
-        max_start  = float(self._time[-1]) - win
-        self._nav_pos = max(0.0, min(max_start, self._nav_pos + direction * win * 0.8))
-        self._sync_nav_pos_entry()
-        self._draw_detail()
+        self.nav_ctrl.navigate(direction)
 
     def _navigate_big(self, direction: int) -> None:
         """Jump by 10× the current window width."""
-        if self._time is None or len(self._time) == 0:
-            return
-        try:
-            win = float(self.ent_window.get())
-            if not (0 < win < 1e6):
-                win = 10.0
-        except (ValueError, TypeError):
-            win = 10.0
-        max_start = float(self._time[-1]) - win
-        self._nav_pos = max(0.0, min(max_start, self._nav_pos + direction * win * 10.0))
-        self._sync_nav_pos_entry()
-        self._draw_detail()
+        self.nav_ctrl.navigate_big(direction)
 
     def _nav_reset(self) -> None:
-        self._nav_pos = 0.0
-        self._sync_nav_pos_entry()
-        self._draw_detail()
+        self.nav_ctrl.nav_reset()
 
     def _nav_end(self) -> None:
         """Jump to the end of the signal."""
-        if self._time is None or len(self._time) == 0:
-            return
-        try:
-            win = float(self.ent_window.get())
-            if not (0 < win < 1e6):
-                win = 10.0
-        except (ValueError, TypeError):
-            win = 10.0
-        self._nav_pos = max(0.0, float(self._time[-1]) - win)
-        self._sync_nav_pos_entry()
-        self._draw_detail()
+        self.nav_ctrl.nav_end()
 
     def _nav_goto(self) -> None:
         """Jump to the time entered in the position field."""
-        if self._time is None or self.ent_nav_pos is None:
-            return
-        try:
-            t_target = float(self.ent_nav_pos.get().replace(",", "."))  # type: ignore[union-attr]
-        except (ValueError, AttributeError):
-            return
-        try:
-            win = float(self.ent_window.get())
-            if not (0 < win < 1e6):
-                win = 10.0
-        except (ValueError, TypeError):
-            win = 10.0
-        max_start = float(self._time[-1]) - win
-        self._nav_pos = max(0.0, min(max_start, t_target))
-        self._sync_nav_pos_entry()
-        self._draw_detail()
+        self.nav_ctrl.nav_goto()
 
     def _sync_nav_pos_entry(self) -> None:
         """Update the position entry widget to reflect _nav_pos."""
-        if self.ent_nav_pos is None:
-            return
-        try:
-            self.ent_nav_pos.delete(0, "end")  # type: ignore[union-attr]
-            self.ent_nav_pos.insert(0, f"{self._nav_pos:.3f}")  # type: ignore[union-attr]
-        except Exception as e:
-            log.debug("ent_nav_pos update failed: %s", e)
+        self.nav_ctrl.sync_nav_pos_entry()
 
     # ════════════════════════════════════════════════════════
     #  RESULT PLOTS
