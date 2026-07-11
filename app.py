@@ -79,6 +79,7 @@ from analysis import (
     analyse_core, analyse_hrv_freq, analyse_hrv_nonlinear, analyse_intervals,
 )
 from wave_template import WaveTemplate, detect_waves_on_beat
+from state import SignalState, DetectionState, AnalysisState, UIState, SessionState
 
 # ── ecg.io ────────────────────────────────────────────────────────────────────
 from loaders import (
@@ -220,100 +221,24 @@ class ECGApp(ctk.CTk):
             log.debug("App icon not loaded: %s", exc)
 
     def _init_state(self) -> None:
-        """Initialise all instance variables that hold application state."""
-        # File
-        self._filepath:    Optional[str]          = None
-        self._recent:      list[str]               = []
+        """Initialise all instance variables that hold application state.
 
-        # Signal data
-        self._signal_raw:      Optional[np.ndarray]   = None   # raw float64 (after time-crop)
-        self._signal_raw_norm: Optional[np.ndarray]   = None   # zero-mean/unit-var raw (display)
-        self._signal_flt:      Optional[np.ndarray]   = None   # filtered + normalised
-        self._time:            Optional[np.ndarray]   = None
-        self._fs:              int                     = MouseECG.FS_DEFAULT
-        self._peak_distance_ms: float                  = MouseECG.PEAK_DISTANCE_MS
+        Non-widget state lives in typed dataclasses from state.py (`self.signal`,
+        `self.detection`, `self.analysis`, `self.ui`, `self.session`). The
+        "Legacy state shims" property block right after this method keeps every
+        existing `self._xxx` access (inside this class and in dialogs.py /
+        wave_editor.py / models.py) working unchanged. New code should read/write
+        the dataclasses directly.
+        """
+        self.signal = SignalState()
+        self.detection = DetectionState()
+        self.analysis = AnalysisState()
+        self.ui = UIState()
+        self.session = SessionState()
 
-        # Peak detection
-        self._rpeaks_ok:   Optional[np.ndarray]   = None   # accepted peaks
-        self._rpeaks_rej:  Optional[np.ndarray]   = None   # rejected candidates
-        self._all_cands:   Optional[np.ndarray]   = None   # all candidates (post-polarity fix)
-        self._all_proms:   Optional[np.ndarray]   = None   # corresponding prominences
-        self._thresh_amp:  float                   = 0.0
-
-        # Analysis results
-        self._results:     Optional[dict]          = None
-        self._epoch_df:    Optional[pd.DataFrame]  = None
-        self._rolling_hrv_df: Optional[pd.DataFrame] = None
-        self._arrhythmia_events: "list" = []
-        self._arrhythmia_tsv:   str   = ""
-        self._arr_selected_idx: int   = -1      # index into _arrhythmia_events
-        self._arr_nav_pos:      float = 0.0     # current t_start in arrhythmia ECG view
-        self._arr_win:          float = 3.0     # seconds shown in arrhythmia ECG view
-        self._arr_edit_mode:    bool  = False   # edit mode specific to arrhythmia tab   # rolling HRV timeline
-        self._sig_quality: Optional[int]           = None
-        self._beat_nav_cid: Optional[int]          = None   # mpl event ID for beat navigator
-        self._recording_notes: str                  = ""     # freetext notes for this recording
         self._batch_bc_outdir: ctk.CTkEntry
         self._batch_bc_channel: ctk.CTkEntry
         self._batch_bc_workers: ctk.CTkEntry
-        self._last_seg_a:  "Optional[dict]"         = None   # last Compare A result
-        self._last_seg_b:  "Optional[dict]"         = None   # last Compare B result
-        self._artifact_report: Optional[dict]      = None
-        # Experimental context — key into EXPERIMENTAL_CONTEXTS
-        self._exp_context: str = "telemetry_awake"
-
-        # Display cache — downsampled arrays, invalidated on file load
-        self._ds_time:     Optional[np.ndarray]   = None
-        # ── Time annotations: list of dicts {t_start, t_end, label, color} ──
-        self._annotations: "list[dict]" = []
-        # ── TSV clipboard store: keyed by widget id, value = TSV string ──────
-        self._tsv_store:   "dict[int, str]" = {}
-        self._ds_sig:         Optional[np.ndarray]  = None  # envelope mins (filtered)
-        self._ds_sig_max:     Optional[np.ndarray]  = None  # envelope maxs (filtered)
-        self._ds_sig_mid:     Optional[np.ndarray]  = None  # envelope midline (filtered)
-        self._ds_raw_sig:     Optional[np.ndarray]  = None  # envelope mins (raw)
-        self._ds_raw_sig_max: Optional[np.ndarray]  = None  # envelope maxs (raw)
-        self._ds_raw_sig_mid: Optional[np.ndarray]  = None  # envelope midline (raw)
-
-        # Manual peak exclusion
-        self._manual_excluded:  set[int]                = set()  # sample indices excluded by user
-        self._rpeaks_manual_excl: Optional[np.ndarray] = None   # view-ready array of excl. peaks
-        self._manual_added:     set[int]                = set()  # sample indices added by user
-        self._rpeaks_manual_added: Optional[np.ndarray] = None  # view-ready array of added peaks
-        self._edit_mode:        bool                    = False  # click-to-exclude active
-        self._edit_free_placement: bool                 = False  # bypass proximity constraint
-        # Undo/Redo stacks — each entry: (frozenset excluded, frozenset added)
-        self._edit_undo: "list[tuple[frozenset, frozenset]]" = []
-        self._edit_redo: "list[tuple[frozenset, frozenset]]" = []
-        self._EDIT_UNDO_LIMIT = 50
-
-        # ── Analysis window (independent from signal crop) ───────────────────
-        # Allows the user to restrict HRV analysis to a sub-range of the
-        # already-detected signal without re-running Preview Detection.
-        # 0.0 = "use full signal" for both values.
-        self._analysis_t_start: float = 0.0
-        self._analysis_t_end:   float = 0.0
-
-        # Hover preview state (edit mode — shows snapped peak position on mouse move)
-        self._hover_samp:       Optional[int]           = None   # snapped sample under cursor
-        self._hover_samp_near:  bool                    = False  # True = replaces nearby peak
-        self._hover_motion_cid: Optional[int]           = None   # mpl event connection id
-        self._hover_after_id:   "str | None"            = None   # motion debounce handle
-
-        # UI state
-        self._nav_pos:          float                   = 0.0
-        self._dark_mode:        bool                    = False
-        self._show_raw:         bool                    = True   # raw/filtered toggle
-        self._no_filter_mode:   bool                    = True   # default: detect on raw signal
-        self._signal_inverted:  bool                    = False  # True if polarity was auto-flipped
-        self._thr_debounce_id:  str | None              = None   # slider debounce handle
-        # Raw-only load state — file just opened, no filtering/detection run yet.
-        # True right after _load_raw_only(); cleared once Preview Detection runs.
-        self._raw_only_loaded:  bool                    = False
-        # Filter preview (before/after overlay) — computed on-demand for the
-        # currently visible detail window only, never touches signal_flt or
-        # any detection state. See _compute_filter_preview_segment().
-        self._filter_preview_on: bool                   = False
 
         # Widget registries (populated in _build)
         self._slots:       dict[str, CanvasSlot]   = {}
@@ -368,13 +293,6 @@ class ECGApp(ctk.CTk):
         self.btn_lang:          "Optional[ctk.CTkButton]"    = None
         self.cb_qtc_formula:    "Optional[ctk.CTkComboBox]"  = None
         self.cb_freq_band:      "Optional[ctk.CTkComboBox]"  = None   # HRV band preset
-        # Data state (not widgets — prevent AttributeError in early-lifecycle methods)
-        self._wave_template:    "Optional[WaveTemplate]"   = None
-        self._session_dirty:    bool                        = False
-        # matplotlib event connection id for RR click-to-navigate
-        self._rr_click_cid:     "Optional[int]"             = None
-        # y-axis zoom cache for overview (cleared on new file)
-        self._ov_ylim:          "Optional[tuple]"           = None
         # Sidebar / detection tab widgets (forward-declared)
         self.lbl_npeaks:           "Optional[ctk.CTkLabel]"              = None
         self.btn_review_art:       "Optional[ctk.CTkButton]"             = None
@@ -396,18 +314,512 @@ class ECGApp(ctk.CTk):
         self._interp_ref_labels: "dict[str, ctk.CTkLabel]" = {}
         # HRV unified tab internal state
         self._hrv_subframes:     "dict[str, ctk.CTkFrame]" = {}
-        self._hrv_current_view:  str = "RR / HR"
         self._hrv_seg:           "Optional[ctk.CTkSegmentedButton]" = None
         self._hrv_content_area:  "Optional[ctk.CTkFrame]"           = None
-        self._ctx_keys:          list = []
         # Summary KPI label widgets (populated in _build_tab_summary)
         self._sum_kpi_vals:      "dict[str, ctk.CTkLabel]" = {}
-        # Track operation start time for elapsed time display
-        self._operation_start_time: "Optional[float]" = None
-        # UI batch updates (for session restore)
-        self._ui_update_batch:   "list[tuple]"               = []
-        # Figure cache (for session restore)
-        self._figure_cache:      "dict"                       = {}
+
+    # ─── Legacy state shims ───────────────────────────────────────────────
+    # Backward-compatible properties for the old flat self._xxx attributes,
+    # now held in state.py dataclasses. Every existing method body in this
+    # class, plus the sibling modules that reach into an ECGApp instance
+    # (dialogs.py: _rebuild_ui/_annotations/_time/_session_dirty/_draw_detail/
+    # _update_ann_count; wave_editor.py: _wave_template; models.py:
+    # _peak_distance_ms/_safe_float), keep working unchanged through these.
+    # New/extracted code should read and write self.signal/.detection/
+    # .analysis/.ui/.session directly instead of these shims.
+
+    # -- SignalState --
+    @property
+    def _filepath(self) -> "Optional[str]":
+        return self.signal.filepath
+    @_filepath.setter
+    def _filepath(self, value: "Optional[str]") -> None:
+        self.signal.filepath = value
+
+    @property
+    def _signal_raw(self) -> "Optional[np.ndarray]":
+        return self.signal.raw
+    @_signal_raw.setter
+    def _signal_raw(self, value: "Optional[np.ndarray]") -> None:
+        self.signal.raw = value
+
+    @property
+    def _signal_raw_norm(self) -> "Optional[np.ndarray]":
+        return self.signal.raw_norm
+    @_signal_raw_norm.setter
+    def _signal_raw_norm(self, value: "Optional[np.ndarray]") -> None:
+        self.signal.raw_norm = value
+
+    @property
+    def _signal_flt(self) -> "Optional[np.ndarray]":
+        return self.signal.filtered
+    @_signal_flt.setter
+    def _signal_flt(self, value: "Optional[np.ndarray]") -> None:
+        self.signal.filtered = value
+
+    @property
+    def _time(self) -> "Optional[np.ndarray]":
+        return self.signal.time
+    @_time.setter
+    def _time(self, value: "Optional[np.ndarray]") -> None:
+        self.signal.time = value
+
+    @property
+    def _fs(self) -> int:
+        return self.signal.fs
+    @_fs.setter
+    def _fs(self, value: int) -> None:
+        self.signal.fs = value
+
+    @property
+    def _peak_distance_ms(self) -> float:
+        return self.signal.peak_distance_ms
+    @_peak_distance_ms.setter
+    def _peak_distance_ms(self, value: float) -> None:
+        self.signal.peak_distance_ms = value
+
+    @property
+    def _raw_only_loaded(self) -> bool:
+        return self.signal.raw_only_loaded
+    @_raw_only_loaded.setter
+    def _raw_only_loaded(self, value: bool) -> None:
+        self.signal.raw_only_loaded = value
+
+    @property
+    def _no_filter_mode(self) -> bool:
+        return self.signal.no_filter_mode
+    @_no_filter_mode.setter
+    def _no_filter_mode(self, value: bool) -> None:
+        self.signal.no_filter_mode = value
+
+    @property
+    def _signal_inverted(self) -> bool:
+        return self.signal.inverted
+    @_signal_inverted.setter
+    def _signal_inverted(self, value: bool) -> None:
+        self.signal.inverted = value
+
+    # -- DetectionState --
+    @property
+    def _rpeaks_ok(self) -> "Optional[np.ndarray]":
+        return self.detection.rpeaks_ok
+    @_rpeaks_ok.setter
+    def _rpeaks_ok(self, value: "Optional[np.ndarray]") -> None:
+        self.detection.rpeaks_ok = value
+
+    @property
+    def _rpeaks_rej(self) -> "Optional[np.ndarray]":
+        return self.detection.rpeaks_rej
+    @_rpeaks_rej.setter
+    def _rpeaks_rej(self, value: "Optional[np.ndarray]") -> None:
+        self.detection.rpeaks_rej = value
+
+    @property
+    def _all_cands(self) -> "Optional[np.ndarray]":
+        return self.detection.all_candidates
+    @_all_cands.setter
+    def _all_cands(self, value: "Optional[np.ndarray]") -> None:
+        self.detection.all_candidates = value
+
+    @property
+    def _all_proms(self) -> "Optional[np.ndarray]":
+        return self.detection.all_prominences
+    @_all_proms.setter
+    def _all_proms(self, value: "Optional[np.ndarray]") -> None:
+        self.detection.all_prominences = value
+
+    @property
+    def _thresh_amp(self) -> float:
+        return self.detection.thresh_amp
+    @_thresh_amp.setter
+    def _thresh_amp(self, value: float) -> None:
+        self.detection.thresh_amp = value
+
+    @property
+    def _sig_quality(self) -> "Optional[int]":
+        return self.detection.sig_quality
+    @_sig_quality.setter
+    def _sig_quality(self, value: "Optional[int]") -> None:
+        self.detection.sig_quality = value
+
+    @property
+    def _manual_excluded(self) -> "set[int]":
+        return self.detection.manual_excluded
+    @_manual_excluded.setter
+    def _manual_excluded(self, value: "set[int]") -> None:
+        self.detection.manual_excluded = value
+
+    @property
+    def _rpeaks_manual_excl(self) -> "Optional[np.ndarray]":
+        return self.detection.rpeaks_manual_excl
+    @_rpeaks_manual_excl.setter
+    def _rpeaks_manual_excl(self, value: "Optional[np.ndarray]") -> None:
+        self.detection.rpeaks_manual_excl = value
+
+    @property
+    def _manual_added(self) -> "set[int]":
+        return self.detection.manual_added
+    @_manual_added.setter
+    def _manual_added(self, value: "set[int]") -> None:
+        self.detection.manual_added = value
+
+    @property
+    def _rpeaks_manual_added(self) -> "Optional[np.ndarray]":
+        return self.detection.rpeaks_manual_added
+    @_rpeaks_manual_added.setter
+    def _rpeaks_manual_added(self, value: "Optional[np.ndarray]") -> None:
+        self.detection.rpeaks_manual_added = value
+
+    @property
+    def _edit_mode(self) -> bool:
+        return self.detection.edit_mode
+    @_edit_mode.setter
+    def _edit_mode(self, value: bool) -> None:
+        self.detection.edit_mode = value
+
+    @property
+    def _edit_free_placement(self) -> bool:
+        return self.detection.edit_free_placement
+    @_edit_free_placement.setter
+    def _edit_free_placement(self, value: bool) -> None:
+        self.detection.edit_free_placement = value
+
+    @property
+    def _edit_undo(self) -> "list[tuple[frozenset, frozenset]]":
+        return self.detection.edit_undo
+    @_edit_undo.setter
+    def _edit_undo(self, value: "list[tuple[frozenset, frozenset]]") -> None:
+        self.detection.edit_undo = value
+
+    @property
+    def _edit_redo(self) -> "list[tuple[frozenset, frozenset]]":
+        return self.detection.edit_redo
+    @_edit_redo.setter
+    def _edit_redo(self, value: "list[tuple[frozenset, frozenset]]") -> None:
+        self.detection.edit_redo = value
+
+    @property
+    def _EDIT_UNDO_LIMIT(self) -> int:
+        return DetectionState.EDIT_UNDO_LIMIT
+
+    @property
+    def _hover_samp(self) -> "Optional[int]":
+        return self.detection.hover_samp
+    @_hover_samp.setter
+    def _hover_samp(self, value: "Optional[int]") -> None:
+        self.detection.hover_samp = value
+
+    @property
+    def _hover_samp_near(self) -> bool:
+        return self.detection.hover_samp_near
+    @_hover_samp_near.setter
+    def _hover_samp_near(self, value: bool) -> None:
+        self.detection.hover_samp_near = value
+
+    # -- AnalysisState --
+    @property
+    def _results(self) -> "Optional[dict]":
+        return self.analysis.results
+    @_results.setter
+    def _results(self, value: "Optional[dict]") -> None:
+        self.analysis.results = value
+
+    @property
+    def _epoch_df(self) -> "Optional[pd.DataFrame]":
+        return self.analysis.epoch_df
+    @_epoch_df.setter
+    def _epoch_df(self, value: "Optional[pd.DataFrame]") -> None:
+        self.analysis.epoch_df = value
+
+    @property
+    def _rolling_hrv_df(self) -> "Optional[pd.DataFrame]":
+        return self.analysis.rolling_hrv_df
+    @_rolling_hrv_df.setter
+    def _rolling_hrv_df(self, value: "Optional[pd.DataFrame]") -> None:
+        self.analysis.rolling_hrv_df = value
+
+    @property
+    def _arrhythmia_events(self) -> "list":
+        return self.analysis.arrhythmia_events
+    @_arrhythmia_events.setter
+    def _arrhythmia_events(self, value: "list") -> None:
+        self.analysis.arrhythmia_events = value
+
+    @property
+    def _arrhythmia_tsv(self) -> str:
+        return self.analysis.arrhythmia_tsv
+    @_arrhythmia_tsv.setter
+    def _arrhythmia_tsv(self, value: str) -> None:
+        self.analysis.arrhythmia_tsv = value
+
+    @property
+    def _arr_selected_idx(self) -> int:
+        return self.analysis.arr_selected_idx
+    @_arr_selected_idx.setter
+    def _arr_selected_idx(self, value: int) -> None:
+        self.analysis.arr_selected_idx = value
+
+    @property
+    def _arr_nav_pos(self) -> float:
+        return self.analysis.arr_nav_pos
+    @_arr_nav_pos.setter
+    def _arr_nav_pos(self, value: float) -> None:
+        self.analysis.arr_nav_pos = value
+
+    @property
+    def _arr_win(self) -> float:
+        return self.analysis.arr_win
+    @_arr_win.setter
+    def _arr_win(self, value: float) -> None:
+        self.analysis.arr_win = value
+
+    @property
+    def _arr_edit_mode(self) -> bool:
+        return self.analysis.arr_edit_mode
+    @_arr_edit_mode.setter
+    def _arr_edit_mode(self, value: bool) -> None:
+        self.analysis.arr_edit_mode = value
+
+    @property
+    def _last_seg_a(self) -> "Optional[dict]":
+        return self.analysis.last_seg_a
+    @_last_seg_a.setter
+    def _last_seg_a(self, value: "Optional[dict]") -> None:
+        self.analysis.last_seg_a = value
+
+    @property
+    def _last_seg_b(self) -> "Optional[dict]":
+        return self.analysis.last_seg_b
+    @_last_seg_b.setter
+    def _last_seg_b(self, value: "Optional[dict]") -> None:
+        self.analysis.last_seg_b = value
+
+    @property
+    def _artifact_report(self) -> "Optional[dict]":
+        return self.analysis.artifact_report
+    @_artifact_report.setter
+    def _artifact_report(self, value: "Optional[dict]") -> None:
+        self.analysis.artifact_report = value
+
+    @property
+    def _exp_context(self) -> str:
+        return self.analysis.exp_context
+    @_exp_context.setter
+    def _exp_context(self, value: str) -> None:
+        self.analysis.exp_context = value
+
+    @property
+    def _analysis_t_start(self) -> float:
+        return self.analysis.t_start
+    @_analysis_t_start.setter
+    def _analysis_t_start(self, value: float) -> None:
+        self.analysis.t_start = value
+
+    @property
+    def _analysis_t_end(self) -> float:
+        return self.analysis.t_end
+    @_analysis_t_end.setter
+    def _analysis_t_end(self, value: float) -> None:
+        self.analysis.t_end = value
+
+    @property
+    def _annotations(self) -> "list[dict]":
+        return self.analysis.annotations
+    @_annotations.setter
+    def _annotations(self, value: "list[dict]") -> None:
+        self.analysis.annotations = value
+
+    @property
+    def _wave_template(self) -> "Optional[WaveTemplate]":
+        return self.analysis.wave_template
+    @_wave_template.setter
+    def _wave_template(self, value: "Optional[WaveTemplate]") -> None:
+        self.analysis.wave_template = value
+
+    # -- UIState --
+    @property
+    def _nav_pos(self) -> float:
+        return self.ui.nav_pos
+    @_nav_pos.setter
+    def _nav_pos(self, value: float) -> None:
+        self.ui.nav_pos = value
+
+    @property
+    def _dark_mode(self) -> bool:
+        return self.ui.dark_mode
+    @_dark_mode.setter
+    def _dark_mode(self, value: bool) -> None:
+        self.ui.dark_mode = value
+
+    @property
+    def _show_raw(self) -> bool:
+        return self.ui.show_raw
+    @_show_raw.setter
+    def _show_raw(self, value: bool) -> None:
+        self.ui.show_raw = value
+
+    @property
+    def _filter_preview_on(self) -> bool:
+        return self.ui.filter_preview_on
+    @_filter_preview_on.setter
+    def _filter_preview_on(self, value: bool) -> None:
+        self.ui.filter_preview_on = value
+
+    @property
+    def _thr_debounce_id(self) -> "str | None":
+        return self.ui.thr_debounce_id
+    @_thr_debounce_id.setter
+    def _thr_debounce_id(self, value: "str | None") -> None:
+        self.ui.thr_debounce_id = value
+
+    @property
+    def _hover_motion_cid(self) -> "Optional[int]":
+        return self.ui.hover_motion_cid
+    @_hover_motion_cid.setter
+    def _hover_motion_cid(self, value: "Optional[int]") -> None:
+        self.ui.hover_motion_cid = value
+
+    @property
+    def _hover_after_id(self) -> "str | None":
+        return self.ui.hover_after_id
+    @_hover_after_id.setter
+    def _hover_after_id(self, value: "str | None") -> None:
+        self.ui.hover_after_id = value
+
+    @property
+    def _beat_nav_cid(self) -> "Optional[int]":
+        return self.ui.beat_nav_cid
+    @_beat_nav_cid.setter
+    def _beat_nav_cid(self, value: "Optional[int]") -> None:
+        self.ui.beat_nav_cid = value
+
+    @property
+    def _rr_click_cid(self) -> "Optional[int]":
+        return self.ui.rr_click_cid
+    @_rr_click_cid.setter
+    def _rr_click_cid(self, value: "Optional[int]") -> None:
+        self.ui.rr_click_cid = value
+
+    @property
+    def _ov_ylim(self) -> "Optional[tuple]":
+        return self.ui.ov_ylim
+    @_ov_ylim.setter
+    def _ov_ylim(self, value: "Optional[tuple]") -> None:
+        self.ui.ov_ylim = value
+
+    @property
+    def _hrv_current_view(self) -> str:
+        return self.ui.hrv_current_view
+    @_hrv_current_view.setter
+    def _hrv_current_view(self, value: str) -> None:
+        self.ui.hrv_current_view = value
+
+    @property
+    def _ctx_keys(self) -> "list":
+        return self.ui.ctx_keys
+    @_ctx_keys.setter
+    def _ctx_keys(self, value: "list") -> None:
+        self.ui.ctx_keys = value
+
+    @property
+    def _operation_start_time(self) -> "Optional[float]":
+        return self.ui.operation_start_time
+    @_operation_start_time.setter
+    def _operation_start_time(self, value: "Optional[float]") -> None:
+        self.ui.operation_start_time = value
+
+    @property
+    def _ui_update_batch(self) -> "list[tuple]":
+        return self.ui.ui_update_batch
+    @_ui_update_batch.setter
+    def _ui_update_batch(self, value: "list[tuple]") -> None:
+        self.ui.ui_update_batch = value
+
+    @property
+    def _figure_cache(self) -> "dict":
+        return self.ui.figure_cache
+    @_figure_cache.setter
+    def _figure_cache(self, value: "dict") -> None:
+        self.ui.figure_cache = value
+
+    @property
+    def _tsv_store(self) -> "dict[int, str]":
+        return self.ui.tsv_store
+    @_tsv_store.setter
+    def _tsv_store(self, value: "dict[int, str]") -> None:
+        self.ui.tsv_store = value
+
+    @property
+    def _ds_time(self) -> "Optional[np.ndarray]":
+        return self.ui.ds_time
+    @_ds_time.setter
+    def _ds_time(self, value: "Optional[np.ndarray]") -> None:
+        self.ui.ds_time = value
+
+    @property
+    def _ds_sig(self) -> "Optional[np.ndarray]":
+        return self.ui.ds_sig
+    @_ds_sig.setter
+    def _ds_sig(self, value: "Optional[np.ndarray]") -> None:
+        self.ui.ds_sig = value
+
+    @property
+    def _ds_sig_max(self) -> "Optional[np.ndarray]":
+        return self.ui.ds_sig_max
+    @_ds_sig_max.setter
+    def _ds_sig_max(self, value: "Optional[np.ndarray]") -> None:
+        self.ui.ds_sig_max = value
+
+    @property
+    def _ds_sig_mid(self) -> "Optional[np.ndarray]":
+        return self.ui.ds_sig_mid
+    @_ds_sig_mid.setter
+    def _ds_sig_mid(self, value: "Optional[np.ndarray]") -> None:
+        self.ui.ds_sig_mid = value
+
+    @property
+    def _ds_raw_sig(self) -> "Optional[np.ndarray]":
+        return self.ui.ds_raw_sig
+    @_ds_raw_sig.setter
+    def _ds_raw_sig(self, value: "Optional[np.ndarray]") -> None:
+        self.ui.ds_raw_sig = value
+
+    @property
+    def _ds_raw_sig_max(self) -> "Optional[np.ndarray]":
+        return self.ui.ds_raw_sig_max
+    @_ds_raw_sig_max.setter
+    def _ds_raw_sig_max(self, value: "Optional[np.ndarray]") -> None:
+        self.ui.ds_raw_sig_max = value
+
+    @property
+    def _ds_raw_sig_mid(self) -> "Optional[np.ndarray]":
+        return self.ui.ds_raw_sig_mid
+    @_ds_raw_sig_mid.setter
+    def _ds_raw_sig_mid(self, value: "Optional[np.ndarray]") -> None:
+        self.ui.ds_raw_sig_mid = value
+
+    # -- SessionState --
+    @property
+    def _recent(self) -> "list[str]":
+        return self.session.recent_files
+    @_recent.setter
+    def _recent(self, value: "list[str]") -> None:
+        self.session.recent_files = value
+
+    @property
+    def _session_dirty(self) -> bool:
+        return self.session.dirty
+    @_session_dirty.setter
+    def _session_dirty(self, value: bool) -> None:
+        self.session.dirty = value
+
+    @property
+    def _recording_notes(self) -> str:
+        return self.session.recording_notes
+    @_recording_notes.setter
+    def _recording_notes(self, value: str) -> None:
+        self.session.recording_notes = value
 
     def _batch_ui_update(self, widget: ctk.CTkBaseClass, **kwargs) -> None:
         """Batch UI updates to reduce flicker during session restore."""
