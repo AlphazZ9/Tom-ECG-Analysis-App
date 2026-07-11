@@ -74,7 +74,7 @@ class SessionController:
             f"  Saved:  {saved_at}\n"
             f"  Beats:  {n_beats}\n\n"
             f"Restore it?  (No = load raw signal — click Preview Detection to re-run)",
-            parent=self,
+            parent=self.app,
         )
         if not answer:
             self.update_session_ui(has_session=True)
@@ -269,8 +269,8 @@ class SessionController:
         # ── Enable analysis buttons ──────────────────────────────────────
         self.app.btn_save_session.configure(state="normal")  # type: ignore[union-attr]
         for btn_attr in ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl"):
-            if getattr(self, btn_attr, None) is not None:
-                getattr(self, btn_attr).configure(state="normal")
+            if getattr(self.app, btn_attr, None) is not None:
+                getattr(self.app, btn_attr).configure(state="normal")
 
         n_beats = len(self.app.detection.rpeaks_ok) if self.app.detection.rpeaks_ok is not None else 0
         self.app._set_status(
@@ -458,13 +458,13 @@ class SessionController:
                      "ent_epoch", "ent_overlap", "ent_thr", "ent_window",
                      "ent_sg_target_fs", "ent_sg_window_ms"):
             try:
-                s[attr] = getattr(self, attr).get()
+                s[attr] = getattr(self.app, attr).get()
             except Exception:
                 s[attr] = ""
         for attr in ("sw_show_raw", "sw_no_filter", "sw_notch",
                      "sw_artifact", "sw_epoch"):
             try:
-                s[attr] = bool(getattr(self, attr).get())
+                s[attr] = bool(getattr(self.app, attr).get())
             except Exception:
                 s[attr] = False
         try:
@@ -480,7 +480,7 @@ class SessionController:
         except Exception:
             s["cb_det_method"] = "SG + Derivative (10 kHz)"
         try:
-            s["adv_filters_open"] = getattr(self, "_adv_filters_open", False)
+            s["adv_filters_open"] = getattr(self.app, "_adv_filters_open", False)
         except Exception:
             s["adv_filters_open"] = False
         s["exp_context"] = self.app.analysis.exp_context
@@ -503,7 +503,7 @@ class SessionController:
             if val is None:
                 continue
             try:
-                w = getattr(self, attr, None)
+                w = getattr(self.app, attr, None)
                 if w is None:
                     continue
                 w.delete(0, "end")
@@ -520,7 +520,7 @@ class SessionController:
         }
         for key, attr in sw_map.items():
             try:
-                w = getattr(self, attr)
+                w = getattr(self.app, attr)
                 if s.get(key):
                     w.select()
                 else:
@@ -546,7 +546,7 @@ class SessionController:
         # Restore advanced-filter panel state
         try:
             was_open = bool(s.get("adv_filters_open", False))
-            if was_open != getattr(self, "_adv_filters_open", False):
+            if was_open != getattr(self.app, "_adv_filters_open", False):
                 self.app._btn_adv_flt.invoke()   # toggles the sub-section
         except Exception as _exc:
             log.debug("adv_filters restore: %s", _exc)

@@ -1841,17 +1841,17 @@ class PlotController:
             self.app.lbl_freq_status.configure(text=_neutral, text_color=PLOT["muted"])  # type: ignore[union-attr]
         if self.app.lbl_nonlin_status is not None:
             self.app.lbl_nonlin_status.configure(text=_neutral, text_color=PLOT["muted"])  # type: ignore[union-attr]
-        lbl_ivl = getattr(self, "lbl_ivl_status", None)
+        lbl_ivl = getattr(self.app, "lbl_ivl_status", None)
         if lbl_ivl is not None:
             lbl_ivl.configure(text=_neutral, text_color=PLOT["muted"])
-        lbl_arr = getattr(self, "lbl_arrhythmia_status", None)
+        lbl_arr = getattr(self.app, "lbl_arrhythmia_status", None)
         if lbl_arr is not None:
             lbl_arr.configure(text="  Run Core Analysis first", text_color=PLOT["muted"])
-        lbl_roll = getattr(self, "lbl_roll_status", None)
+        lbl_roll = getattr(self.app, "lbl_roll_status", None)
         if lbl_roll is not None:
             lbl_roll.configure(text="  Run Core Analysis first", text_color=PLOT["muted"])
         for btn_attr in ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl", "btn_run_arrhythmia"):
-            btn = getattr(self, btn_attr, None)
+            btn = getattr(self.app, btn_attr, None)
             if btn is not None:
                 btn.configure(state="disabled")
 

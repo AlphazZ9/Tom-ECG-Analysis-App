@@ -35,7 +35,7 @@ class DetectionController:
         for attr, n in [("btn_undo_edit", n_u), ("btn_redo_edit", n_r),
                         ("btn_arr_undo",  n_u), ("btn_arr_redo",  n_r)]:
             try:
-                btn = getattr(self, attr)
+                btn = getattr(self.app, attr)
                 key = "undo" if "undo" in attr else "redo"
                 sym = "↩" if key == "undo" else "↪"
                 btn.configure(
@@ -624,7 +624,7 @@ class DetectionController:
 
     def update_quality_badge(self) -> None:
         """Update the persistent quality badge in the KPI bar."""
-        if not hasattr(self, "_lbl_quality_badge"):
+        if not hasattr(self.app, "_lbl_quality_badge"):
             return
         beat_corr = (self.app.analysis.results or {}).get("beat_corr")
         if beat_corr is None or len(beat_corr) == 0:
