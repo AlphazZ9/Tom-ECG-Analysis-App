@@ -12,7 +12,7 @@ import logging
 import os
 import zipfile
 from datetime import datetime
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import matplotlib
 import matplotlib.figure
