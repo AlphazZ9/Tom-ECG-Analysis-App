@@ -7,17 +7,13 @@ Imports all other ecg.* modules and wires them together.
 """
 from __future__ import annotations
 
-import copy
-import dataclasses
-import io
 import logging
 import os
 import threading
 import traceback
-import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional, cast
+from typing import Any, Callable, Optional
 
 import customtkinter as ctk  # type: ignore[import-untyped]
 import tkinter as tk
@@ -26,7 +22,6 @@ from tkinter import filedialog, messagebox
 import matplotlib
 import matplotlib.figure
 import matplotlib.ticker
-from matplotlib.ticker import MultipleLocator
 from matplotlib.figure import Figure
 if __name__ == "__main__":
     matplotlib.use("TkAgg")
@@ -55,30 +50,16 @@ if not hasattr(np, "trapz"):
         np.trapz = _trapz  # type: ignore[attr-defined]
 import pandas as pd
 from PIL import Image, ImageTk
-from scipy.interpolate import CubicSpline
-from scipy.signal import welch as _scipy_welch
 from openpyxl import Workbook
 
 # ── ecg.core ──────────────────────────────────────────────────────────────────
 from models import (
-    ArrhythmiaEvent, MouseECG, ContextRanges, EXPERIMENTAL_CONTEXTS, _CONTEXT_FIELD_MAP,
-    FilterParams, AnalysisResults,
-)
-from filtering import (
-    bandpass, notch, normalize,
-    downsample_for_display, downsample_pair, envelope_for_display,
+    ArrhythmiaEvent, MouseECG, FilterParams,
 )
 from detection import (
-    fix_polarity, apply_threshold,
-    detect_peaks_sg_derivative, detect_peaks_wavelet,
-    detect_peaks_envelope_max,
-    detect_rr_artifacts, apply_artifact_decisions, correct_rr_artifacts,
-    recover_missed_beats, classify_arrhythmias,
+    detect_rr_artifacts, apply_artifact_decisions,
 )
-from analysis import (
-    analyse_core, analyse_hrv_freq, analyse_hrv_nonlinear, analyse_intervals,
-)
-from wave_template import WaveTemplate, detect_waves_on_beat
+from wave_template import WaveTemplate
 from state import SignalState, DetectionState, AnalysisState, UIState, SessionState
 from navigation_controller import NavigationController
 from export_controller import ExportController
@@ -89,41 +70,33 @@ from signal_controller import SignalController
 from analysis_controller import AnalysisController
 
 # ── ecg.io ────────────────────────────────────────────────────────────────────
-from loaders import (
-    load_mat_signal, list_channels,
-    _serialise_results, _deserialise_results,
-)
-from session import (
-    save_session, load_session, delete_session,
-)
+from loaders import list_channels
+from session import load_session
 from db import (
     _DB_AVAILABLE, get_notes, set_notes,
-    recent_recordings, upsert_recording,
+    recent_recordings,
 )
-from export import ExcelExporter, PrismExporter
 
 # ── ecg.ui ────────────────────────────────────────────────────────────────────
 from theme import (
-    THEME, ThemeConfig, apply_theme_config, apply_plot_theme, make_font,
-    NK_AVAILABLE, H5_AVAILABLE, APP_ICON_PATH,
+    THEME, apply_theme_config, apply_plot_theme,
+    NK_AVAILABLE, APP_ICON_PATH,
     BG, PANEL, CARD, BORDER, BORDER2, TEXT, MUTED, LIGHT, PLOT,
     RED, BLUE, GREEN, ORANGE,
-    BLUE_DARK, BLUE_HOVER, BLUE_MID, BLUE_DEEP,
-    PURPLE, PURPLE_DARK, PINK, TEAL, CYAN, CYAN_BRIGHT,
-    GREEN_DARK, GREEN_MID, ORANGE_DARK, ORANGE_DEEP,
-    AMBER, AMBER_DARK, RED_DARK, RED_MID, RED_LIGHT,
-    CORAL, NAVY, GRAY, GRAY_LIGHT,
+    BLUE_DARK, BLUE_HOVER, BLUE_DEEP,
+    PURPLE, PURPLE_DARK, PINK, TEAL,
+    GREEN_DARK, ORANGE_DARK, ORANGE_DEEP,
+    AMBER_DARK, RED_DARK,
     FONT_TITLE, FONT_SECTION_HDR, FONT_LABEL, FONT_SMALL, FONT_BODY, FONT_MONO,
     FONT_KPI_VALUE, FONT_KPI_LABEL, FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR,
     FONT_MICRO, FONT_HINT, FONT_BADGE, FONT_SUBSECTION, FONT_CARD_TITLE,
-    nk,
 )
 from plots import CanvasSlot, style_axes
 from dialogs import (
     ThemeDialog, ArtifactReviewDialog,
-    AnnotationDialog, AnnotationManagerDialog,
+    AnnotationManagerDialog,
 )
-from wave_editor import WaveTemplateMiniEditor, WaveTemplateEditor
+from wave_editor import WaveTemplateMiniEditor
 from sidebar import _SidebarSection, IntervalVerifierPanel
 
 log = logging.getLogger("ecg")
@@ -1728,7 +1701,6 @@ class ECGApp(ctk.CTk):
             # ── Also save the plot as PNG next to the xlsx ─────────────────
             png_path = os.path.splitext(path)[0] + "_plot.png"
             try:
-                import matplotlib
                 export_fig = Figure(
                     figsize=(10, 4), dpi=200,
                     facecolor=PLOT.get("bg", "#1A1A2E"))
