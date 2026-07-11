@@ -84,6 +84,7 @@ from navigation_controller import NavigationController
 from export_controller import ExportController
 from plot_controller import PlotController
 from session_controller import SessionController
+from detection_controller import DetectionController
 
 # ── ecg.io ────────────────────────────────────────────────────────────────────
 from loaders import (
@@ -244,6 +245,7 @@ class ECGApp(ctk.CTk):
         self.export_ctrl = ExportController(self)
         self.plot_ctrl = PlotController(self)
         self.session_ctrl = SessionController(self)
+        self.detection_ctrl = DetectionController(self)
 
         self._batch_bc_outdir: ctk.CTkEntry
         self._batch_bc_channel: ctk.CTkEntry
@@ -2946,19 +2948,7 @@ class ECGApp(ctk.CTk):
 
     def _update_undo_btns(self) -> None:
         """Update all undo/redo button instances (Detection + Arrhythmias tabs)."""
-        n_u, n_r = len(self._edit_undo), len(self._edit_redo)
-        for attr, n in [("btn_undo_edit", n_u), ("btn_redo_edit", n_r),
-                        ("btn_arr_undo",  n_u), ("btn_arr_redo",  n_r)]:
-            try:
-                btn = getattr(self, attr)
-                key = "undo" if "undo" in attr else "redo"
-                sym = "↩" if key == "undo" else "↪"
-                btn.configure(
-                    state="normal" if n else "disabled",
-                    text=f"{sym} {key.title()} ({n})" if n else f"{sym} {key.title()}",
-                )
-            except Exception as e:
-                log.debug("undo/redo button configure failed: %s", e)
+        self.detection_ctrl.update_undo_btns()
 
     def _copy_arrhythmia_tsv(self) -> None:
         tsv = getattr(self, "_arrhythmia_tsv", None)
@@ -3690,51 +3680,7 @@ class ECGApp(ctk.CTk):
         All Tkinter widget *writes* are marshalled through ``after(0, …)``
         so this method is safe to call from either thread.
         """
-        if self._signal_flt is None or self._all_cands is None or self._all_proms is None:
-            return 0
-
-        if thresh is None:
-            thresh = float(self.sl_thr.get())   # main-thread-only path  # type: ignore[union-attr]
-
-        accepted, rejected, thresh_amp = apply_threshold(
-            self._signal_flt, self._all_cands, self._all_proms, thresh,
-            fs=self._fs)
-
-        # ── Apply manual exclusions ──────────────────────────────
-        if self._manual_excluded:
-            manual_excl_mask = np.array([p in self._manual_excluded for p in accepted], dtype=bool)
-            self._rpeaks_manual_excl = accepted[manual_excl_mask] if manual_excl_mask.any() else np.array([], int)
-            accepted = accepted[~manual_excl_mask]
-        else:
-            self._rpeaks_manual_excl = np.array([], dtype=int)
-
-        # ── Merge manually-added peaks ───────────────────────────
-        # Added peaks are never in the candidate set; they bypass all thresholds.
-        # They are removed from the exclusion set if present (can't be both).
-        if self._manual_added:
-            added_arr = np.array(sorted(self._manual_added), dtype=int)
-            self._rpeaks_manual_added = added_arr
-            # Remove from exclusion set if mistakenly present
-            self._manual_excluded -= self._manual_added
-            # Merge and sort
-            accepted = np.unique(np.concatenate([accepted, added_arr]))
-        else:
-            self._rpeaks_manual_added = np.array([], dtype=int)
-
-        self._rpeaks_ok  = accepted
-        self._rpeaks_rej = rejected
-        self._thresh_amp = thresh_amp
-        n = len(accepted)
-
-        # Widget writes: always on main thread via after(0, ...)
-        color = GREEN if n > 10 else RED
-        self.after(0, lambda _n=n, _c=color: self.lbl_npeaks.configure(  # type: ignore[union-attr]
-            text=f"Peaks detected: {_n}", text_color=_c))
-        # Enable the artifact review button as soon as peaks are available
-        self.after(0, lambda: self.btn_review_art.configure(  # type: ignore[union-attr]
-            state="normal" if n > 4 else "disabled"))
-        self._update_signal_quality(accepted)
-        return n
+        return self.detection_ctrl.run_detection(thresh)
 
     def _update_signal_quality(self, accepted: np.ndarray) -> None:
         """Compute a 0–100 quality score and update the KPI label.
@@ -3750,42 +3696,11 @@ class ECGApp(ctk.CTk):
         at high HR during stress has a low rr_cv not from noise but from genuine
         sympathetic activation.
         """
-        n = len(accepted)
-        if n <= 5 or self._time is None:
-            return
-        dur         = self._time[-1]
-        expected_n  = dur / 60 * MouseECG.HR_REST_BPM
-        ratio       = float(np.clip(n / max(expected_n, 1), 0.5, 1.5))
-
-        # Primary quality signal: mean beat-to-template correlation
-        # beat_corr is computed in analyse_core and stored in _results.
-        beat_corr = None
-        if self._results is not None:
-            beat_corr = self._results.get("beat_corr")
-
-        if beat_corr is not None and len(beat_corr) > 0:
-            morpho = float(np.nanmean(beat_corr))            # 0–1 (Pearson r)
-            morpho = float(np.clip(morpho, 0.0, 1.0))
-            quality = int(np.clip(100 * morpho * ratio, 0, 100))
-        else:
-            # Fallback before full analysis: RR regularity heuristic
-            rr_tmp  = np.diff(accepted) / self._fs * 1000
-            rr_cv   = rr_tmp.std() / (rr_tmp.mean() + 1e-6)
-            quality = int(np.clip(100 * (1 - rr_cv) * ratio, 0, 100))
-
-        self._sig_quality = quality
-        color = GREEN if quality >= 70 else (ORANGE if quality >= 40 else RED)
-        self.after(0, lambda q=quality, c=color:
-                   self.lbl_quality.configure(text=f"Signal quality: {q}%", text_color=c))
+        self.detection_ctrl.update_signal_quality(accepted)
 
     def _on_det_method_change(self, choice: str) -> None:
         """Show/hide SG options frame based on selected detection method."""
-        if self._sg_frame is None:
-            return
-        if "SG" in choice or "Derivative" in choice:
-            self._sg_frame.pack(fill="x")
-        else:
-            self._sg_frame.pack_forget()
+        self.detection_ctrl.on_det_method_change(choice)
 
     # ── No-filter master toggle ──────────────────────────────
 
@@ -3796,31 +3711,7 @@ class ECGApp(ctk.CTk):
         d'une traversée récursive winfo_children() — évite de configurer 50+
         widgets imbriqués à chaque toggle.
         """
-        no_filter = bool(self.sw_no_filter.get())
-        new_state = "disabled" if no_filter else "normal"
-
-        # Chemin rapide : liste plate construite lors du démarrage
-        if self._filter_control_widgets:
-            for widget in self._filter_control_widgets:
-                try:
-                    widget.configure(state=new_state)
-                except Exception as e:
-                    log.debug("widget.configure(state) failed: %s", e)
-        else:
-            # Fallback : traversée récursive si la liste n'est pas encore prête
-            def _set_state_recursive(frame) -> None:
-                for widget in frame.winfo_children():
-                    try:
-                        widget.configure(state=new_state)
-                    except Exception as e:
-                        log.debug("widget.configure(state) failed: %s", e)
-                    try:
-                        _set_state_recursive(widget)
-                    except Exception as e:
-                        log.debug("_set_state_recursive failed: %s", e)
-            _set_state_recursive(self._filter_widgets_frame)
-            if self._adv_filters_frame is not None:
-                _set_state_recursive(self._adv_filters_frame)
+        self.detection_ctrl.on_no_filter_toggle()
 
     # ── Raw / Filtered toggle ─────────────────────────────────
 
@@ -3832,17 +3723,7 @@ class ECGApp(ctk.CTk):
         remain visually coherent regardless of which view is active.
         No re-processing is needed — both arrays are pre-computed.
         """
-        self._show_raw = bool(self.sw_show_raw.get())
-        if self._signal_flt is not None:
-            # Invalidate the relevant downsampled cache so it is rebuilt next draw.
-            # _ds_time is rebuilt alongside _ds_sig (via _downsample_pair),
-            # so only reset it when the primary filtered signal cache is dropped.
-            if self._show_raw:
-                self._ds_raw_sig = None
-            else:
-                self._ds_sig  = None
-                self._ds_time = None
-            self._draw_detail(self._nav_pos)
+        self.detection_ctrl.on_show_raw_toggle()
 
     # ── Overview click-to-navigate ────────────────────────────
 
@@ -3872,79 +3753,24 @@ class ECGApp(ctk.CTk):
 
     def _push_edit_undo(self) -> None:
         """Snapshot state before a destructive edit action."""
-        snap = (frozenset(self._manual_excluded), frozenset(self._manual_added))
-        self._edit_undo.append(snap)
-        if len(self._edit_undo) > self._EDIT_UNDO_LIMIT:
-            self._edit_undo.pop(0)
-        self._edit_redo.clear()
-        self._update_undo_btns()
+        self.detection_ctrl.push_edit_undo()
 
     def _undo_edit(self, _event=None) -> None:
         """Ctrl+Z — restore previous peak-edit state."""
-        if not self._edit_undo:
-            self._set_status("Nothing to undo.", MUTED)
-            return
-        cur = (frozenset(self._manual_excluded), frozenset(self._manual_added))
-        self._edit_redo.append(cur)
-        excl, added = self._edit_undo.pop()
-        self._manual_excluded = set(excl)
-        self._manual_added    = set(added)
-        self._apply_edit_state()
-        n = len(self._edit_undo)
-        self._set_status(f"Undone  ({str(n) + ' left' if n else 'none'})  — Ctrl+Y to redo", ORANGE)
-        self._update_undo_btns()
+        self.detection_ctrl.undo_edit(_event)
 
     def _redo_edit(self, _event=None) -> None:
         """Ctrl+Y — rétablir après undo."""
-        if not self._edit_redo:
-            self._set_status("Nothing to redo.", MUTED)
-            return
-        cur = (frozenset(self._manual_excluded), frozenset(self._manual_added))
-        self._edit_undo.append(cur)
-        excl, added = self._edit_redo.pop()
-        self._manual_excluded = set(excl)
-        self._manual_added    = set(added)
-        self._apply_edit_state()
-        self._set_status(f"Redone  ({len(self._edit_redo)} remaining)", ORANGE)
-        self._update_undo_btns()
+        self.detection_ctrl.redo_edit(_event)
 
     def _apply_edit_state(self) -> None:
-        if self._signal_flt is not None and self._all_cands is not None:
-            self._run_detection(float(self.sl_thr.get()))  # type: ignore[union-attr]
-            self._draw_detail(self._nav_pos)
-            # Also refresh the arrhythmia ECG viewer if an event is selected
-            if self._arr_selected_idx >= 0 and self._arrhythmia_events:
-                self._draw_arr_detail()
+        self.detection_ctrl.apply_edit_state()
 
     # ── Manual peak exclusion ─────────────────────────────────
 
     def _toggle_edit_mode(self) -> None:
         """Toggle the click-to-exclude edit mode on/off."""
-        self._edit_mode = not self._edit_mode
-        if self._edit_mode:
-            self.btn_edit_mode.configure(
-                fg_color=ORANGE, hover_color=ORANGE_DEEP,
-                text_color="white", text="Edit Mode ON",
-            )
-            self.lbl_edit_hint.pack(side="left", padx=(SPACE_S, 0))
-        else:
-            self.btn_edit_mode.configure(
-                fg_color=BORDER, hover_color=BORDER2,
-                text_color=MUTED, text="Edit Peaks",
-            )
-            self.lbl_edit_hint.pack_forget()
-            # Also turn off free placement when leaving edit mode
-            if self._edit_free_placement:
-                self._edit_free_placement = False
-                try:
-                    self.btn_free_placement.configure(
-                        fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                        text="Free Placement",
-                    )
-                except Exception:
-                    pass
-        if self._signal_flt is not None:
-            self._draw_detail(self._nav_pos)
+        self.detection_ctrl.toggle_edit_mode()
 
     def _toggle_free_placement(self) -> None:
         """Toggle free-placement mode: bypass proximity constraint when adding peaks.
@@ -3955,46 +3781,11 @@ class ECGApp(ctk.CTk):
 
         Note: edit mode must be active for this to have any effect.
         """
-        self._edit_free_placement = not self._edit_free_placement
-        if self._edit_free_placement:
-            self.btn_free_placement.configure(
-                fg_color=BLUE, hover_color=BLUE_HOVER,
-                text_color="white", text="Free Placement ON",
-            )
-            self._set_status(
-                "Free Placement ON — R-click places a peak at the exact click position, "
-                "no snapping, no proximity guard.", BLUE)
-        else:
-            self.btn_free_placement.configure(
-                fg_color=BORDER, hover_color=BORDER2,
-                text_color=MUTED, text="Free Placement",
-            )
-            self._set_status("Free Placement OFF — normal proximity guard restored.", MUTED)
+        self.detection_ctrl.toggle_free_placement()
 
     def _clear_manual_exclusions(self) -> None:
         """Re-include all manually excluded peaks, remove all manually added peaks."""
-        if not self._manual_excluded and not self._manual_added:
-            return
-        self._push_edit_undo()
-        n_excl  = len(self._manual_excluded)
-        n_added = len(self._manual_added)
-        self._manual_excluded.clear()
-        self._manual_added.clear()
-        # Invalidate any previous analysis — peaks have changed
-        self._results  = None
-        self._epoch_df = None
-        self._rpeaks_manual_excl  = np.array([], dtype=int)
-        self._rpeaks_manual_added = np.array([], dtype=int)
-        if self._signal_flt is not None and self._all_cands is not None:
-            self._run_detection(float(self.sl_thr.get()))  # type: ignore[union-attr]
-            self._draw_detail(self._nav_pos)
-        self.lbl_npeaks.configure(  # type: ignore[union-attr]
-            text=f"Peaks detected: {len(self._rpeaks_ok) if self._rpeaks_ok is not None else 0}",
-            text_color=GREEN,
-        )
-        self._set_status(
-            f"Manual edits cleared — {n_excl} exclusion(s), {n_added} addition(s) removed.",
-            GREEN)
+        self.detection_ctrl.clear_manual_exclusions()
 
     def _on_detail_motion(self, event) -> None:
         """Track mouse position in edit mode and compute the preview peak position.
@@ -4006,66 +3797,11 @@ class ECGApp(ctk.CTk):
 
         Redraws are throttled to 30 ms (≈33 fps) via after().
         """
-        if not self._edit_mode:
-            if self._hover_samp is not None:
-                self._hover_samp = None
-                self._hover_samp_near = False
-                if self._hover_after_id is not None:
-                    self.after_cancel(self._hover_after_id)
-                    self._hover_after_id = None
-                self._draw_detail(self._nav_pos)
-            return
-
-        if event.xdata is None or self._signal_flt is None or self._fs is None:
-            if self._hover_samp is not None:
-                self._hover_samp = None
-                self._hover_samp_near = False
-                self._draw_detail(self._nav_pos)
-            return
-
-        fs         = self._fs
-        click_time = float(event.xdata)
-        click_samp = int(np.clip(round(click_time * fs), 0, len(self._signal_flt) - 1))
-
-        # Free placement: follow the cursor exactly, no snapping, always "ok"
-        if self._edit_free_placement:
-            new_samp = click_samp
-            near     = False
-        else:
-            try:
-                win = float(self.ent_window.get())
-            except Exception:
-                win = 2.0
-            tol_samp = int(max(MouseECG.MIN_RR_MS / 1000 / 2, win * 0.03) * fs)
-
-            # Snap to local maximum within ±tol_samp
-            sig = self._signal_flt
-            lo  = max(0, click_samp - tol_samp)
-            hi  = min(len(sig), click_samp + tol_samp + 1)
-            new_samp = lo + int(np.argmax(sig[lo:hi]))
-
-            # Show warning colour if this would land too close to an existing peak
-            near = False
-            if self._rpeaks_ok is not None and len(self._rpeaks_ok):
-                min_sep = int(MouseECG.MIN_RR_MS / 1000 * fs * 0.5)
-                near    = int(np.min(np.abs(self._rpeaks_ok - new_samp))) < min_sep
-
-        # Only schedule a redraw if the position actually changed
-        if self._hover_samp == new_samp and self._hover_samp_near == near:
-            return
-
-        self._hover_samp      = new_samp
-        self._hover_samp_near = near
-
-        # Throttle: cancel any pending redraw, schedule a new one in 30 ms
-        if self._hover_after_id is not None:
-            self.after_cancel(self._hover_after_id)
-        self._hover_after_id = self.after(30, self._flush_hover_redraw)
+        self.detection_ctrl.on_detail_motion(event)
 
     def _flush_hover_redraw(self) -> None:
         """Execute the throttled hover redraw on the main thread."""
-        self._hover_after_id = None
-        self._draw_detail(self._nav_pos)
+        self.detection_ctrl.flush_hover_redraw()
 
     def _on_detail_click(self, event) -> None:
         """Edit-mode click handler for the detail view.
@@ -4077,164 +3813,7 @@ class ECGApp(ctk.CTk):
 
         Only active when ``_edit_mode`` is True.
         """
-        if not self._edit_mode:
-            return
-        if event.xdata is None or self._signal_flt is None:
-            return
-        if self._rpeaks_ok is None:
-            return
-
-        fs         = self._fs
-        click_time = float(event.xdata)      # seconds
-        click_samp = int(round(click_time * fs))
-        click_samp = int(np.clip(click_samp, 0, len(self._signal_flt) - 1))
-
-        # ── Tolerance ────────────────────────────────────────────────────────
-        try:
-            win = float(self.ent_window.get())
-        except Exception:
-            win = 2.0
-        # Half the minimum RR interval (in seconds) is a natural click radius
-        tol_s    = max(MouseECG.MIN_RR_MS / 1000 / 2, win * 0.03)
-        tol_samp = int(tol_s * fs)
-
-        is_left  = (event.button == 1)
-        is_right = (event.button == 3)
-
-        # ──────────────────────────────────────────────────────────────────────
-        #  RIGHT-CLICK: add a new peak, or remove an existing manually-added one
-        # ──────────────────────────────────────────────────────────────────────
-        if is_right:
-            # ── FREE PLACEMENT: always add at the exact clicked sample ────────
-            # All guards (proximity, remove-nearby, local-max snapping) are
-            # bypassed.  The peak lands precisely where the user clicked.
-            if self._edit_free_placement:
-                new_samp = click_samp
-                self._push_edit_undo()
-                self._manual_added.add(new_samp)
-                self._manual_excluded.discard(new_samp)
-                self._run_detection(float(self.sl_thr.get()))  # type: ignore[union-attr]
-                n_ok    = len(self._rpeaks_ok) if self._rpeaks_ok is not None else 0
-                n_added = len(self._manual_added)
-                self._set_status(
-                    f"[Free] Added peak at {new_samp / fs:.3f} s  |  "
-                    f"Total added: {n_added}  |  Accepted: {n_ok}  "
-                    "— re-run Full Analysis to update HRV.",
-                    BLUE,
-                )
-                self._draw_detail(self._nav_pos)
-                return
-
-            # ── NORMAL MODE ───────────────────────────────────────────────────
-            # First check if click is near a manually-added peak → remove it
-            if self._rpeaks_manual_added is not None and len(self._rpeaks_manual_added):
-                dists = np.abs(self._rpeaks_manual_added - click_samp)
-                nearest_i = int(np.argmin(dists))
-                if dists[nearest_i] <= tol_samp:
-                    peak_to_remove = int(self._rpeaks_manual_added[nearest_i])
-                    self._push_edit_undo()
-                    self._manual_added.discard(peak_to_remove)
-                    self._run_detection(float(self.sl_thr.get()))  # type: ignore[union-attr]
-                    n_ok = len(self._rpeaks_ok) if self._rpeaks_ok is not None else 0
-                    self._set_status(
-                        f"Removed manually added peak at {click_time:.3f} s  |  "
-                        f"Accepted: {n_ok}  — re-run Full Analysis to update HRV.",
-                        ORANGE,
-                    )
-                    self._draw_detail(self._nav_pos)
-                    return
-
-            # Snap to local maximum within ±tol_samp of click
-            sig      = self._signal_flt
-            lo       = max(0, click_samp - tol_samp)
-            hi       = min(len(sig), click_samp + tol_samp + 1)
-            seg      = sig[lo:hi]
-            local_max_offset = int(np.argmax(seg))
-            new_samp = lo + local_max_offset
-
-            # If too close to existing accepted peak → replace it
-            # (exclude the old one, add the new one) instead of refusing.
-            if self._rpeaks_ok is not None and len(self._rpeaks_ok):
-                min_sep_samp = int(MouseECG.MIN_RR_MS / 1000 * fs * 0.5)
-                dists_ok     = np.abs(self._rpeaks_ok - new_samp)
-                nearest_idx  = int(np.argmin(dists_ok))
-                nearest_dist = int(dists_ok[nearest_idx])
-                if nearest_dist < min_sep_samp:
-                    # Replace: exclude the nearby peak, add the new one
-                    old_peak = int(self._rpeaks_ok[nearest_idx])
-                    self._push_edit_undo()
-                    self._manual_excluded.add(old_peak)
-                    self._manual_added.discard(old_peak)
-                    self._manual_added.add(new_samp)
-                    self._manual_excluded.discard(new_samp)
-                    self._run_detection(float(self.sl_thr.get()))  # type: ignore[union-attr]
-                    n_ok = len(self._rpeaks_ok) if self._rpeaks_ok is not None else 0
-                    self._set_status(
-                        f"Replaced peak {old_peak/fs:.3f} s → {new_samp/fs:.3f} s  "
-                        f"({nearest_dist/fs*1000:.1f} ms apart)  |  Accepted: {n_ok}  "
-                        "— re-run Full Analysis to update HRV.",
-                        ORANGE,
-                    )
-                    self._draw_detail(self._nav_pos)
-                    return
-
-            self._push_edit_undo()
-            self._manual_added.add(new_samp)
-            # If this sample was previously excluded, unexclude it
-            self._manual_excluded.discard(new_samp)
-            self._run_detection(float(self.sl_thr.get()))  # type: ignore[union-attr]
-            n_ok    = len(self._rpeaks_ok) if self._rpeaks_ok is not None else 0
-            n_added = len(self._manual_added)
-            self._set_status(
-                f"Added peak at {new_samp / fs:.3f} s (snapped to local max)  |  "
-                f"Total added: {n_added}  |  Accepted: {n_ok}  "
-                "— re-run Full Analysis to update HRV.",
-                ORANGE,
-            )
-            self._draw_detail(self._nav_pos)
-            return
-
-        # ──────────────────────────────────────────────────────────────────────
-        #  LEFT-CLICK: toggle exclusion of the nearest existing peak
-        # ──────────────────────────────────────────────────────────────────────
-        if not is_left:
-            return
-
-        # Pool: all accepted peaks + all currently excluded peaks
-        # (manually added peaks are excluded from toggle — use right-click to remove)
-        added_set  = self._manual_added
-        base_ok    = np.array([p for p in self._rpeaks_ok if p not in added_set], int) \
-                     if self._rpeaks_ok is not None else np.array([], int)
-        excl_arr   = self._rpeaks_manual_excl if self._rpeaks_manual_excl is not None \
-                     else np.array([], int)
-        candidates = np.concatenate([base_ok, excl_arr])
-        if len(candidates) == 0:
-            return
-
-        times_s   = candidates / fs
-        distances = np.abs(times_s - click_time)
-        nearest_i = int(np.argmin(distances))
-
-        if distances[nearest_i] > tol_s:
-            return   # click not close enough to any peak
-
-        peak_idx = int(candidates[nearest_i])
-
-        self._push_edit_undo()
-        if peak_idx in self._manual_excluded:
-            self._manual_excluded.discard(peak_idx)
-        else:
-            self._manual_excluded.add(peak_idx)
-
-        self._run_detection(float(self.sl_thr.get()))  # type: ignore[union-attr]
-        n_ok   = len(self._rpeaks_ok)  if self._rpeaks_ok   is not None else 0
-        n_excl = len(self._manual_excluded)
-        self._set_status(
-            f"Manual exclusions: {n_excl}  |  Accepted peaks: {n_ok}  "
-            "— re-run Full Analysis to update HRV.",
-            ORANGE,
-        )
-        self._draw_detail(self._nav_pos)
+        self.detection_ctrl.on_detail_click(event)
 
     # ── Threshold slider / entry callbacks ────────────────────
     def _on_threshold_slide(self, value: float) -> None:
@@ -4245,17 +3824,7 @@ class ECGApp(ctk.CTk):
         not flood the rendering pipeline — especially important for long
         recordings where apply_threshold() + two canvas draws take ~50 ms.
         """
-        self.lbl_thr.configure(text=f"Sensitivity:  {value:.3f}")
-        self.ent_thr.delete(0, "end")  # type: ignore[union-attr]
-        self.ent_thr.insert(0, f"{value:.3f}")  # type: ignore[union-attr]
-
-        if self._signal_flt is None or self._all_cands is None:
-            return
-
-        # Cancel any previously scheduled update and reschedule
-        if self._thr_debounce_id is not None:
-            self.after_cancel(self._thr_debounce_id)
-        self._thr_debounce_id = self.after(80, lambda v=value: self._apply_threshold_ui(v))
+        self.detection_ctrl.on_threshold_slide(value)
 
     def _apply_threshold_ui(self, value: float) -> None:
         """Run detection and refresh plots — called after debounce delay.
@@ -4263,28 +3832,14 @@ class ECGApp(ctk.CTk):
         Always executes on the main thread (scheduled via after()), so it is
         safe to read the slider and write widgets directly.
         """
-        self._thr_debounce_id = None
-        # Peaks are about to change — invalidate stale results
-        if self._results is not None:
-            self._results  = None
-            self._epoch_df = None
-            self._reset_kpis()
-        self._run_detection(value)
-        self._draw_detail(self._nav_pos)
+        self.detection_ctrl.apply_threshold_ui(value)
 
     def _on_threshold_entry(self, event=None) -> None:
         """Called when the user types a value in the exact-threshold entry.
 
         Applies immediately — no debounce — since this is a deliberate commit.
         """
-        try:
-            value = max(0.01, min(2.0, float(self.ent_thr.get())))  # type: ignore[union-attr]
-            self.sl_thr.set(value)  # type: ignore[union-attr]
-            self.lbl_thr.configure(text=f"Sensitivity:  {value:.3f}")
-            if self._signal_flt is not None and self._all_cands is not None:
-                self._apply_threshold_ui(value)
-        except ValueError:
-            pass
+        self.detection_ctrl.on_threshold_entry(event)
 
     # ════════════════════════════════════════════════════════
     #  ACTIONS  (file, preview, run)
@@ -6649,25 +6204,7 @@ class ECGApp(ctk.CTk):
 
     def _update_quality_badge(self) -> None:
         """Update the persistent quality badge in the KPI bar."""
-        if not hasattr(self, "_lbl_quality_badge"):
-            return
-        beat_corr = (self._results or {}).get("beat_corr")
-        if beat_corr is None or len(beat_corr) == 0:
-            self._lbl_quality_badge.configure(text="", fg_color="transparent")
-            return
-        mean_r = float(np.nanmean(beat_corr))
-        n_bad  = int(np.sum(beat_corr < 0.90))
-        pct    = 100.0 * n_bad / max(len(beat_corr), 1)
-        if mean_r >= 0.95:
-            col, label = GREEN,   f"● Excellent  {mean_r:.3f}"
-        elif mean_r >= 0.90:
-            col, label = GREEN,   f"● Good  {mean_r:.3f}"
-        elif mean_r >= 0.80:
-            col, label = ORANGE,  f"● Fair  {mean_r:.3f}  ({pct:.0f}% low)"
-        else:
-            col, label = RED,     f"● Poor  {mean_r:.3f}  ({pct:.0f}% low)"
-        self._lbl_quality_badge.configure(text=label, fg_color=col,
-                                           text_color="white")
+        self.detection_ctrl.update_quality_badge()
 
     # ════════════════════════════════════════════════════════
     #  5. DRAG-AND-DROP (fixed wiring)
