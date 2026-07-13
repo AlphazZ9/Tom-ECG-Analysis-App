@@ -23,7 +23,6 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from models import AnalysisResults, MouseECG
-from theme import ORANGE_DARK, PINK, GREEN_DARK, PURPLE
 
 log = logging.getLogger("ecg")
 
@@ -510,12 +509,21 @@ class ExcelExporter:
 
 
 # ── Predefined annotation colours ─────────────────────────────────────────────
+# Fixed swatch options for user-created annotations -- intentionally NOT tied
+# to the live UI theme (an annotation colour a user picked shouldn't change
+# meaning if they later switch the app's appearance preset). Four of these
+# used to be imported from theme.py (coincidentally matching its palette at
+# the time), which pulled a customtkinter import (and its module-level
+# ctk.set_appearance_mode()/set_default_color_theme() calls) into every
+# process that imports export.py -- including batch.py's subprocess workers,
+# which are documented as having no Tkinter/CTk dependency. Hardcoded here
+# to match the previous values exactly and keep that contract true.
 ANNOTATION_COLORS: list[tuple[str, str]] = [
-    (ORANGE_DARK, "Orange"),
+    ("#E65100", "Orange"),
     ("#1A56DB", "Blue"),
-    (PINK, "Pink"),
-    (GREEN_DARK, "Green"),
-    (PURPLE, "Purple"),
+    ("#AD1457", "Pink"),
+    ("#2E7D32", "Green"),
+    ("#6A1B9A", "Purple"),
     ("#00838F", "Teal"),
     ("#F9A825", "Yellow"),
     ("#37474F", "Dark grey"),

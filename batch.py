@@ -16,6 +16,7 @@ import logging
 import os
 import threading
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -52,6 +53,7 @@ def _process_one(
 
     stem = Path(filepath).stem
     result: dict = {"filepath": filepath, "stem": stem, "ok": False, "error": ""}
+    filter_warnings: "list[str]" = []
 
     try:
         # ── Load ─────────────────────────────────────────────────────────
@@ -60,18 +62,22 @@ def _process_one(
         fs = int(detected_fs or params.get("fs", MouseECG.FS_DEFAULT))
 
         # ── Filter ───────────────────────────────────────────────────────
+        # bandpass/notch failures used to be swallowed with a bare
+        # `except: pass` -- the signal would silently go through unfiltered
+        # with nothing in the summary to show it. Recorded here instead so
+        # a reviewer looking only at _batch_summary.xlsx can see it happened.
         sig = normalize(sig_raw.copy())
         if not params.get("no_filter", True):
             try:
                 sig = bandpass(sig, fs, params.get("lp", MouseECG.BP_LO_HZ),
                                params.get("hp", MouseECG.BP_HI_HZ))
-            except Exception:
-                pass
+            except Exception as exc:
+                filter_warnings.append(f"bandpass skipped: {exc}")
             if params.get("notch", False):
                 try:
                     sig = notch(sig, fs)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    filter_warnings.append(f"notch skipped: {exc}")
         sig = normalize(sig)
 
         # ── Detect ───────────────────────────────────────────────────────
@@ -108,13 +114,32 @@ def _process_one(
         )
         wb.save(out_path)
 
+        # ── Signal quality score ──────────────────────────────────────────
+        # Mirrors DetectionController.update_signal_quality() so batch mode
+        # reports the same 0-100 quality score the interactive GUI shows --
+        # previously batch mode had no quality gate beyond "at least 10
+        # peaks found", so a poor/noisy recording that cleared 10 peaks by
+        # chance got an unqualified "successful" row in the summary.
+        beat_corr  = r.get("beat_corr")
+        dur_s      = float(len(sig_out)) / fs
+        expected_n = dur_s / 60.0 * MouseECG.HR_REST_BPM
+        ratio      = float(np.clip(len(rpeaks) / max(expected_n, 1), 0.5, 1.5))
+        if beat_corr is not None and len(beat_corr) > 0:
+            morpho  = float(np.clip(np.nanmean(beat_corr), 0.0, 1.0))
+            quality = int(np.clip(100 * morpho * ratio, 0, 100))
+        else:
+            rr_tmp  = np.diff(rpeaks) / fs * 1000
+            rr_cv   = float(rr_tmp.std() / (rr_tmp.mean() + 1e-6)) if len(rr_tmp) else 1.0
+            quality = int(np.clip(100 * (1 - rr_cv) * ratio, 0, 100))
+
         # ── Summary row ──────────────────────────────────────────────────
         rr_df = r.get("rr_df")
         hrv   = r.get("hrv_td")
         result.update({
             "ok":          True,
             "n_peaks":     len(rpeaks),
-            "duration_s":  float(len(sig_out)) / fs,
+            "duration_s":  dur_s,
+            "quality":     quality,
             "hr_mean":     float(rr_df["HR_bpm"].mean()) if rr_df is not None and len(rr_df) else float("nan"),
             "hr_sd":       float(rr_df["HR_bpm"].std())  if rr_df is not None and len(rr_df) else float("nan"),
             "rr_mean":     float(rr_df["RR_ms"].mean())  if rr_df is not None and len(rr_df) else float("nan"),
@@ -124,6 +149,7 @@ def _process_one(
             "channel":     ch,
             "fs":          fs,
             "inverted":    inverted,
+            "warning":     "; ".join(filter_warnings),
         })
     except Exception as exc:
         result["error"] = str(exc)
@@ -160,6 +186,7 @@ class BatchProcessor:
         """Run synchronously — blocks until all files are processed."""
         os.makedirs(self.output_dir, exist_ok=True)
         n = len(self.filepaths)
+        n_timed_out = 0
 
         with ProcessPoolExecutor(max_workers=self.max_workers) as pool:
             futures = {
@@ -172,6 +199,25 @@ class BatchProcessor:
                 fp = futures[future]
                 try:
                     res = future.result(timeout=300)
+                except FutureTimeoutError:
+                    # ProcessPoolExecutor has no public API to cancel/kill a
+                    # future that has already started running -- the worker
+                    # process keeps running (and keeps occupying one of
+                    # max_workers slots for the rest of this pool's life)
+                    # even though we give up waiting on it here. Reported
+                    # distinctly (not folded into the generic except-clause
+                    # below as an unlabelled "error") specifically so this
+                    # doesn't read as an ordinary per-file failure.
+                    n_timed_out += 1
+                    log.warning(
+                        "batch: %s timed out after 300s -- its worker "
+                        "process may still be running; effective "
+                        "parallelism for the rest of this run is reduced.",
+                        Path(fp).stem,
+                    )
+                    res = {"filepath": fp, "stem": Path(fp).stem, "ok": False,
+                           "error": "Timed out after 300s (worker abandoned, "
+                                    "may still be running in the background)"}
                 except Exception as exc:
                     res = {"filepath": fp, "stem": Path(fp).stem,
                            "ok": False, "error": str(exc)}
@@ -179,6 +225,8 @@ class BatchProcessor:
                 if self.progress_cb:
                     self.progress_cb(done_i, n, Path(fp).stem)
 
+        if n_timed_out:
+            log.warning("batch: %d/%d file(s) timed out", n_timed_out, n)
         self._write_summary()
         return self.results
 
@@ -198,6 +246,7 @@ class BatchProcessor:
                 "File":        r.get("stem", ""),
                 "OK":          "✓" if r.get("ok") else "✗",
                 "Error":       r.get("error", ""),
+                "Quality (%)": r.get("quality", ""),
                 "N peaks":     r.get("n_peaks", ""),
                 "Duration (s)":r.get("duration_s", ""),
                 "Mean HR":     r.get("hr_mean", ""),
@@ -205,6 +254,7 @@ class BatchProcessor:
                 "Mean RR (ms)":r.get("rr_mean", ""),
                 "SDNN (ms)":   r.get("sdnn", ""),
                 "RMSSD (ms)":  r.get("rmssd", ""),
+                "Warning":     r.get("warning", ""),
             })
         df = pd.DataFrame(rows)
         out = os.path.join(self.output_dir, "_batch_summary.xlsx")
