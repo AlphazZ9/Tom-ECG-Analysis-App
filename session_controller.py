@@ -262,7 +262,7 @@ class SessionController:
                 self.app.ent_thr.delete(0, "end")  # type: ignore[union-attr]
                 self.app.ent_thr.insert(0, f"{float(thr):.3f}")  # type: ignore[union-attr]
             except Exception as _exc:
-                log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 7671, _exc)
+                log.debug("restore threshold slider/entry failed: %s", _exc, exc_info=True)
 
         self.app._run_detection(thr)
 
@@ -526,16 +526,16 @@ class SessionController:
                 else:
                     w.deselect()
             except Exception as _exc:
-                log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 7929, _exc)
+                log.debug("restore switch '%s' failed: %s", key, _exc, exc_info=True)
 
         try:
             self.app.sl_thr.set(float(s.get("sl_thr", 0.5)))  # type: ignore[union-attr]
         except Exception as _exc:
-            log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 7934, _exc)
+            log.debug("restore sl_thr failed: %s", _exc, exc_info=True)
         try:
             self.app.cb_clean.set(s.get("cb_clean", "neurokit"))  # type: ignore[union-attr]
         except Exception as _exc:
-            log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 7938, _exc)
+            log.debug("restore cb_clean failed: %s", _exc, exc_info=True)
         try:
             if self.app.cb_det_method is not None:
                 dm = s.get("cb_det_method", "SG + Derivative (10 kHz)")
@@ -553,7 +553,7 @@ class SessionController:
         try:
             self.app.tabs.set(s.get("current_tab", "Detection"))
         except Exception as _exc:
-            log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 7942, _exc)
+            log.debug("restore current_tab failed: %s", _exc, exc_info=True)
         # Re-apply non-widget state
         self.app.ui.nav_pos  = float(s.get("nav_pos",  0.0))
 

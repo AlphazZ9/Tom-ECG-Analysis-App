@@ -224,7 +224,7 @@ class NavigationController:
             app.ent_window.delete(0, "end")
             app.ent_window.insert(0, f"{new_win:.2f}")
         except Exception as _exc:
-            log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 5262, _exc)
+            log.debug("ent_window update failed: %s", _exc, exc_info=True)
 
         ax.set_xlim(new_xmin, new_xmax)
         app._slots["detail"].canvas.draw_idle()

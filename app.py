@@ -4235,7 +4235,7 @@ class ECGApp(ctk.CTk):
             try:
                 plt.close(slot.fig)
             except Exception as _exc:
-                log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 7966, _exc)
+                log.debug("plt.close(slot.fig) failed: %s", _exc, exc_info=True)
 
         # Destroy the existing UI
         for child in self.winfo_children():

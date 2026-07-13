@@ -150,12 +150,21 @@ def sg_filter(
     polyorder  : Polynomial order (default 3 gives good impulse preservation).
     """
     from scipy.signal import savgol_filter as _savgol
+    if len(signal) < polyorder + 1:
+        raise ValueError(
+            f"sg_filter: signal has only {len(signal)} sample(s), "
+            f"need at least {polyorder + 1} for polyorder={polyorder}"
+        )
     window_samples = int(round(window_ms / 1000.0 * fs))
     if window_samples < polyorder + 1:
         window_samples = polyorder + 1
     # savgol_filter requires odd window length
     if window_samples % 2 == 0:
         window_samples += 1
+    # Also requires window_length <= len(signal) -- shrink to fit rather than
+    # let scipy raise an opaque ValueError deep in the call stack.
+    if window_samples > len(signal):
+        window_samples = len(signal) if len(signal) % 2 == 1 else len(signal) - 1
     log.debug("sg_filter: window=%d samples (%.1f ms at %d Hz)", window_samples, window_ms, int(fs))
     return np.asarray(
         _savgol(signal, window_length=window_samples, polyorder=polyorder,
@@ -177,11 +186,20 @@ def sg_derivative_signal(
     sharp positive peak aligned to the ascending R-wave upstroke.
     """
     from scipy.signal import savgol_filter as _savgol
+    if len(signal) < polyorder + 1:
+        raise ValueError(
+            f"sg_derivative_signal: signal has only {len(signal)} sample(s), "
+            f"need at least {polyorder + 1} for polyorder={polyorder}"
+        )
     window_samples = int(round(window_ms / 1000.0 * fs))
     if window_samples < polyorder + 1:
         window_samples = polyorder + 1
     if window_samples % 2 == 0:
         window_samples += 1
+    # Also requires window_length <= len(signal) -- shrink to fit rather than
+    # let scipy raise an opaque ValueError deep in the call stack.
+    if window_samples > len(signal):
+        window_samples = len(signal) if len(signal) % 2 == 1 else len(signal) - 1
     return np.asarray(
         _savgol(
             signal,

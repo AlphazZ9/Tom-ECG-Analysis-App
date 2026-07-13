@@ -529,7 +529,7 @@ class SignalController:
             self.app.ent_fs.delete(0, "end")
             self.app.ent_fs.insert(0, str(int(fs)))
         except Exception as _exc:
-            log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 5605, _exc)
+            log.debug("ent_fs update failed: %s", _exc, exc_info=True)
         self.app.lbl_fs_source.configure(
             text=f"✓ Auto-detected from file: {int(fs)} Hz",
             text_color=GREEN)

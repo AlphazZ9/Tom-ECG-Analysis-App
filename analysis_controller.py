@@ -843,7 +843,7 @@ class AnalysisController:
                 n_lf = f"{float(result['HRV_LF'].values[0])*100:.1f}%"
                 n_hf = f"{float(result['HRV_HF'].values[0])*100:.1f}%"
             except Exception as _exc:
-                log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 5940, _exc)
+                log.debug("run_freq: LF/HF% formatting failed: %s", _exc, exc_info=True)
             if self.app.lbl_freq_status is not None:
                 self.app.lbl_freq_status.configure(  # type: ignore[union-attr]
                     text=f"  Done  LF={n_lf}  HF={n_hf}", text_color=GREEN)
@@ -891,7 +891,7 @@ class AnalysisController:
             try:
                 sampen = f"{float(result['HRV_SampEn'].values[0]):.3f}"
             except Exception as _exc:
-                log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 5979, _exc)
+                log.debug("run_nonlinear: SampEn formatting failed: %s", _exc, exc_info=True)
             if self.app.lbl_nonlin_status is not None:
                 self.app.lbl_nonlin_status.configure(  # type: ignore[union-attr]
                     text=f"  Done  SampEn={sampen}", text_color=GREEN)

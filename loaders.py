@@ -106,7 +106,7 @@ def _detect_fs_from_mat(raw: dict, channel: str) -> Optional[float]:
                     if 1e-6 < interval < 1.0:   # plausible 1–1 000 000 Hz
                         return round(1.0 / interval)
                 except Exception as _exc:
-                    log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 1715, _exc)
+                    log.debug("_detect_fs_from_mat: interval field %r unusable: %s", attr, _exc)
         # Some exports store fs directly
         for attr in ("fs", "Fs", "sample_rate", "samplerate", "SampleRate"):
             v = getattr(ch, attr, None)
@@ -116,7 +116,7 @@ def _detect_fs_from_mat(raw: dict, channel: str) -> Optional[float]:
                     if 100 <= fs_val <= 500_000:
                         return round(fs_val)
                 except Exception as _exc:
-                    log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 1725, _exc)
+                    log.debug("_detect_fs_from_mat: fs field %r unusable: %s", attr, _exc)
 
     # Top-level keys like "fs", "Fs", "sample_rate"
     for key in ("fs", "Fs", "sample_rate", "samplerate", "SampleRate",
@@ -128,7 +128,7 @@ def _detect_fs_from_mat(raw: dict, channel: str) -> Optional[float]:
                 if 100 <= fs_val <= 500_000:
                     return round(fs_val)
             except Exception as _exc:
-                log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 1737, _exc)
+                log.debug("_detect_fs_from_mat: top-level key %r unusable: %s", key, _exc)
     return None
 
 
@@ -150,7 +150,7 @@ def _detect_fs_from_hdf5_obj(f: "Any", channel: str) -> Optional[float]:
                     if 1e-6 < interval < 1.0:
                         return round(1.0 / interval)
                 except Exception as _exc:
-                    log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 1758, _exc)
+                    log.debug("_detect_fs_from_hdf5_obj: interval attr %r unusable: %s", attr, _exc)
         for attr in ("fs", "Fs", "sample_rate"):
             v = grp.get(attr)
             if v is not None:
@@ -159,7 +159,7 @@ def _detect_fs_from_hdf5_obj(f: "Any", channel: str) -> Optional[float]:
                     if 100 <= fs_val <= 500_000:
                         return round(fs_val)
                 except Exception as _exc:
-                    log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 1767, _exc)
+                    log.debug("_detect_fs_from_hdf5_obj: fs attr %r unusable: %s", attr, _exc)
     # Top-level datasets
     for key in ("fs", "Fs", "sample_rate", "samplerate"):
         v = f.get(key)
@@ -169,7 +169,7 @@ def _detect_fs_from_hdf5_obj(f: "Any", channel: str) -> Optional[float]:
                 if 100 <= fs_val <= 500_000:
                     return round(fs_val)
             except Exception as _exc:
-                log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 1777, _exc)
+                log.debug("_detect_fs_from_hdf5_obj: top-level key %r unusable: %s", key, _exc)
     return None
 
 
