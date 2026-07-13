@@ -436,10 +436,18 @@ class IntervalVerifierPanel:
         r = self._df.iloc[i]
         def _ms(key: str) -> float:
             v = r.get(f"{key}_ms", np.nan)
+            # Narrowed from a bare `except Exception: return np.nan` --
+            # that swallowed genuine bugs (e.g. a bad dtype landing in this
+            # column) the same silent way it handles the expected/legitimate
+            # case of a landmark simply not being detected for this beat.
+            # Only float-conversion failures degrade to NaN now; anything
+            # else is logged so it's diagnosable instead of vanishing.
             try:
-                return float(v) if np.isfinite(float(v)) else np.nan  # type: ignore[arg-type]
-            except Exception:
+                fv = float(v)
+            except (TypeError, ValueError) as exc:
+                log.debug("_recompute_row: %s_ms=%r not numeric: %s", key, v, exc)
                 return np.nan
+            return fv if np.isfinite(fv) else np.nan
 
         p_pk = _ms("P_peak");  q_pk = _ms("Q_peak")
         s_pk = _ms("S_peak");  t_pk = _ms("T_peak")
