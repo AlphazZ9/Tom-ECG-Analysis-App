@@ -1893,8 +1893,11 @@ def detect_peaks_sg_derivative(
     # judged against LOCAL-WINDOW medians (±10 battements) rather than global
     # ones — avoids false rejections in low-amplitude segments caused by
     # electrode drift, motion artifact, or anesthesia transitions.
-    # Shared with detect_peaks_wavelet via _local_morphology_filter (width/
-    # asymmetry criteria left disabled here — identical behaviour to before).
+    # Only this detector (detect_peaks_sg_derivative) calls
+    # _local_morphology_filter — detect_peaks_wavelet uses its own
+    # composite-score pipeline instead and never reaches this helper
+    # (width/asymmetry criteria left disabled here — identical behaviour to
+    # before).
     if len(r_peaks):
         r_peaks = _local_morphology_filter(
             r_peaks, signal_orig, orig_fs,
@@ -2144,7 +2147,11 @@ def detect_rr_artifacts(
                   pour un résultat correct ; le paramètre reste optionnel
                   uniquement pour ne pas casser d'éventuels appels existants
                   qui n'ont pas le signal sous la main.
-    Pass 1       : bornes physiologiques (nonphysio).
+    Pass 1       : bornes physiologiques (nonphysio) — flags only the too-short
+                  side (gap < rr_min_ms, likely a spurious extra peak). A gap
+                  > rr_max_ms flags nothing: it almost always means a missed
+                  beat or genuine pause/AV-block, not a spurious flanking
+                  peak, so there is no peak here whose removal fixes anything.
     Pass 2       : écart à la médiane locale (ectopic) — FIX ⑥ sans biais rr_bi.
     """
     rpeaks = np.sort(np.asarray(rpeaks, dtype=int).flatten())
@@ -2195,14 +2202,19 @@ def detect_rr_artifacts(
         gap = rr_ms[k]
         if rr_min_ms <= gap <= rr_max_ms:
             continue
-        dev_lo = abs(gap - rr_min_ms) / max(rr_min_ms, 1)
-        dev_hi = abs(gap - rr_max_ms) / max(rr_max_ms, 1)
-        dev    = dev_lo if gap < rr_min_ms else dev_hi
         if gap < rr_min_ms:
+            dev = abs(gap - rr_min_ms) / max(rr_min_ms, 1)
+            # Too-short gap: most likely an extra/duplicate detection next
+            # to the true beat -- removing one peak plausibly fixes it.
             _add(k + 1, "nonphysio", round(dev, 3), float("nan"))
-        else:
-            _add(k,     "nonphysio", round(dev, 3), float("nan"))
-            _add(k + 1, "nonphysio", round(dev, 3), float("nan"))
+        # else: gap > rr_max_ms. This almost always means a genuinely missed
+        # beat, sinus pause, or AV-block-like event -- neither flanking peak
+        # is itself spurious, so there is no peak here whose removal would
+        # "fix" anything. Flagging both used to auto-delete two real R-peaks
+        # via correct_rr_artifacts() whenever artifact correction was
+        # enabled, destroying the very pause/AV-block event a user would
+        # want to see. Left unflagged; classify_arrhythmias() already
+        # surfaces overlong gaps as "pause" events for review.
 
     # Pass 2 : ectopique (médiane locale sans biais rr_bi)
     half         = window_beats // 2
@@ -2452,7 +2464,14 @@ def classify_arrhythmias(
     WIN = 11; half = WIN // 2
 
     def _lmed(i: int) -> float:
-        return float(np.median(rr_ms[max(0, i - half):min(n, i + half + 1)]))
+        # Exclude rr_ms[i] itself from its own reference window -- a
+        # centered slice rr_ms[i-half:i+half+1] always contains the tested
+        # interval, biasing the local reference toward the very value being
+        # judged against it (matches the self-excluding neighbor logic
+        # already used in detect_rr_artifacts's Pass 2 below).
+        lo, hi = max(0, i - half), min(n, i + half + 1)
+        window = np.concatenate([rr_ms[lo:i], rr_ms[i + 1:hi]])
+        return float(np.median(window)) if len(window) else float(rr_ms[i])
 
     local_med  = np.array([_lmed(i) for i in range(n)])
     rr_hi_ctx  = 60_000.0 / (ctx.hr_lo if ctx else 180.0)
