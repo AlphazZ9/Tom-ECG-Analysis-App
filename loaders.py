@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -38,11 +38,8 @@ def _serialise_results(results: dict) -> dict:
         elif isinstance(val, np.ndarray):
             out[key] = {"__ndarray__": True, "data": val.tolist(), "dtype": str(val.dtype)}
         else:
-            try:
-                # scalars, lists, basic types — pickle handles the rest
-                out[key] = val
-            except Exception:
-                out[key] = None
+            # scalars, lists, basic types — pass through as-is
+            out[key] = val
     return out
 
 
@@ -135,46 +132,83 @@ def _detect_fs_from_mat(raw: dict, channel: str) -> Optional[float]:
     return None
 
 
+def _detect_fs_from_hdf5_obj(f: "Any", channel: str) -> Optional[float]:
+    """Same as _detect_fs_from_hdf5, but takes an already-open h5py.File.
+
+    Split out so load_mat_signal() can open the HDF5 file once and reuse it
+    for both fs-detection and channel flattening, instead of each helper
+    opening (and re-parsing the file's group tree from) its own handle.
+    """
+    # Try channel group interval attribute
+    grp = f.get(channel)
+    if grp is not None and isinstance(grp, h5py.Group):
+        for attr in ("interval", "sample_interval"):
+            v = grp.get(attr)
+            if v is not None:
+                try:
+                    interval = float(np.array(v).flat[0])
+                    if 1e-6 < interval < 1.0:
+                        return round(1.0 / interval)
+                except Exception as _exc:
+                    log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 1758, _exc)
+        for attr in ("fs", "Fs", "sample_rate"):
+            v = grp.get(attr)
+            if v is not None:
+                try:
+                    fs_val = float(np.array(v).flat[0])
+                    if 100 <= fs_val <= 500_000:
+                        return round(fs_val)
+                except Exception as _exc:
+                    log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 1767, _exc)
+    # Top-level datasets
+    for key in ("fs", "Fs", "sample_rate", "samplerate"):
+        v = f.get(key)
+        if v is not None:
+            try:
+                fs_val = float(np.array(v).flat[0])
+                if 100 <= fs_val <= 500_000:
+                    return round(fs_val)
+            except Exception as _exc:
+                log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 1777, _exc)
+    return None
+
+
 def _detect_fs_from_hdf5(filepath: str, channel: str) -> Optional[float]:
     """Try to read the sampling rate from a Spike2 v7.3 HDF5 .mat file."""
     if not H5_AVAILABLE or h5py is None:
         return None
     try:
         with h5py.File(filepath, "r") as f:
-            # Try channel group interval attribute
-            grp = f.get(channel)
-            if grp is not None and isinstance(grp, h5py.Group):
-                for attr in ("interval", "sample_interval"):
-                    v = grp.get(attr)
-                    if v is not None:
-                        try:
-                            interval = float(np.array(v).flat[0])
-                            if 1e-6 < interval < 1.0:
-                                return round(1.0 / interval)
-                        except Exception as _exc:
-                            log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 1758, _exc)
-                for attr in ("fs", "Fs", "sample_rate"):
-                    v = grp.get(attr)
-                    if v is not None:
-                        try:
-                            fs_val = float(np.array(v).flat[0])
-                            if 100 <= fs_val <= 500_000:
-                                return round(fs_val)
-                        except Exception as _exc:
-                            log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 1767, _exc)
-            # Top-level datasets
-            for key in ("fs", "Fs", "sample_rate", "samplerate"):
-                v = f.get(key)
-                if v is not None:
-                    try:
-                        fs_val = float(np.array(v).flat[0])
-                        if 100 <= fs_val <= 500_000:
-                            return round(fs_val)
-                    except Exception as _exc:
-                        log.debug("%s at %s:%d — %s", type(_exc).__name__, __name__, 1777, _exc)
+            return _detect_fs_from_hdf5_obj(f, channel)
     except Exception as exc:
         log.debug("_detect_fs_from_hdf5: %s", exc)
     return None
+
+
+def _flatten_hdf5_file_obj(f: "Any") -> dict[str, np.ndarray]:
+    """Same as _flatten_hdf5_file, but takes an already-open h5py.File."""
+    flat: dict[str, np.ndarray] = {}
+    for key in f.keys():
+        group = f[key]
+        found = False
+        for sub in ("values", "data"):
+            if isinstance(group, h5py.Group) and sub in group:
+                try:
+                    arr = np.array(group[sub]).flatten()
+                    if len(arr) > 100:
+                        flat[key] = arr
+                except Exception as exc:
+                    log.debug("HDF5 '%s/%s': %s", key, sub, exc)
+                found = True
+                break
+        if not found and isinstance(group, h5py.Dataset):
+            try:
+                arr = np.array(group).flatten()
+                if len(arr) > 100:
+                    flat[key] = arr
+            except Exception as exc:
+                log.debug("HDF5 dataset '%s': %s", key, exc)
+    return flat
 
 
 def _flatten_hdf5_file(filepath: str) -> dict[str, np.ndarray]:
@@ -193,29 +227,8 @@ def _flatten_hdf5_file(filepath: str) -> dict[str, np.ndarray]:
             "MATLAB v7.3 (HDF5) file detected — h5py is required.\n"
             "Run:  pip install h5py"
         )
-    flat: dict[str, np.ndarray] = {}
     with h5py.File(filepath, "r") as f:
-        for key in f.keys():
-            group = f[key]
-            found = False
-            for sub in ("values", "data"):
-                if isinstance(group, h5py.Group) and sub in group:
-                    try:
-                        arr = np.array(group[sub]).flatten()
-                        if len(arr) > 100:
-                            flat[key] = arr
-                    except Exception as exc:
-                        log.debug("HDF5 '%s/%s': %s", key, sub, exc)
-                    found = True
-                    break
-            if not found and isinstance(group, h5py.Dataset):
-                try:
-                    arr = np.array(group).flatten()
-                    if len(arr) > 100:
-                        flat[key] = arr
-                except Exception as exc:
-                    log.debug("HDF5 dataset '%s': %s", key, exc)
-    return flat
+        return _flatten_hdf5_file_obj(f)
 
 
 def _pick_best_channel(
@@ -242,7 +255,14 @@ def _pick_best_channel(
 
     best = max(flat, key=lambda k: channel_score(flat[k]), default=None)
     if best and channel_score(flat[best]) > 0:
-        log.warning("Channel '%s' not found; auto-selected '%s'", preferred, best)
+        scores = sorted(
+            ((k, channel_score(flat[k])) for k in flat), key=lambda kv: -kv[1]
+        )
+        runner_up = f", runner-up {scores[1][0]!r} (score {scores[1][1]})" if len(scores) > 1 else ""
+        log.warning(
+            "Channel '%s' not found; auto-selected '%s' (score %d%s) out of %s",
+            preferred, best, channel_score(flat[best]), runner_up, keys,
+        )
         return flat[best].astype(np.float64), best, keys
 
     raise ValueError(f"No ECG channel found. Available keys: {keys}")
@@ -265,6 +285,15 @@ def load_mat_signal(
     detected_channel : str
     all_keys         : list[str]
     detected_fs      : float or None  — sampling rate read from file metadata
+
+    Raises
+    ------
+    ImportError  if the file is v7.3/HDF5 and h5py is not installed.
+    ValueError   if no plausible ECG channel is found (see _pick_best_channel).
+    Any other exception scipy.io.loadmat / h5py raise for a corrupt or
+    unreadable file (e.g. OSError) propagates uncaught — callers that load
+    user-supplied files should wrap this call and report the message rather
+    than assume only the two cases above are possible.
     """
     # Try MATLAB v5/v6 first
     try:
@@ -276,9 +305,18 @@ def load_mat_signal(
     except NotImplementedError:
         pass  # v7.3 HDF5 — fall through
 
-    flat = _flatten_hdf5_file(filepath)
-    sig, ch, keys = _pick_best_channel(flat, channel)
-    detected_fs = _detect_fs_from_hdf5(filepath, ch)
+    if not H5_AVAILABLE or h5py is None:
+        raise ImportError(
+            "MATLAB v7.3 (HDF5) file detected — h5py is required.\n"
+            "Run:  pip install h5py"
+        )
+    # Single open shared by both the channel-flattening pass and the
+    # fs-detection pass below (each used to open the file independently,
+    # doubling I/O and HDF5 tree-parsing cost per load).
+    with h5py.File(filepath, "r") as f:
+        flat = _flatten_hdf5_file_obj(f)
+        sig, ch, keys = _pick_best_channel(flat, channel)
+        detected_fs = _detect_fs_from_hdf5_obj(f, ch)
     return sig, ch, keys, detected_fs
 
 
