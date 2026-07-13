@@ -1,0 +1,14 @@
+# Core runtime dependencies — see setup.py for the packaging metadata.
+# Version floors reflect what this app is developed and tested against.
+customtkinter>=5.2
+matplotlib>=3.8
+numpy>=1.26
+pandas>=2.1
+scipy>=1.11
+neurokit2>=0.2
+openpyxl>=3.1
+Pillow>=10.0
+
+# Optional — only needed for specific features:
+h5py>=3.10       # MATLAB v7.3 / HDF5 file loading
+pzfx>=0.3         # GraphPad Prism (.pzfx) export
