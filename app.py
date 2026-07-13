@@ -4744,13 +4744,13 @@ class ECGApp(ctk.CTk):
     #  9. COMPARE SEGMENTS — statistical test (Wilcoxon)
     # ════════════════════════════════════════════════════════
 
-    def _wilcoxon_test(self, a: "np.ndarray", b: "np.ndarray") -> "tuple[float, str]":
+    def _mannwhitney_test(self, a: "np.ndarray", b: "np.ndarray") -> "tuple[float, str]":
         """Mann-Whitney U test for two independent RR series.
 
         Returns (p_value, interpretation_string).
         Falls back gracefully if scipy is unavailable.
         """
-        return self.analysis_ctrl.wilcoxon_test(a, b)
+        return self.analysis_ctrl.mannwhitney_test(a, b)
 
     # ════════════════════════════════════════════════════════
     #  10. ARRHYTHMIA EPISODE PDF (one strip per episode)

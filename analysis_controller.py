@@ -103,6 +103,7 @@ class AnalysisController:
             min_beats = max(3, int(self.app.ent_arr_min_beats.get()))
         except (ValueError, AttributeError):
             min_beats = 10
+        _gen = getattr(self.app, "_generation", 0)  # snapshot — detect file change
 
         def _worker():
             return classify_arrhythmias(
@@ -113,6 +114,9 @@ class AnalysisController:
             )
 
         def _done(events: "list[ArrhythmiaEvent]"):
+            if getattr(self.app, "_generation", 0) != _gen:
+                log.info("run_arrhythmia_analysis: stale result discarded (file changed)")
+                return
             self.app.analysis.arrhythmia_events = events
             self.app.analysis.arr_selected_idx  = -1
 
@@ -489,6 +493,7 @@ class AnalysisController:
             self.app._set_status("Not enough peaks in the analysis window.", ORANGE)
             return
         fs     = float(self.app.signal.fs)
+        _gen = getattr(self.app, "_generation", 0)  # snapshot — detect file change
 
         def _worker():
             t_peaks  = rpeaks / fs
@@ -525,6 +530,9 @@ class AnalysisController:
             return rows
 
         def _done(rows):
+            if getattr(self.app, "_generation", 0) != _gen:
+                log.info("compute_rolling_hrv: stale result discarded (file changed)")
+                return
             if not rows:
                 self.app.lbl_roll_status.configure(  # type: ignore[union-attr]
                     text="No valid windows — recording too short?",
@@ -1061,6 +1069,7 @@ class AnalysisController:
         step      = max(1.0, epoch_s - overlap_s)
         t_win_start = float(t_peaks[0])    # absolute start of the windowed range
         starts    = np.arange(t_win_start, t_win_start + dur - epoch_s + step * 0.5, step)
+        _gen = getattr(self.app, "_generation", 0)  # snapshot — detect file change
         if len(starts) < 2:
             messagebox.showwarning(
                 "Too few epochs",
@@ -1104,6 +1113,9 @@ class AnalysisController:
             return rows
 
         def _done(rows):
+            if getattr(self.app, "_generation", 0) != _gen:
+                log.info("compute_epochs: stale result discarded (file changed)")
+                return
             if not rows:
                 messagebox.showwarning("No epochs", "No valid epochs found.")
                 return
@@ -1146,8 +1158,15 @@ class AnalysisController:
         self.app._start_async_result(self.app.btn_compute_epochs, "Computing…", _worker, _done)
 
     @staticmethod
-    def wilcoxon_test(a: "np.ndarray", b: "np.ndarray") -> "tuple[float, str]":
+    def mannwhitney_test(a: "np.ndarray", b: "np.ndarray") -> "tuple[float, str]":
         """Mann-Whitney U test for two independent RR series.
+
+        Named for the test it actually runs (mannwhitneyu) -- this used to be
+        called wilcoxon_test, but the Wilcoxon signed-rank test is a paired
+        test and doesn't apply to two independent segments the way this is
+        used. Not currently wired into any caller (see _open_compare_segments
+        in app.py); kept as an available utility for a future segment-vs-
+        segment significance test.
 
         Returns (p_value, interpretation_string).
         Falls back gracefully if scipy is unavailable.
