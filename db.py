@@ -24,6 +24,7 @@ The registry lives at SESSION_DIR / "ecg_registry.db".
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from datetime import datetime
@@ -62,14 +63,41 @@ CREATE INDEX IF NOT EXISTS idx_saved ON recordings(saved_at DESC);
 """
 
 
+_schema_ready = False   # apply _SCHEMA at most once per process, not per connection
+
+
 def _conn() -> sqlite3.Connection:
     """Open (or create) the registry database, applying the schema."""
+    global _schema_ready
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(_DB_PATH), timeout=5, check_same_thread=False)
     con.row_factory = sqlite3.Row
-    con.executescript(_SCHEMA)
-    con.commit()
+    if not _schema_ready:
+        con.executescript(_SCHEMA)
+        con.commit()
+        _schema_ready = True
     return con
+
+
+@contextlib.contextmanager
+def _open():
+    """Open a registry connection for one operation.
+
+    ``with _conn() as con:`` (the previous pattern at every call site) only
+    ever gets you sqlite3.Connection's own commit-on-success/rollback-on-
+    exception __exit__ -- it does not close the connection afterwards.  That
+    happened to work here because CPython's refcounting collects (and closes)
+    the object promptly, but it's not behaviour the `with` statement itself
+    guarantees, and would leak file handles under any GC that doesn't collect
+    as eagerly. This wraps that same commit/rollback semantics in a try/
+    finally that always calls con.close().
+    """
+    con = _conn()
+    try:
+        with con:
+            yield con
+    finally:
+        con.close()
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -81,12 +109,24 @@ def upsert_recording(
     stats: "Optional[dict[str, Any]]" = None,
     notes: str = "",
 ) -> None:
-    """Insert or update a recording row with optional stats summary."""
+    """Insert or update a recording row with optional stats summary.
+
+    *notes* is written as given, including an empty string -- it used to be
+    merged via ``CASE WHEN excluded.notes != '' THEN excluded.notes ELSE
+    recordings.notes END``, meant to avoid some hypothetical caller
+    accidentally blanking notes with an unset default. In practice the only
+    caller (SessionController.save_session) always passes the *current*
+    ``self.app.session.recording_notes`` -- so a user who cleared their notes
+    and saved would see the JSON session correctly record the empty string
+    while this table silently kept the stale old note forever, since '' can
+    never overwrite anything under that CASE. Plain overwrite matches
+    set_notes()'s semantics below and keeps both write paths consistent.
+    """
     stem = Path(filepath).stem
     now  = datetime.now().isoformat()
     s    = stats or {}
     try:
-        with _conn() as con:
+        with _open() as con:
             con.execute("""
                 INSERT INTO recordings
                     (filepath, stem, fingerprint, saved_at, duration_s, n_peaks,
@@ -101,8 +141,7 @@ def upsert_recording(
                     sdnn         = excluded.sdnn,
                     rmssd        = excluded.rmssd,
                     session_path = excluded.session_path,
-                    notes = CASE WHEN excluded.notes != '' THEN excluded.notes
-                                 ELSE recordings.notes END
+                    notes        = excluded.notes
             """, (filepath, stem, fingerprint, now,
                   s.get("duration_s"), s.get("n_peaks"),
                   s.get("hr_mean"), s.get("sdnn"), s.get("rmssd"),
@@ -114,7 +153,7 @@ def upsert_recording(
 def get_recording(filepath: str) -> "Optional[dict]":
     """Return the row for *filepath*, or None."""
     try:
-        with _conn() as con:
+        with _open() as con:
             row = con.execute(
                 "SELECT * FROM recordings WHERE filepath=?", (filepath,)
             ).fetchone()
@@ -133,7 +172,7 @@ def get_notes(filepath: str) -> str:
 def set_notes(filepath: str, notes: str) -> None:
     """Update (or create) the notes for a recording."""
     try:
-        with _conn() as con:
+        with _open() as con:
             con.execute("""
                 INSERT INTO recordings (filepath, stem, fingerprint, saved_at, notes)
                 VALUES (?,?,?,?,?)
@@ -146,7 +185,7 @@ def set_notes(filepath: str, notes: str) -> None:
 def recent_recordings(limit: int = 20) -> "list[dict]":
     """Return up to *limit* recent recordings ordered by saved_at DESC."""
     try:
-        with _conn() as con:
+        with _open() as con:
             rows = con.execute(
                 "SELECT * FROM recordings ORDER BY saved_at DESC LIMIT ?",
                 (limit,)
@@ -160,7 +199,7 @@ def recent_recordings(limit: int = 20) -> "list[dict]":
 def delete_recording(filepath: str) -> bool:
     """Remove the registry entry (does NOT delete the session payload file)."""
     try:
-        with _conn() as con:
+        with _open() as con:
             cur = con.execute(
                 "DELETE FROM recordings WHERE filepath=?", (filepath,))
             return cur.rowcount > 0
@@ -173,7 +212,7 @@ def search_recordings(query: str, limit: int = 50) -> "list[dict]":
     """Full-text search on stem + notes."""
     q = f"%{query}%"
     try:
-        with _conn() as con:
+        with _open() as con:
             rows = con.execute("""
                 SELECT * FROM recordings
                 WHERE stem LIKE ? OR notes LIKE ?
