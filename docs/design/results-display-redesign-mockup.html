@@ -1,0 +1,272 @@
+<h2 class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);">Preview comparing the current ECG results display against a proposed redesign with a detailed signal-quality panel and a de-duplicated summary tab</h2>
+<style>
+  :root{
+    --bg:#F5F5F7; --panel:#FAFAFA; --card:#FFFFFF; --border:#D2D2D7; --border2:#AEAEB2;
+    --text:#1D1D1F; --muted:#6E6E73;
+    --blue:#0071E3; --blue-dark:#1565C0; --blue-hover:#1344A8;
+    --green:#34C759; --green-dark:#2E7D32;
+    --orange:#FF9500; --orange-dark:#E65100; --orange-deep:#BF360C;
+    --red:#FF3B30; --red-dark:#B71C1C;
+    --purple:#6A1B9A; --pink:#AD1457; --teal:#00695C; --slate:#37474F; --amber-dark:#FF6F00;
+    --good:#2E7D32; --good-bg:#E8F5E9;
+    --warn:#B26A00; --warn-bg:#FFF3E0;
+    --bad:#B71C1C; --bad-bg:#FDECEA;
+  }
+  [data-theme="dark"], .force-dark{
+    --bg:#1C1C1E; --panel:#242426; --card:#2C2C2E; --border:#3A3A3C; --border2:#48484A;
+    --text:#F2F2F7; --muted:#98989D;
+    --good-bg:#1B3320; --warn-bg:#3A2A0E; --bad-bg:#3A1414;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;}
+  .app{
+    font-family:"Segoe UI Variable","Segoe UI",system-ui,sans-serif;
+    background:var(--bg); color:var(--text);
+    border:0.5px solid var(--border); border-radius:12px; overflow:hidden;
+  }
+  .toolbar{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--border);
+  }
+  .toolbar-label{font-size:13px; color:var(--muted);}
+  .seg{display:flex; background:var(--bg); border:1px solid var(--border); border-radius:8px; overflow:hidden;}
+  .seg button{
+    border:none; background:transparent; color:var(--muted); font-size:13px; font-weight:500;
+    padding:6px 14px; cursor:pointer; font-family:inherit;
+  }
+  .seg button.active{background:var(--blue); color:#fff;}
+  .kpibar{display:flex; background:var(--panel); border-bottom:1px solid var(--border); padding:10px 16px; gap:0;}
+  .kpigrid{display:grid; grid-template-columns:repeat(4,1fr); gap:10px 20px; flex:1;}
+  .kpicell{display:flex; flex-direction:column; gap:2px;}
+  .kpilabel{font-size:10px; color:var(--muted); letter-spacing:.2px;}
+  .kpival{font-size:15px; font-weight:600;}
+  .kpi-chip{display:inline-flex; align-items:center; gap:5px;}
+  .dot{width:7px; height:7px; border-radius:50%; flex:none;}
+  .qbadge{
+    align-self:center; font-size:11px; font-weight:600; padding:5px 12px; border-radius:6px;
+    white-space:nowrap;
+  }
+  .tabstrip{display:flex; gap:6px; padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--border);}
+  .tab{font-size:12px; color:var(--muted); padding:6px 14px; border-radius:6px;}
+  .tab.active{background:var(--card); color:var(--text); font-weight:600; border:1px solid var(--border);}
+  .body{padding:16px; max-height:640px; overflow:auto;}
+  .note{
+    font-size:11px; color:var(--bad); background:var(--bad-bg); border-radius:5px;
+    padding:2px 7px; display:inline-block; font-weight:600;
+  }
+  .card{background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 14px; margin-bottom:12px;}
+  .cardrow{display:flex; gap:12px;}
+  .cardrow > .card{flex:1; margin-bottom:0;}
+  .sectitle{font-size:11px; font-weight:700; letter-spacing:.3px; color:var(--muted); margin:0 0 8px;}
+  .stripe{height:3px; border-radius:2px; margin-bottom:8px;}
+  .placeholder{
+    height:120px; border-radius:6px; background:
+      repeating-linear-gradient(135deg, var(--panel), var(--panel) 8px, var(--bg) 8px, var(--bg) 16px);
+    border:1px dashed var(--border2);
+    display:flex; align-items:center; justify-content:center;
+    font-size:11px; color:var(--muted); text-align:center; padding:8px;
+  }
+  .placeholder.small{height:88px;}
+  .metricrow{display:flex; align-items:center; padding:7px 0; border-bottom:1px solid var(--border); font-size:13px;}
+  .metricrow:last-child{border-bottom:none;}
+  .metricname{flex:1.4; color:var(--text);}
+  .metricval{flex:0.8; font-weight:600; text-align:right; padding-right:10px;}
+  .metricrange{flex:1.1; color:var(--muted); font-size:11px;}
+  .metricstatus{width:64px; text-align:right;}
+  .pill{font-size:10px; font-weight:600; padding:2px 8px; border-radius:10px;}
+  .verdict{display:flex; align-items:center; gap:10px; padding:10px 14px; border-radius:8px; margin-bottom:14px;}
+  .verdict .vdot{width:10px; height:10px; border-radius:50%;}
+  .verdict-text{font-size:13px;}
+  .verdict-text b{font-weight:600;}
+  .linkout{font-size:11px; color:var(--blue); cursor:pointer;}
+  hr.sep{border:none; border-top:1px solid var(--border); margin:14px 0;}
+</style>
+
+<div class="app" id="app">
+  <div class="toolbar">
+    <span class="toolbar-label">Preview — click to compare</span>
+    <div class="seg">
+      <button id="btn-current" class="active">Current</button>
+      <button id="btn-proposed">Proposed</button>
+    </div>
+  </div>
+
+  <div id="kpibar-current"></div>
+  <div id="kpibar-proposed" style="display:none"></div>
+
+  <div class="tabstrip">
+    <span class="tab">Detection</span><span class="tab">HRV</span><span class="tab">Intervals</span>
+    <span class="tab">Beat Template</span><span class="tab">Arrhythmias</span>
+    <span class="tab active">Summary</span>
+  </div>
+
+  <div class="body">
+    <div id="summary-current"></div>
+    <div id="summary-proposed" style="display:none"></div>
+  </div>
+</div>
+
+<script>
+const kpisCurrent = [
+  ["HR Mean","512 bpm"], ["HR Range","470–580"], ["Mean RR","117 ms"], ["N Beats","2,481"],
+  ["SDNN","11.4 ms"], ["RMSSD","7.8 ms"], ["pNN6","28.3 %"], ["Duration","288 s"],
+];
+document.getElementById("kpibar-current").innerHTML = `
+  <div class="kpibar">
+    <div class="kpigrid">
+      ${kpisCurrent.map(([l,v]) => `<div class="kpicell"><span class="kpilabel">${l}</span><span class="kpival">${v}</span></div>`).join("")}
+    </div>
+    <span class="qbadge" style="background:var(--good-bg); color:var(--good);">Signal quality: 88%</span>
+  </div>`;
+
+const kpisProposed = [
+  ["HR mean","512 bpm"], ["HR range","470–580"], ["Mean RR","117 ms"], ["N beats","2,481"],
+  ["SDNN","11.4 ms"], ["RMSSD","7.8 ms"], ["pNN6","28.3 %"], ["Duration","288 s"],
+];
+document.getElementById("kpibar-proposed").innerHTML = `
+  <div class="kpibar">
+    <div class="kpigrid">
+      ${kpisProposed.map(([l,v]) => `<div class="kpicell"><span class="kpilabel">${l}</span><span class="kpival">${v}</span></div>`).join("")}
+    </div>
+    <span class="qbadge" style="background:var(--good-bg); color:var(--good); cursor:pointer;" title="Click Signal Quality section in Summary for the breakdown">Quality 88% · good ⓘ</span>
+  </div>`;
+
+document.getElementById("summary-current").innerHTML = `
+  <div class="card">
+    <div class="sectitle">SUMMARY KPI STRIP (duplicates the header above)</div>
+    <div style="display:grid; grid-template-columns:repeat(6,1fr); gap:8px;">
+      ${[["Mean HR","512","bpm"],["Min HR","470","bpm"],["FC max","580","bpm"],["SDNN","11.4","ms"],
+         ["RMSSD","7.8","ms"],["pNN6","28.3","%"],["Porta","46","%"],["LF/HF","1.8",""],
+         ["PR","32","ms"],["QRS","11","ms"],["QTc","64","ms"],["QT disp.","9","ms"]]
+        .map(([l,v,u]) => `<div style="background:var(--panel); border-radius:6px; padding:8px; text-align:center;">
+            <div style="font-size:9px; color:var(--muted);">${l}</div>
+            <div style="font-size:14px; font-weight:700;">${v}</div>
+            <div style="font-size:9px; color:var(--muted);">${u}</div></div>`).join("")}
+    </div>
+    <div style="margin-top:8px;"><span class="note">4 of these repeat the header KPI bar</span>
+    <span class="note" style="margin-left:6px;">"FC max" mixes FR into an English strip</span></div>
+  </div>
+
+  <div class="card">
+    <div class="stripe" style="background:var(--orange-dark);"></div>
+    <div class="sectitle" style="color:var(--orange-dark);">HEART RATE &amp; TACHOGRAM</div>
+    <div class="placeholder">RR tachogram</div>
+    <div class="cardrow" style="margin-top:8px;">
+      <div class="placeholder small">RR histogram</div>
+      <div class="placeholder small">HR distribution</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="stripe" style="background:var(--blue-dark);"></div>
+    <div class="sectitle" style="color:var(--blue-dark);">HRV — TIME &amp; FREQUENCY</div>
+    <div class="cardrow"><div class="placeholder">PSD <span class="note" style="margin-left:6px;">= HRV tab</span></div><div class="placeholder">Radar <span class="note" style="margin-left:6px;">= HRV tab</span></div></div>
+    <div class="cardrow" style="margin-top:8px;"><div class="placeholder small">Poincaré <span class="note" style="margin-left:6px;">= HRV tab</span></div><div class="placeholder small">RR asymmetry</div></div>
+  </div>
+
+  <div class="card">
+    <div class="stripe" style="background:var(--purple);"></div>
+    <div class="sectitle" style="color:var(--purple);">BEAT MORPHOLOGY</div>
+    <div class="placeholder">Mean beat template <span class="note" style="margin-left:6px;">= Beat Template tab</span></div>
+  </div>
+
+  <div class="card">
+    <div class="stripe" style="background:var(--pink);"></div>
+    <div class="sectitle" style="color:var(--pink);">ECG INTERVALS</div>
+    <div class="placeholder">PR / QRS / QT / QTc <span class="note" style="margin-left:6px;">= Intervals tab</span></div>
+  </div>
+
+  <div class="card">
+    <div class="stripe" style="background:var(--teal);"></div>
+    <div class="sectitle" style="color:var(--teal);">ROLLING HRV OVER TIME</div>
+    <div class="placeholder">Rolling SDNN / RMSSD <span class="note" style="margin-left:6px;">= HRV tab</span></div>
+  </div>
+`;
+
+const metricGroups = [
+  {title:"Rate", color:"var(--orange-dark)", rows:[
+    ["HR mean","512","bpm"], ["HR range","470–580","bpm"],
+  ]},
+  {title:"Time-domain HRV", color:"var(--blue-dark)", rows:[
+    ["SDNN","11.4","ms"], ["RMSSD","7.8","ms"], ["pNN6","28.3","%"],
+  ]},
+  {title:"Frequency / non-linear", color:"var(--slate)", rows:[
+    ["LF/HF","1.8",""], ["SampEn","1.12",""], ["DFA α1","0.91",""],
+  ]},
+  {title:"Intervals (delineation)", color:"var(--pink)", rows:[
+    ["PR","32","ms"], ["QRS","11","ms"], ["QTc","64","ms"],
+  ]},
+];
+
+document.getElementById("summary-proposed").innerHTML = `
+  <div class="verdict" style="background:var(--good-bg);">
+    <span class="vdot" style="background:var(--good);"></span>
+    <span class="verdict-text"><b>Signal quality 88% — good.</b> 2,481 beats over 288 s · 12 beats auto-corrected</span>
+  </div>
+
+  <div class="card">
+    <div class="sectitle" style="color:var(--good);">SIGNAL QUALITY</div>
+    <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-bottom:10px;">
+      <div>
+        <div class="kpilabel">Overall score</div>
+        <div class="kpival" style="font-size:20px; color:var(--good);">88%</div>
+      </div>
+      <div>
+        <div class="kpilabel">Mean template correlation</div>
+        <div class="kpival">0.94</div>
+      </div>
+      <div>
+        <div class="kpilabel">Beats below 0.90 corr.</div>
+        <div class="kpival">3.2% <span style="font-weight:400; font-size:11px; color:var(--muted);">(79/2,481)</span></div>
+      </div>
+      <div>
+        <div class="kpilabel">Auto-corrected</div>
+        <div class="kpival">12 <span style="font-weight:400; font-size:11px; color:var(--muted);">(7 dup · 3 non-physio · 2 ectopic)</span></div>
+      </div>
+    </div>
+    <div class="placeholder" style="height:140px;">Morphological quality over time <span class="note" style="margin-left:6px; background:transparent; color:var(--muted); font-weight:400;">promoted from buried Summary section</span></div>
+  </div>
+
+  <div class="card">
+    <div class="cardrow">
+      <div class="placeholder" style="height:200px;">RR tachogram <span class="note" style="margin-left:6px; background:transparent; color:var(--muted); font-weight:400;">kept — densest single view</span></div>
+      <div class="placeholder" style="height:200px; flex:0.7;">Poincaré <span class="note" style="margin-left:6px; background:transparent; color:var(--muted); font-weight:400;">kept — shape at a glance</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    ${metricGroups.map(g => `
+      <div style="margin-bottom:10px;">
+        <div class="sectitle" style="color:${g.color};">${g.title}</div>
+        ${g.rows.map(([name,val,unit]) => `
+          <div class="metricrow">
+            <span class="metricname">${name}</span>
+            <span class="metricval">${val}${unit ? " "+unit : ""}</span>
+          </div>`).join("")}
+      </div>`).join("")}
+  </div>
+
+  <div class="card" style="display:flex; justify-content:space-between; align-items:center;">
+    <span style="font-size:12px; color:var(--muted);">Full plots for every metric above live in their own tabs.</span>
+    <span class="linkout">HRV · Intervals · Beat Template · Arrhythmias &rarr;</span>
+  </div>
+
+  <hr class="sep">
+  <div class="card">
+    <div class="sectitle">DETAILED REPORT</div>
+    <div class="placeholder small">Text report (unchanged from current)</div>
+  </div>
+`;
+
+function setMode(mode){
+  const cur = mode === "current";
+  document.getElementById("btn-current").classList.toggle("active", cur);
+  document.getElementById("btn-proposed").classList.toggle("active", !cur);
+  document.getElementById("kpibar-current").style.display = cur ? "" : "none";
+  document.getElementById("kpibar-proposed").style.display = cur ? "none" : "";
+  document.getElementById("summary-current").style.display = cur ? "" : "none";
+  document.getElementById("summary-proposed").style.display = cur ? "none" : "";
+}
+document.getElementById("btn-current").onclick = () => setMode("current");
+document.getElementById("btn-proposed").onclick = () => setMode("proposed");
+</script>
