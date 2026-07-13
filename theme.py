@@ -517,7 +517,15 @@ def _sync_to_submodules() -> None:
     # inside theme.py itself.
     _submodule_names = (
         "app", "sidebar", "plots", "dialogs", "export",
-        "models", "detection", "loaders", "analysis",
+        "models", "detection", "loaders", "analysis", "wave_editor",
+        # Controller modules extracted from app.py -- each imports its own
+        # subset of colour/font names at module scope, so each needs the
+        # same re-sync or its colours freeze at whatever theme was active
+        # when it was first imported (the same bug this function exists to
+        # fix, just introduced by any new sibling module going forward).
+        "navigation_controller", "export_controller", "plot_controller",
+        "session_controller", "detection_controller", "signal_controller",
+        "analysis_controller",
     )
     _this = sys.modules[__name__]
     _all  = _colour_names + _font_names
@@ -529,3 +537,16 @@ def _sync_to_submodules() -> None:
                         setattr(mod, name, getattr(_this, name))
                     except (AttributeError, TypeError):
                         pass
+            # A plain name copy only helps modules that read PLOT/BG/... etc.
+            # directly. A module that derives its OWN values from those names
+            # once at import time (e.g. plots.py's Y-scale-bar colours, which
+            # are computed from PANEL/BG/TEXT/BORDER2/MUTED) needs a chance to
+            # recompute those derived values now that the names above were
+            # just refreshed. Any submodule that defines a bare
+            # `_on_theme_changed()` function gets called here for that.
+            hook = getattr(mod, "_on_theme_changed", None)
+            if callable(hook):
+                try:
+                    hook()
+                except Exception as exc:
+                    log.debug("%s._on_theme_changed() failed: %s", mod_name, exc)

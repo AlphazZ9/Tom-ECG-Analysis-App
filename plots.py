@@ -59,7 +59,15 @@ plt.rcParams.update({
     "lines.antialiased": True,
 })
 
-# Tk colours pulled from theme for the scale bar
+# Tk colours pulled from theme for the scale bar.
+#
+# These are DERIVED from PANEL/BG/TEXT/BORDER2/MUTED, not the theme names
+# themselves -- theme._sync_to_submodules() refreshes PANEL/BG/etc. on this
+# module directly after a theme switch, but has no way to know these four
+# derived names exist or need recomputing from them. _on_theme_changed()
+# below is called by theme.py right after that refresh (if defined), so the
+# Y-scale bar picks up the new theme instead of freezing at whichever one
+# was active when this module was first imported.
 try:
     from theme import BG, BORDER, BORDER2, TEXT, MUTED
     _BAR_BG     = PANEL
@@ -70,6 +78,16 @@ try:
 except Exception:
     _BAR_BG = "#1E1E2E"; _ENTRY_BG = "#16161F"
     _ENTRY_FG = "#E0E0E0"; _ENTRY_BD = "#333355"; _LABEL_FG = "#888"
+
+
+def _on_theme_changed() -> None:
+    """Recompute the Y-scale-bar colours from the just-refreshed theme names."""
+    global _BAR_BG, _ENTRY_BG, _ENTRY_FG, _ENTRY_BD, _LABEL_FG
+    _BAR_BG   = PANEL
+    _ENTRY_BG = BG
+    _ENTRY_FG = TEXT
+    _ENTRY_BD = BORDER2
+    _LABEL_FG = MUTED
 
 
 def style_axes(ax) -> None:

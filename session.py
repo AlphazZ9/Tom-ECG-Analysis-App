@@ -73,6 +73,26 @@ def _session_path(filepath: str) -> Path:
     return SESSION_DIR / (stem + SESSION_SUFFIX)
 
 
+def _quarantine(sp: Path, reason: str) -> None:
+    """Move a bad/stale session file aside instead of deleting it outright.
+
+    A previous version of this module called ``sp.unlink()`` in every
+    corrupt/mismatched/outdated case — including when a *partially written*
+    file (e.g. the process was killed mid-save, before atomic writes were
+    added to ``save_session``) failed to parse. That silently destroyed the
+    user's last save with no way to recover it. Quarantining keeps at most
+    one aside copy per canonical session path (a fresh quarantine replaces
+    any previous one), so repeated failed load attempts on the same broken
+    file don't accumulate junk in the session directory.
+    """
+    try:
+        stale_path = sp.with_suffix(sp.suffix + ".stale")
+        sp.replace(stale_path)
+        log.info("load_session: quarantined %s → %s (%s)", sp, stale_path, reason)
+    except OSError as exc:
+        log.warning("load_session: could not quarantine %s: %s", sp, exc)
+
+
 def save_session(filepath: str, state: dict) -> Path:
     """Serialise *state* to a JSON ``.ecgsession`` file in the cache dir.
 
@@ -80,6 +100,11 @@ def save_session(filepath: str, state: dict) -> Path:
     can reject stale or mismatched caches.  All numpy arrays and DataFrames
     must be pre-converted to JSON-compatible form before calling this function
     (the caller uses ``_serialise_results`` for the ``results`` sub-key).
+
+    Written atomically (temp file in the same directory, then an atomic
+    rename) so a crash or kill mid-write can never leave a truncated
+    ``.ecgsession`` file at the canonical path — the reader always sees
+    either the previous complete save or the new one, never a torn write.
 
     Returns the path of the written file.
     """
@@ -90,8 +115,12 @@ def save_session(filepath: str, state: dict) -> Path:
         "saved_at":    datetime.now().isoformat(),
         "state":       state,
     }
-    with open(out_path, "w", encoding="utf-8") as fh:
+    tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, cls=_SessionEncoder, indent=2, ensure_ascii=False)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, out_path)   # atomic on the same filesystem
     log.info("Session saved → %s  (%d bytes)", out_path, out_path.stat().st_size)
     return out_path
 
@@ -119,11 +148,11 @@ def load_session(filepath: str) -> "Optional[dict]":
         if version not in (SESSION_VERSION, 5):
             log.info("load_session: version mismatch (%s vs %d) — ignoring cache",
                      version, SESSION_VERSION)
-            sp.unlink()
+            _quarantine(sp, f"version {version} vs {SESSION_VERSION}")
             return None
         if payload.get("fingerprint") != _file_fingerprint(filepath):
             log.info("load_session: fingerprint mismatch — file changed, ignoring cache")
-            sp.unlink()
+            _quarantine(sp, "fingerprint mismatch")
             return None
         if version == 5:
             state = payload["state"]
@@ -145,11 +174,11 @@ def load_session(filepath: str) -> "Optional[dict]":
         if payload.get("version") not in (3, 4):
             log.info("load_session: legacy pickle version %s — ignoring",
                      payload.get("version"))
-            sp.unlink()
+            _quarantine(sp, f"legacy pickle version {payload.get('version')}")
             return None
         if payload.get("fingerprint") != _file_fingerprint(filepath):
             log.info("load_session: legacy fingerprint mismatch — ignoring")
-            sp.unlink()
+            _quarantine(sp, "legacy fingerprint mismatch")
             return None
         state = payload["state"]
         # Re-save as v5 JSON so the migration only happens once
@@ -159,7 +188,7 @@ def load_session(filepath: str) -> "Optional[dict]":
         return state
     except Exception as exc:
         log.warning("load_session: legacy pickle migration failed for %s: %s", sp, exc)
-        sp.unlink()
+        _quarantine(sp, f"unreadable as JSON or pickle: {exc}")
         return None
 
 
