@@ -479,8 +479,8 @@ class ExportController:
             messagebox.showerror("PDF export failed", str(exc))
             return
 
-        app._set_status(f"Rapport PDF sauvegardé — {os.path.basename(path)}", GREEN)
-        messagebox.showinfo("PDF sauvegardé", path)
+        app._set_status(f"PDF report saved — {os.path.basename(path)}", GREEN)
+        messagebox.showinfo("PDF saved", path)
 
     def export_prism(self) -> None:
         """Export all analysis results to a GraphPad Prism .pzfx file.

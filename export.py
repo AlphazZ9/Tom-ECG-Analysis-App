@@ -359,12 +359,19 @@ class ExcelExporter:
                 if isinstance(value, float):
                     if pd.isna(value):
                         cell.value = None
-                    elif abs(value) >= 1e6 or (abs(value) < 0.001 and value != 0):
-                        cell.value     = float(f"{value:.6g}")  # type: ignore[assignment]
-                        cell.alignment = num_align
                     else:
-                        cell.value     = round(float(value), 4)  # type: ignore[assignment]
+                        # Store the full-precision value; only the display
+                        # format is rounded. Writing round(value, 4) into the
+                        # cell used to permanently truncate the exported
+                        # number itself -- re-reading the .xlsx (e.g. with
+                        # pandas) got the rounded figure, not the original.
+                        cell.value     = float(value)  # type: ignore[assignment]
                         cell.alignment = num_align
+                        cell.number_format = (
+                            "0.000000E+00"
+                            if abs(value) >= 1e6 or (abs(value) < 0.001 and value != 0)
+                            else "0.0000"
+                        )
                 elif isinstance(value, (int, np.integer)):
                     cell.value     = int(value)  # type: ignore[assignment]
                     cell.alignment = num_align
@@ -388,6 +395,11 @@ class ExcelExporter:
         epoch_df:    "Optional[pd.DataFrame]",
     ) -> "Workbook":
         """Build and return a formatted openpyxl Workbook."""
+        if "hr" not in results:
+            raise ValueError(
+                "AnalysisResults is missing the 'hr' key -- run the core "
+                "analysis before building the export workbook."
+            )
         hr = results["hr"]  # type: ignore[typeddict-item]
         wb = Workbook()
 
@@ -429,16 +441,32 @@ class ExcelExporter:
         # ── ECG_SIGNAL sheet ─────────────────────────────────────────────
         ws_sig = cast(OpenpyxlWorksheet, wb.create_sheet("ECG_Signal"))
         MAX_ROWS = 50_000
-        rp_set = set(rpeaks_ok.tolist()) if rpeaks_ok is not None else set()
         n      = len(time) if time is not None else 0
         step   = max(1, n // MAX_ROWS)
         idx    = np.arange(0, n, step)
+
+        rpeaks_sorted = (np.sort(np.asarray(rpeaks_ok))
+                          if rpeaks_ok is not None and len(rpeaks_ok) else np.array([], dtype=int))
+        if step > 1 and len(rpeaks_sorted):
+            # Each exported row now stands in for the whole sample window
+            # [idx[k], idx[k]+step) that got collapsed into it. Checking
+            # "is idx[k] itself a peak sample" (the old exact-index test)
+            # missed virtually every peak once step > 1, since a detected
+            # R-peak's sample index is essentially never an exact multiple
+            # of step. Flag the row instead if ANY peak sample falls in
+            # the window it represents.
+            starts = np.searchsorted(rpeaks_sorted, idx, side="left")
+            ends   = np.searchsorted(rpeaks_sorted, idx + step, side="left")
+            is_rpeak_col = (ends > starts).astype(int).tolist()
+        else:
+            rp_set = set(rpeaks_sorted.tolist())
+            is_rpeak_col = [1 if i in rp_set else 0 for i in idx]
 
         sig_df = pd.DataFrame({
             "Time_s":   time[idx]    if time       is not None else [],
             "Raw_norm": signal_raw[idx] if signal_raw is not None else np.full(len(idx), np.nan),
             "Filtered": signal_flt[idx] if signal_flt is not None else np.full(len(idx), np.nan),
-            "Is_RPeak": [1 if i in rp_set else 0 for i in idx],
+            "Is_RPeak": is_rpeak_col,
         })
 
         cls.write_dataframe(ws_sig, sig_df, header_color="37474F",
@@ -552,8 +580,8 @@ class PrismExporter:
             import pzfx  # noqa: F401
         except ImportError:
             raise RuntimeError(
-                "Le module 'pzfx' est requis pour l'export GraphPad Prism.\n"
-                "Installer avec : pip install pzfx"
+                "The 'pzfx' package is required for GraphPad Prism export.\n"
+                "Install it with: pip install pzfx"
             )
 
     @classmethod
@@ -740,8 +768,8 @@ class PrismExporter:
             _add("Epoch HRV", df_e[keep], x_col="Time (s)")  # type: ignore[arg-type]
 
         if not tables:
-            raise ValueError("Aucune donnée disponible pour l'export Prism. "
-                             "Lancer l'analyse complète d'abord.")
+            raise ValueError("No data available for Prism export. "
+                             "Run the full analysis first.")
 
         # Build notes info with subject/context metadata
         notes = pd.DataFrame({
