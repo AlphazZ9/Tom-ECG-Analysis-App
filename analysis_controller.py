@@ -119,7 +119,7 @@ class AnalysisController:
             sev_colors = {"alert": RED_MID, "warning": AMBER, "info": BLUE_MID}
             kind_icons = {
                 "bradycardia": "🔵", "tachycardia": "🔴", "pause": "⏸",
-                "esv_run": "⚡", "irregular_run": "〰", "block_av": "🔶",
+                "esv_run": "⚡", "irregular_run": "〰",
             }
 
             # ── RR timeline (right panel, initial state) ──────

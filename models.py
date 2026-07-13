@@ -384,7 +384,14 @@ SESSION_DIR     = Path.home() / ".ecg_sessions"   # default cache folder
 class ArrhythmiaEvent:
     """A single classified arrhythmia episode."""
     kind:        str          # "bradycardia" | "tachycardia" | "pause" |
-                              # "esv_run" | "block_av" | "irregular_run"
+                              # "esv_run" | "irregular_run"
+                              # NOTE: AV block is NOT a classified kind here --
+                              # classify_arrhythmias() only ever sees R-peak
+                              # timing (no P-wave/PR-interval data), so it
+                              # cannot distinguish AV block from a sinus pause.
+                              # Don't add "block_av" back without wiring in
+                              # per-beat PR-interval data (see analyse_intervals
+                              # in analysis.py / wave_template.py).
     label:       str          # human-readable label
     t_start:     float        # seconds
     t_end:       float        # seconds

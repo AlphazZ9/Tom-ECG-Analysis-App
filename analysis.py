@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import CubicSpline
 from scipy.signal import welch as _scipy_welch
-from sklearn.neighbors import NearestNeighbors  # Pour la dimension de corrélation
+from sklearn.neighbors import NearestNeighbors  # Pour le proxy de complexité HRV_NNDistLog
 
 # Use numpy.trapz for trapezoidal integration (works across scipy versions)
 trapz = np.trapz
@@ -397,22 +397,31 @@ def analyse_hrv_nonlinear(
         log.error(f"Sample Entropy failed: {e}")
         sampen = np.nan
 
-    # 4. Calculer la dimension de corrélation (D2)
+    # 4. Calculer un proxy de complexité basé sur la distance aux plus proches voisins
+    #
+    # NOTE: ceci N'EST PAS la dimension de corrélation de Grassberger-Procaccia
+    # (D2). Un vrai calcul de D2 nécessite d'ajuster la pente log-log de la
+    # somme de corrélation C(r) sur une plage de rayons r, sur une zone
+    # d'échelle linéaire identifiée — rien de tel n'est fait ici. Cette
+    # métrique est seulement la distance moyenne (log) au 5e plus proche
+    # voisin dans l'espace des battements : un proxy de complexité/dispersion
+    # utile pour comparer des enregistrements entre eux, mais qui ne doit pas
+    # être présenté ni interprété comme une dimension de corrélation validée.
     if progress_cb:
-        progress_cb(60, "Calcul de la dimension de corrélation…")
+        progress_cb(60, "Calcul du proxy de complexité (distance aux voisins)…")
     try:
         from sklearn.neighbors import NearestNeighbors
         nbrs = NearestNeighbors(n_neighbors=5, algorithm='auto').fit(beats)
         distances, _ = nbrs.kneighbors(beats)
-        corr_dim = np.mean(np.log(distances[:, -1]))  # Approximation
+        nn_dist_log = np.mean(np.log(distances[:, -1]))
     except Exception as e:
-        log.error(f"Correlation dimension failed: {e}")
-        corr_dim = np.nan
+        log.error(f"Nearest-neighbour distance proxy failed: {e}")
+        nn_dist_log = np.nan
 
     # 5. Retourner les résultats
     results = {
         "HRV_SampEn": float(sampen) if np.isfinite(sampen) else None,
-        "HRV_CorrDim": float(corr_dim) if np.isfinite(corr_dim) else None,
+        "HRV_NNDistLog": float(nn_dist_log) if np.isfinite(nn_dist_log) else None,
         "n_beats_used": len(beats),
         "fs": fs,
         "n_beats_total": len(rpeaks)
