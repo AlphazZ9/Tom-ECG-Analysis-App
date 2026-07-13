@@ -131,17 +131,6 @@ class WaveTemplate:
 
     # ── Search window helpers ─────────────────────────────────────────
 
-    def search_window(self, key: str, fs: float
-                      ) -> "tuple[int, int]":
-        """Return (lo_samp, hi_samp) offset from R peak for *key*.
-
-        Offsets are in samples; lo_samp may be negative (before R).
-        """
-        center_ms, half_ms = self.landmarks.get(key, self.DEFAULTS[key])
-        lo = int((center_ms - half_ms) / 1000 * fs)
-        hi = int((center_ms + half_ms) / 1000 * fs)
-        return lo, hi
-
     def summary(self) -> str:
         lines = ["Wave template landmarks (ms rel. to R=0):"]
         for k, (c, h) in self.landmarks.items():
@@ -635,6 +624,18 @@ def detect_waves_on_beat(
     # Starting after J prevents the J hump from being selected as T.
     t_lo_eff = max(t_lo, (j_t + 5.0) if j_t is not None else t_lo)
     t_t, t_sign = _abs_extremum(t_lo_eff, t_hi)
+    # Noise-floor gate: _abs_extremum always returns the largest-magnitude
+    # sample in its window, even on a flat/noisy segment with no real T
+    # wave -- unlike the P-wave detector above, which rejects a candidate
+    # below its local SNR threshold. Reuses the same TP-segment baseline/
+    # noise estimate (pre_baseline, tp_rms) computed for the P wave, since
+    # both represent this beat's general baseline noise level. A rejected
+    # T-peak surfaces as NaN in QT/QTc rather than a spurious value.
+    if np.isfinite(t_t):
+        t_amp = float(mb[_idx(t_t)] - pre_baseline)
+        t_noise_floor = max(tp_rms * 1.5, 0.006)
+        if abs(t_amp) < t_noise_floor:
+            t_t, t_sign = float("nan"), 1
 
     # ── P onset ───────────────────────────────────────────────────────────
     po_hw = abs(p_lo - po_lo) if p_t is not None else 18.0
@@ -644,13 +645,22 @@ def detect_waves_on_beat(
     to_hw = abs(to_hi - t_lo) if np.isfinite(t_t) else 22.0
     to_t  = _slope_offset(t_t, to_hw, sign=t_sign) if np.isfinite(t_t) else float("nan")
 
+    # Final sanity clamps: bound each landmark by the INTERSECTION of (a) its
+    # actual per-template search window (po_lo/po_hi, p_lo/p_hi, ... computed
+    # above from template.landmarks, so a user's calibrated template is
+    # genuinely respected instead of being silently overridden) and (b) the
+    # basic physiological ordering constraint the old hardcoded numbers were
+    # really protecting (Q before R, S/J/T after R, etc.) intersected with
+    # the beat_time array's own extent (bt0/bt1). Previously these bounds
+    # were hardcoded numbers unrelated to q_lo/q_hi etc., so a custom
+    # template's window had no effect on the final clamp.
     return {
-        "P_onset":  _clamp(po_t, bt0,    -2.0),
-        "P_peak":   _clamp(p_t,  bt0+1,  -3.0),
-        "Q_peak":   _clamp(q_t,  -35.0,  -0.5),
-        "S_peak":   _clamp(s_t,   0.5,    35.0),
-        "J_peak":   _clamp(j_t,   3.0,    35.0),
-        "T_peak":   _clamp(t_t,   5.0,    bt1-1),
-        "T_offset": _clamp(to_t,  6.0,    bt1),
+        "P_onset":  _clamp(po_t, max(po_lo, bt0),    min(po_hi, -2.0)),
+        "P_peak":   _clamp(p_t,  max(p_lo,  bt0+1),  min(p_hi,  -3.0)),
+        "Q_peak":   _clamp(q_t,  max(q_lo,  bt0+1),  min(q_hi,  -0.5)),
+        "S_peak":   _clamp(s_t,  max(s_lo,   0.5),   min(s_hi,  bt1-1)),
+        "J_peak":   _clamp(j_t,  max(j_lo,   3.0),   min(j_hi,  bt1-1)),
+        "T_peak":   _clamp(t_t,  max(t_lo,   5.0),   min(t_hi,  bt1-1)),
+        "T_offset": _clamp(to_t, max(to_lo,  6.0),   min(to_hi, bt1)),
     }
 
