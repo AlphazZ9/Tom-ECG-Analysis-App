@@ -296,19 +296,26 @@ def analyse_hrv_freq(
         log.warning("analyse_hrv_freq failed: %s", exc)
         return pd.DataFrame()
 
-def extract_beats(signal: np.ndarray, rpeaks: np.ndarray, fs: float, half_win: int = 200) -> np.ndarray:
+def extract_beats(signal: np.ndarray, rpeaks: np.ndarray, fs: float, half_win_ms: float = 200.0) -> np.ndarray:
     """Extraire les battements cardiaques autour des pics R.
 
     Args:
         signal: Signal ECG brut
         rpeaks: Indices des pics R détectés
         fs: Fréquence d'échantillonnage
-        half_win: Demi-fenêtre en échantillons (ex: 200ms à 1kHz = 200 échantillons)
+        half_win_ms: Demi-fenêtre en millisecondes (200 ms de chaque côté du
+            pic R par défaut). Auparavant un nombre FIXE d'échantillons
+            (200), ce qui rendait la fenêtre réellement extraite dépendante
+            de fs malgré la présence du paramètre : à fs=2000 Hz (valeur par
+            défaut de l'appli), 200 échantillons ne couvrent que ±100 ms, la
+            moitié de la fenêtre visée -- et donc un battement systématiquement
+            tronqué avant le calcul du SampEn.
 
     Returns:
         beat_matrix: Matrice de forme (n_beats, 2*half_win) contenant les battements
     """
     cleaned = signal.copy()
+    half_win = max(1, int(round(half_win_ms / 1000.0 * fs)))
     valid_rp = rpeaks[(rpeaks >= half_win) & (rpeaks < len(signal) - half_win)]
 
     beat_matrix = np.zeros((len(valid_rp), 2 * half_win))
@@ -341,8 +348,16 @@ def sample_entropy(x: np.ndarray, m: int = 2, r: float = 0.2) -> float:
     x_norm = (x - x.mean()) / x_std
 
     # Calculer les vecteurs de dimension m
+    # xm and xm1 must be built over the SAME index range (both range(N - m):
+    # x[i:i+m+1] for i = N-m-1 is x[N-m-1:N], still in bounds). Using
+    # range(N - m - 1) for xm1 (one shorter than xm) drops the last valid
+    # (m+1)-vector, so B (m-length match count) was computed over one more
+    # candidate template than A (m+1-length match count) -- the two counts
+    # are only comparable, per the standard Sample Entropy definition
+    # (Richman & Moorman 2000), when both are drawn from the same N-m
+    # template positions.
     xm = np.array([x_norm[i:i+m] for i in range(N - m)])
-    xm1 = np.array([x_norm[i:i+m+1] for i in range(N - m - 1)])
+    xm1 = np.array([x_norm[i:i+m+1] for i in range(N - m)])
 
     # Distance de Chebyshev (moins coûteuse que euclidienne)
     def _max_dist(a, b):
