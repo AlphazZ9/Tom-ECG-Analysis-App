@@ -16,7 +16,6 @@ import numpy as np
 import pandas as pd
 from scipy.interpolate import CubicSpline
 from scipy.signal import welch as _scipy_welch
-from sklearn.neighbors import NearestNeighbors  # Pour le proxy de complexité HRV_NNDistLog
 
 # numpy 2.x renamed trapz to trapezoid (older numpy/some builds only have
 # trapz). This used to rely on app.py's own module-level shim monkey-patching
@@ -296,176 +295,69 @@ def analyse_hrv_freq(
         log.warning("analyse_hrv_freq failed: %s", exc)
         return pd.DataFrame()
 
-def extract_beats(signal: np.ndarray, rpeaks: np.ndarray, fs: float, half_win_ms: float = 200.0) -> np.ndarray:
-    """Extraire les battements cardiaques autour des pics R.
-
-    Args:
-        signal: Signal ECG brut
-        rpeaks: Indices des pics R détectés
-        fs: Fréquence d'échantillonnage
-        half_win_ms: Demi-fenêtre en millisecondes (200 ms de chaque côté du
-            pic R par défaut). Auparavant un nombre FIXE d'échantillons
-            (200), ce qui rendait la fenêtre réellement extraite dépendante
-            de fs malgré la présence du paramètre : à fs=2000 Hz (valeur par
-            défaut de l'appli), 200 échantillons ne couvrent que ±100 ms, la
-            moitié de la fenêtre visée -- et donc un battement systématiquement
-            tronqué avant le calcul du SampEn.
-
-    Returns:
-        beat_matrix: Matrice de forme (n_beats, 2*half_win) contenant les battements
-    """
-    cleaned = signal.copy()
-    half_win = max(1, int(round(half_win_ms / 1000.0 * fs)))
-    valid_rp = rpeaks[(rpeaks >= half_win) & (rpeaks < len(signal) - half_win)]
-
-    beat_matrix = np.zeros((len(valid_rp), 2 * half_win))
-    for i, r in enumerate(valid_rp):
-        start = r - half_win
-        end = r + half_win
-        beat_matrix[i] = cleaned[start:end]
-
-    return beat_matrix
-
-def sample_entropy(x: np.ndarray, m: int = 2, r: float = 0.2) -> float:
-    """Calcul de l'entropie d'échantillon (Sample Entropy).
-
-    Args:
-        x: Signal 1D
-        m: Dimension de l'espace de phase (généralement 2)
-        r: Rayon de similarité (en unités de l'écart-type)
-
-    Returns:
-        SampEn: Valeur de l'entropie (ou np.nan en cas d'erreur)
-    """
-    N = len(x)
-    if N <= m:
-        return np.nan
-
-    # Normaliser le signal
-    x_std = x.std()
-    if x_std == 0:
-        return np.nan
-    x_norm = (x - x.mean()) / x_std
-
-    # Calculer les vecteurs de dimension m
-    # xm and xm1 must be built over the SAME index range (both range(N - m):
-    # x[i:i+m+1] for i = N-m-1 is x[N-m-1:N], still in bounds). Using
-    # range(N - m - 1) for xm1 (one shorter than xm) drops the last valid
-    # (m+1)-vector, so B (m-length match count) was computed over one more
-    # candidate template than A (m+1-length match count) -- the two counts
-    # are only comparable, per the standard Sample Entropy definition
-    # (Richman & Moorman 2000), when both are drawn from the same N-m
-    # template positions.
-    xm = np.array([x_norm[i:i+m] for i in range(N - m)])
-    xm1 = np.array([x_norm[i:i+m+1] for i in range(N - m)])
-
-    # Distance de Chebyshev (moins coûteuse que euclidienne)
-    def _max_dist(a, b):
-        return np.max(np.abs(a - b))
-
-    # Compter les paires similaires pour m
-    B = 0
-    for i in range(len(xm)):
-        for j in range(i + 1, len(xm)):
-            if _max_dist(xm[i], xm[j]) <= r:
-                B += 1
-
-    # Compter les paires similaires pour m+1
-    A = 0
-    for i in range(len(xm1)):
-        for j in range(i + 1, len(xm1)):
-            if _max_dist(xm1[i], xm1[j]) <= r:
-                A += 1
-
-    # Normalisation
-    B /= (len(xm) * (len(xm) - 1) / 2)
-    A /= (len(xm1) * (len(xm1) - 1) / 2)
-
-    return -np.log(A / B) if B > 0 and A > 0 else np.nan
-
-
 def analyse_hrv_nonlinear(
-    signal: np.ndarray,
-    rpeaks: np.ndarray,  # ← Doit être un ndarray
-    fs: float,           # ← Doit être un float
+    rpeaks: np.ndarray,
+    fs: float,
     progress_cb: Optional[Callable[[int, str], None]] = None,
     max_beats: int = 1000
 ) -> pd.DataFrame:
-    """Analyse HRV non linéaire avec gestion mémoire.
+    """Non-linear HRV via NeuroKit2: Poincaré SD1/SD2, DFA α1/α2, ApEn/SampEn,
+    Porta index, and the rest of nk.hrv_nonlinear()'s standard metric set.
+
+    This used to be a bespoke implementation that only ever returned
+    HRV_SampEn (computed as the entropy of individual BEAT WAVEFORMS,
+    averaged across beats) and an ad hoc nearest-neighbour distance proxy
+    (HRV_NNDistLog) that no caller ever displayed or exported. Meanwhile
+    every consumer of this DataFrame -- the Poincaré plot title, the
+    non-linear text report, Excel/Prism export, the radar chart -- reads
+    HRV_SD1, HRV_SD2, HRV_DFA_alpha1, HRV_DFA_alpha2, HRV_ApEn, HRV_PI,
+    none of which that bespoke version ever populated, so those fields
+    silently showed "—" on every run.
+
+    HRV_SampEn's definition also changes here: nk.hrv_nonlinear() computes
+    it on the RR-INTERVAL series (the standard textbook Sample Entropy of
+    HRV, and what PARAM_INFO's own documented reference range of 0.5-2.5
+    assumes), not on beat-waveform morphology -- the old per-beat-waveform
+    values (~0.02 for a typical recording) were far outside that
+    documented range because they were never measuring the same thing.
+
+    Tested down to 5 beats with no crashes; nk degrades individual columns
+    to NaN (e.g. HRV_DFA_alpha1 needs enough beats for a stable fit) rather
+    than raising.
 
     Args:
-        signal: Signal ECG brut (1D)
-        rpeaks: Indices des pics R (ndarray)
-        fs: Fréquence d'échantillonnage (Hz)
-        progress_cb: Callback de progression (int, str) -> None
-        max_beats: Nombre max de battements à analyser (pour limiter la mémoire)
+        rpeaks: R-peak sample indices (ndarray)
+        fs: Sampling rate (Hz)
+        progress_cb: Progress callback (pct, message) -> None
+        max_beats: Cap on beats passed to nk (keeps runtime bounded on long recordings)
 
     Returns:
-        DataFrame avec les métriques HRV non linéaires
+        DataFrame with nk.hrv_nonlinear()'s standard non-linear HRV metrics.
     """
-    if progress_cb:
-        progress_cb(0, "HRV non-linéaire : extraction des battements…")
+    _require_nk()
+    assert nk is not None  # narrowed after _require_nk()
 
-    # 1. Limiter le nombre de battements
+    if progress_cb:
+        progress_cb(0, "Non-linear HRV: preparing R-peaks…")
+
     n_rpeaks_orig = len(rpeaks)
     if n_rpeaks_orig > max_beats:
         rpeaks = rpeaks[:max_beats]
         log.warning(f"Limiting to {max_beats} beats (was {n_rpeaks_orig})")
 
-    # 2. Extraire les battements
-    beats = extract_beats(signal, rpeaks, fs)
-
-    # 3. Calculer Sample Entropy
-    # NOTE: SampEn must not be computed on beats.flatten() — concatenating
-    # beat windows end-to-end creates artificial jumps at every beat
-    # boundary (the last sample of beat i is not temporally adjacent to
-    # the first sample of beat i+1), which spuriously inflates entropy.
-    # Instead, compute SampEn per-beat (a genuinely continuous 1-D signal
-    # within each window) and average across beats.
     if progress_cb:
-        progress_cb(30, "Calcul de Sample Entropy…")
+        progress_cb(20, "Computing SD1/SD2, DFA, SampEn/ApEn… (may take 30 s+)")
+
     try:
-        beat_sampens = [sample_entropy(b, m=2, r=0.2) for b in beats]
-        beat_sampens = [v for v in beat_sampens if np.isfinite(v)]
-        sampen = float(np.mean(beat_sampens)) if beat_sampens else np.nan
-    except Exception as e:
-        log.error(f"Sample Entropy failed: {e}")
-        sampen = np.nan
-
-    # 4. Calculer un proxy de complexité basé sur la distance aux plus proches voisins
-    #
-    # NOTE: ceci N'EST PAS la dimension de corrélation de Grassberger-Procaccia
-    # (D2). Un vrai calcul de D2 nécessite d'ajuster la pente log-log de la
-    # somme de corrélation C(r) sur une plage de rayons r, sur une zone
-    # d'échelle linéaire identifiée — rien de tel n'est fait ici. Cette
-    # métrique est seulement la distance moyenne (log) au 5e plus proche
-    # voisin dans l'espace des battements : un proxy de complexité/dispersion
-    # utile pour comparer des enregistrements entre eux, mais qui ne doit pas
-    # être présenté ni interprété comme une dimension de corrélation validée.
-    if progress_cb:
-        progress_cb(60, "Calcul du proxy de complexité (distance aux voisins)…")
-    try:
-        from sklearn.neighbors import NearestNeighbors
-        nbrs = NearestNeighbors(n_neighbors=5, algorithm='auto').fit(beats)
-        distances, _ = nbrs.kneighbors(beats)
-        nn_dist_log = np.mean(np.log(distances[:, -1]))
-    except Exception as e:
-        log.error(f"Nearest-neighbour distance proxy failed: {e}")
-        nn_dist_log = np.nan
-
-    # 5. Retourner les résultats
-    results = {
-        "HRV_SampEn": float(sampen) if np.isfinite(sampen) else None,
-        "HRV_NNDistLog": float(nn_dist_log) if np.isfinite(nn_dist_log) else None,
-        "n_beats_used": len(beats),
-        "fs": fs,
-        "n_beats_total": len(rpeaks)
-    }
+        result = nk.hrv_nonlinear(rpeaks, sampling_rate=int(fs), show=False)
+    except Exception as exc:
+        log.warning("analyse_hrv_nonlinear failed: %s", exc)
+        return pd.DataFrame()
 
     if progress_cb:
-        progress_cb(100, "HRV non-linéaire terminée")
+        progress_cb(100, "Non-linear HRV done")
 
-    return pd.DataFrame([results])
+    return result
 
 
 def analyse_intervals(
@@ -716,7 +608,7 @@ def run_full_analysis(
 
     r = analyse_core(cleaned, rpeaks, fs, _sub(0, 40, "core"))
     r["hrv_freq"]   = analyse_hrv_freq(rpeaks, fs, _sub(40, 55, "freq"))
-    r["hrv_nonlin"] = analyse_hrv_nonlinear(cleaned, rpeaks, fs, _sub(55, 75, "nonlin"))
+    r["hrv_nonlin"] = analyse_hrv_nonlinear(rpeaks, fs, _sub(55, 75, "nonlin"))
     r["intervals"]  = analyse_intervals(cleaned, rpeaks, fs, r["rr_ms"],  # type: ignore[typeddict-item]
                                         progress_cb=_sub(75, 100, "intervals"))
     return r

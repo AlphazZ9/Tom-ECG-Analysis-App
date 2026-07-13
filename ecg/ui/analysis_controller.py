@@ -875,7 +875,7 @@ class AnalysisController:
         def _worker():
             def _prog(p, m):
                 self.app.after(0, lambda pp=p, mm=m: self.app._set_progress(pp, mm))
-            return analyse_hrv_nonlinear(sig, rp, fs, progress_cb=_prog)
+            return analyse_hrv_nonlinear(rp, fs, progress_cb=_prog)
 
         def _done(result):
             if self.app.analysis.results is None or getattr(self.app, "_generation", 0) != _gen:

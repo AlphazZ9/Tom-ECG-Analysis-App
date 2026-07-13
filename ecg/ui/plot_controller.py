@@ -24,6 +24,14 @@ import pandas as pd
 from scipy.interpolate import CubicSpline
 from scipy.signal import welch as _scipy_welch
 
+# numpy 2.x renamed trapz to trapezoid. Own this locally rather than relying
+# on app.py's module-level np.trapz = np.trapezoid shim having already run --
+# a comment here used to (incorrectly) claim "the shim at the top of this
+# module ensures np.trapz always exists", but no such shim was ever defined
+# in this file; it only worked because app.py happens to always be imported
+# before PlotController is ever instantiated.
+_trapz = getattr(np, "trapz", None) or getattr(np, "trapezoid", None)
+
 from ecg.core.models import MouseECG
 from ecg.core.filtering import downsample_for_display
 from ecg.ui.plots import style_axes
@@ -698,7 +706,13 @@ class PlotController:
             ax.set_xlabel("RR (ms)")
             ax.set_ylabel("Count")
             ax.set_title("Distribution RR", loc="left")
-            ax.xaxis.set_major_locator(matplotlib.ticker.MultipleLocator(1))
+            # A fixed 1 ms tick spacing only looks reasonable for a narrow RR
+            # range (e.g. a quiet anesthetized recording). Any recording with
+            # real variability -- an awake mouse, or one containing a
+            # bradycardic/pause episode -- can span 100+ ms, which crams 100+
+            # overlapping tick labels onto the axis. MaxNLocator adapts the
+            # tick count to whatever range this recording actually has.
+            ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=10))
 
         self.app._slots["rr_hist"].update(draw_histogram)
 
@@ -719,8 +733,17 @@ class PlotController:
                 name = col.replace("HRV_", "")
                 if not np.isfinite(v):
                     continue
-                if name in ("LF", "HF", "VLF"):
+                if name in ("LFn", "HFn"):
+                    # The actual normalized-units fractions (LF/(LF+HF) etc.) --
+                    # these are the real "% of power" figures.
                     lines.append(f"  {name:<26} {v * 100:>10.1f} %")
+                elif name in ("LF", "HF", "VLF", "ULF", "VHF", "TP"):
+                    # Raw band power, NOT a fraction of anything. Previously
+                    # LF/HF/VLF were multiplied by 100 and labelled "%" here --
+                    # that showed a meaningless number (raw power x100) right
+                    # next to LFn/HFn, which are the real normalized percentages
+                    # and used to be shown unscaled as a bare decimal instead.
+                    lines.append(f"  {name + ' power':<26} {v:>10.4f}")
                 elif name == "LFHF":
                     lines.append(f"  {'LF/HF ratio':<26} {v:>10.3f}")
                 elif name in ("LF_peak", "HF_peak", "VLF_peak"):
@@ -820,12 +843,32 @@ class PlotController:
             # Compute per-band power for annotation
             def _band_power(lo: float, hi: float) -> float:
                 m = (freqs >= lo) & (freqs <= hi)
-                # np.trapz was renamed np.trapezoid in NumPy 2.0; the shim at the top
-                # of the module ensures np.trapz always exists.
-                return float(np.trapz(psd[m], freqs[m])) if m.any() else 0.0  # type: ignore[attr-defined]
+                return float(_trapz(psd[m], freqs[m])) if m.any() else 0.0
 
             band_powers = {name: _band_power(lo, hi) for lo, hi, name, _, _ in bands}
             total_power = sum(band_powers.values()) + 1e-12
+
+            # Percentages shown in the legend: prefer the canonical values already
+            # computed by analyse_hrv_freq() (via nk.hrv_frequency, the same source
+            # the KPI bar/export/radar read) over recomputing our own from this
+            # plot's independent Welch pipeline. The two pipelines use different
+            # interpolation/windowing and can give visibly different numbers for
+            # the same recording (e.g. 71.5% vs 72.9% LF in testing) -- showing
+            # two different "LF%" figures in the same UI is confusing regardless
+            # of which is more "correct". Only fall back to this plot's own
+            # band_powers if hrv_freq wasn't computed.
+            fd_df = r.get("hrv_freq")
+            band_pct: "dict[str, float]" = {}
+            if fd_df is not None and not fd_df.empty and "HRV_TP" in fd_df.columns:
+                try:
+                    tp = float(fd_df["HRV_TP"].values[0])
+                    if tp > 1e-12:
+                        for key in ("VLF", "LF", "HF"):
+                            col = f"HRV_{key}"
+                            if col in fd_df.columns:
+                                band_pct[key] = float(fd_df[col].values[0]) / tp * 100
+                except Exception as exc:
+                    log.debug("_plot_psd: could not read hrv_freq percentages: %s", exc)
 
             # Frequency resolution actually achieved
             df = freqs[1] - freqs[0] if len(freqs) > 1 else float("nan")
@@ -836,7 +879,7 @@ class PlotController:
                 ax.semilogy(freqs, psd, color="#546E7A", lw=1.0, zorder=3)
                 for lo, hi, name, legend_label, color in bands:
                     m = (freqs >= lo) & (freqs <= hi)
-                    pct = band_powers[name] / total_power * 100
+                    pct = band_pct.get(name, band_powers[name] / total_power * 100)
                     ax.fill_between(freqs, psd, where=m, alpha=0.35, color=color,
                                     label=f"{legend_label}  ({pct:.1f}%)", zorder=2)
                     # Vertical band boundary lines
