@@ -53,32 +53,32 @@ from PIL import Image, ImageTk
 from openpyxl import Workbook
 
 # ── ecg.core ──────────────────────────────────────────────────────────────────
-from models import (
+from ecg.core.models import (
     ArrhythmiaEvent, MouseECG, FilterParams,
 )
-from detection import (
+from ecg.core.detection import (
     detect_rr_artifacts, apply_artifact_decisions,
 )
-from wave_template import WaveTemplate
-from state import SignalState, DetectionState, AnalysisState, UIState, SessionState
-from navigation_controller import NavigationController
-from export_controller import ExportController
-from plot_controller import PlotController
-from session_controller import SessionController
-from detection_controller import DetectionController
-from signal_controller import SignalController
-from analysis_controller import AnalysisController
+from ecg.core.wave_template import WaveTemplate
+from ecg.ui.state import SignalState, DetectionState, AnalysisState, UIState, SessionState
+from ecg.ui.navigation_controller import NavigationController
+from ecg.ui.export_controller import ExportController
+from ecg.ui.plot_controller import PlotController
+from ecg.ui.session_controller import SessionController
+from ecg.ui.detection_controller import DetectionController
+from ecg.ui.signal_controller import SignalController
+from ecg.ui.analysis_controller import AnalysisController
 
 # ── ecg.io ────────────────────────────────────────────────────────────────────
-from loaders import list_channels
-from session import load_session
-from db import (
+from ecg.io.loaders import list_channels
+from ecg.io.session import load_session
+from ecg.io.db import (
     _DB_AVAILABLE, get_notes, set_notes,
     recent_recordings,
 )
 
 # ── ecg.ui ────────────────────────────────────────────────────────────────────
-from theme import (
+from ecg.ui.theme import (
     THEME, apply_theme_config, apply_plot_theme,
     NK_AVAILABLE, APP_ICON_PATH,
     BG, PANEL, CARD, BORDER, BORDER2, TEXT, MUTED, LIGHT, PLOT,
@@ -91,13 +91,13 @@ from theme import (
     FONT_KPI_VALUE, FONT_KPI_LABEL, FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR,
     FONT_MICRO, FONT_HINT, FONT_BADGE, FONT_SUBSECTION, FONT_CARD_TITLE,
 )
-from plots import CanvasSlot, style_axes
-from dialogs import (
+from ecg.ui.plots import CanvasSlot, style_axes
+from ecg.ui.dialogs import (
     ThemeDialog, ArtifactReviewDialog,
     AnnotationManagerDialog,
 )
-from wave_editor import WaveTemplateMiniEditor
-from sidebar import _SidebarSection, IntervalVerifierPanel
+from ecg.ui.wave_editor import WaveTemplateMiniEditor
+from ecg.ui.sidebar import _SidebarSection, IntervalVerifierPanel
 
 log = logging.getLogger("ecg")
 
@@ -1367,7 +1367,7 @@ class ECGApp(ctk.CTk):
         ctk.CTkLabel(plot_card, text="RR tachograms (superimposed)",
                      font=FONT_SUBSECTION, text_color=MUTED,
                      anchor="w").pack(padx=SPACE_M, pady=(SPACE_M, SPACE_XS), fill="x")
-        from plots import CanvasSlot as _CS
+        from ecg.ui.plots import CanvasSlot as _CS
         plot_slot = _CS(plot_card, 8, 4, toolbar=False, yscale_bar=True)
 
         _METRICS: "list[tuple[str, str, str]]" = [
@@ -1475,7 +1475,7 @@ class ECGApp(ctk.CTk):
 
             import threading as _th
             def _worker():
-                from analysis import compute_segment_stats
+                from ecg.core.analysis import compute_segment_stats
                 sa = compute_segment_stats(sig, rp, fs, lo_a, hi_a, la,
                                             lf_band=lf, hf_band=hf)
                 sb = compute_segment_stats(sig, rp, fs, lo_b, hi_b, lb,
@@ -3977,7 +3977,7 @@ class ECGApp(ctk.CTk):
     def _toggle_language(self) -> None:
         """Switch UI language between English and French and rebuild the UI."""
         try:
-            from i18n import get_language, set_language
+            from ecg.ui.i18n import get_language, set_language
         except ImportError:
             return
         new_lang = "fr" if get_language() == "en" else "en"
@@ -4550,7 +4550,7 @@ class ECGApp(ctk.CTk):
                         text=f"{done}/{total}  —  {stem}  {'✓' if done==total else '…'}")
                 ))
 
-            from batch import BatchProcessor
+            from ecg.batch import BatchProcessor
             _bp = BatchProcessor(_filepaths, params, out_dir,
                                   progress_cb=_cb, max_workers=n_workers)
             import threading
@@ -4766,7 +4766,7 @@ class ECGApp(ctk.CTk):
 
     def _toggle_dark_live(self) -> None:
         """Switch dark ↔ light and rebuild the UI without restarting."""
-        from theme import THEME, apply_theme_config
+        from ecg.ui.theme import THEME, apply_theme_config
         THEME.is_dark = not THEME.is_dark
         apply_theme_config(THEME)
         THEME.save()

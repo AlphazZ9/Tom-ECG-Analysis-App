@@ -505,27 +505,28 @@ def _sync_to_submodules() -> None:
         "FONT_BTN_PRIMARY", "FONT_BTN_SEC", "FONT_SIDEBAR_HDR",
         "FONT_MICRO", "FONT_HINT", "FONT_BADGE", "FONT_SUBSECTION", "FONT_CARD_TITLE",
     )
-    # This codebase is a flat module layout (app.py, sidebar.py, plots.py,
-    # dialogs.py, export.py, models.py, detection.py, loaders.py, analysis.py
-    # — all top-level, no "ecg.*" package). The previous filter checked
-    # `mod_name.startswith("ecg.")`, which never matched any real module here,
-    # so this function was silently a no-op: every module that did
-    # `from theme import BG, PANEL, ...` at import time kept its OWN stale
-    # copy of those names forever, and only the PLOT dict (mutated in place
-    # via .update(), not rebound) ever picked up a theme change. Switching
-    # themes therefore left most colours/fonts unchanged everywhere except
-    # inside theme.py itself.
+    # Every module below does `from ecg.ui.theme import BG, PANEL, ...` at
+    # import time, which copies the value once -- when apply_theme_config()
+    # rebinds these globals here, those copies go stale unless re-synced.
+    # Names are the fully-qualified dotted paths under the ecg.* package
+    # (matching sys.modules keys) since the reorg out of the old flat
+    # module layout; a bare "sidebar" or "app" would no longer match
+    # anything in sys.modules and this loop would silently become a no-op
+    # again (that exact bug -- a stale pre-package-move name list -- is why
+    # this function was a no-op for a while before the reorg too).
     _submodule_names = (
-        "app", "sidebar", "plots", "dialogs", "export",
-        "models", "detection", "loaders", "analysis", "wave_editor",
+        "ecg.ui.app", "ecg.ui.sidebar", "ecg.ui.plots", "ecg.ui.dialogs",
+        "ecg.io.export", "ecg.core.models", "ecg.core.detection",
+        "ecg.io.loaders", "ecg.core.analysis", "ecg.ui.wave_editor",
         # Controller modules extracted from app.py -- each imports its own
         # subset of colour/font names at module scope, so each needs the
         # same re-sync or its colours freeze at whatever theme was active
         # when it was first imported (the same bug this function exists to
         # fix, just introduced by any new sibling module going forward).
-        "navigation_controller", "export_controller", "plot_controller",
-        "session_controller", "detection_controller", "signal_controller",
-        "analysis_controller",
+        "ecg.ui.navigation_controller", "ecg.ui.export_controller",
+        "ecg.ui.plot_controller", "ecg.ui.session_controller",
+        "ecg.ui.detection_controller", "ecg.ui.signal_controller",
+        "ecg.ui.analysis_controller",
     )
     _this = sys.modules[__name__]
     _all  = _colour_names + _font_names

@@ -13,14 +13,14 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from models import MouseECG
-from detection import apply_threshold
-from theme import (
+from ecg.core.models import MouseECG
+from ecg.core.detection import apply_threshold
+from ecg.ui.theme import (
     BLUE, BLUE_HOVER, BORDER, BORDER2, GREEN, MUTED, ORANGE, ORANGE_DEEP, RED,
 )
 
 if TYPE_CHECKING:
-    from app import ECGApp
+    from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
 

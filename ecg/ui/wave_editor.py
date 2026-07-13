@@ -18,9 +18,9 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import numpy as np
 
-from plots import style_axes
-from wave_template import WaveTemplate, _mouse_demo_beat, detect_waves_on_beat
-from theme import (
+from ecg.ui.plots import style_axes
+from ecg.core.wave_template import WaveTemplate, _mouse_demo_beat, detect_waves_on_beat
+from ecg.ui.theme import (
     BG, PANEL, CARD, BORDER, BORDER2, TEXT, MUTED, LIGHT,
     RED, RED_LIGHT, BLUE, GREEN, ORANGE, PLOT,
     BLUE_DARK, CORAL, TEAL, PURPLE_DARK,
@@ -29,7 +29,7 @@ from theme import (
 )
 
 if TYPE_CHECKING:
-    from app import ECGApp
+    from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
 

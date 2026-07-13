@@ -31,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from models import SESSION_DIR
+from ecg.core.models import SESSION_DIR
 
 log = logging.getLogger("ecg")
 

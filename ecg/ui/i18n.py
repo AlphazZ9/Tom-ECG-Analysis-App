@@ -5,7 +5,7 @@ Minimal bilingual string table (English / French).
 
 Usage
 -----
-    from i18n import t, set_language, get_language
+    from ecg.ui.i18n import t, set_language, get_language
 
     t("open_file")          # → "Open .mat file"  or "Ouvrir fichier .mat"
     set_language("fr")

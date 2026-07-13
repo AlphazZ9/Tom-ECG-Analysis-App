@@ -22,16 +22,16 @@ from matplotlib.figure import Figure
 from openpyxl import Workbook
 from tkinter import filedialog, messagebox
 
-from models import EXPERIMENTAL_CONTEXTS
-from export import ExcelExporter, PrismExporter
-from plots import style_axes
-from theme import (
+from ecg.core.models import EXPERIMENTAL_CONTEXTS
+from ecg.io.export import ExcelExporter, PrismExporter
+from ecg.ui.plots import style_axes
+from ecg.ui.theme import (
     PLOT, GREEN, ORANGE, RED, ORANGE_DARK,
     GREEN_MID, AMBER, RED_MID, NAVY, GRAY_LIGHT, CYAN_BRIGHT,
 )
 
 if TYPE_CHECKING:
-    from app import ECGApp
+    from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
 
@@ -69,7 +69,7 @@ class ExportController:
             rdf = r.get("rr_df")
             if rdf is None or rdf.empty:
                 return
-            from filtering import downsample_for_display
+            from ecg.core.filtering import downsample_for_display
             t_all  = rdf["Time_s"].values.astype(float)
             rr_all = rdf["RR_ms"].values.astype(float)
             hr_all = rdf["HR_bpm"].values.astype(float)

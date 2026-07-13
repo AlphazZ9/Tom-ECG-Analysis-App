@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
-    from app import ECGApp
+    from ecg.ui.app import ECGApp
 
 class MouseECG:
     """Single source of truth for adult mouse ECG physiology.

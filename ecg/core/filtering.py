@@ -12,7 +12,7 @@ from typing import Optional
 import numpy as np
 from scipy.signal import butter, filtfilt, iirnotch
 
-from models import MouseECG
+from ecg.core.models import MouseECG
 
 log = logging.getLogger("ecg")
 

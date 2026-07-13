@@ -29,8 +29,8 @@ trapz = getattr(np, "trapz", None) or getattr(np, "trapezoid", None)
 if trapz is None:
     from scipy.integrate import trapezoid as trapz  # last-resort fallback
 
-from models import AnalysisResults, MouseECG
-from wave_template import WaveTemplate, detect_waves_on_beat
+from ecg.core.models import AnalysisResults, MouseECG
+from ecg.core.wave_template import WaveTemplate, detect_waves_on_beat
 
 # Detected locally rather than imported from theme.py: this module is pure
 # NumPy/SciPy and is imported by batch.py's subprocess workers (documented as

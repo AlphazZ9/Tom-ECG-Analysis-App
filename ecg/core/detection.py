@@ -34,8 +34,8 @@ from typing import Callable, Optional
 import numpy as np
 from scipy.signal import find_peaks, savgol_filter, peak_prominences, peak_widths
 
-from filtering import downsample_signal
-from models import (
+from ecg.core.filtering import downsample_signal
+from ecg.core.models import (
     ArrhythmiaEvent,
     EXPERIMENTAL_CONTEXTS,
     MouseECG,

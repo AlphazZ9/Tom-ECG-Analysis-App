@@ -22,8 +22,8 @@ from typing import Any, ClassVar, Optional
 import numpy as np
 import pandas as pd
 
-from models import MouseECG
-from wave_template import WaveTemplate
+from ecg.core.models import MouseECG
+from ecg.core.wave_template import WaveTemplate
 
 
 @dataclass

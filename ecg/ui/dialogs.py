@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
 
-from theme import (
+from ecg.ui.theme import (
     THEME, ThemeConfig, apply_theme_config,
     BG, PANEL, CARD, BORDER, BORDER2, TEXT, MUTED, LIGHT, PLOT,
     RED, BLUE, GREEN, ORANGE, PURPLE, PURPLE_DARK,
@@ -32,11 +32,11 @@ from theme import (
     FONT_BODY, FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR,
     make_font,
 )
-from models import MouseECG
-from export import ANNOTATION_COLORS
+from ecg.core.models import MouseECG
+from ecg.io.export import ANNOTATION_COLORS
 
 if TYPE_CHECKING:
-    from app import ECGApp
+    from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
 

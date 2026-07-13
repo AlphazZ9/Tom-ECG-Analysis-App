@@ -16,15 +16,15 @@ import customtkinter as ctk
 import numpy as np
 import pandas as pd
 
-from models import (
+from ecg.core.models import (
     MouseECG, EXPERIMENTAL_CONTEXTS, _CONTEXT_FIELD_MAP, ArrhythmiaEvent,
 )
-from detection import classify_arrhythmias, correct_rr_artifacts
-from analysis import analyse_core, analyse_hrv_freq, analyse_hrv_nonlinear, analyse_intervals
-from wave_template import WaveTemplate
-from session import load_session
-from sidebar import IntervalVerifierPanel
-from theme import (
+from ecg.core.detection import classify_arrhythmias, correct_rr_artifacts
+from ecg.core.analysis import analyse_core, analyse_hrv_freq, analyse_hrv_nonlinear, analyse_intervals
+from ecg.core.wave_template import WaveTemplate
+from ecg.io.session import load_session
+from ecg.ui.sidebar import IntervalVerifierPanel
+from ecg.ui.theme import (
     PLOT, RED, RED_MID, RED_LIGHT, AMBER, BLUE, BLUE_DARK, BLUE_MID,
     GREEN, GREEN_DARK, GREEN_MID, ORANGE, ORANGE_DARK, ORANGE_DEEP,
     PURPLE, CORAL, NAVY, GRAY_LIGHT, CYAN_BRIGHT, MUTED, TEXT, LIGHT,
@@ -32,10 +32,10 @@ from theme import (
     FONT_SIDEBAR_HDR, FONT_BADGE, FONT_HINT, FONT_SUBSECTION, FONT_KPI_LABEL,
     FONT_SMALL,
 )
-from plots import style_axes
+from ecg.ui.plots import style_axes
 
 if TYPE_CHECKING:
-    from app import ECGApp
+    from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
 

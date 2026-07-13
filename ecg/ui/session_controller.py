@@ -18,14 +18,14 @@ from tkinter import messagebox
 import numpy as np
 import pandas as pd
 
-from models import FilterParams, EXPERIMENTAL_CONTEXTS
-from loaders import load_mat_signal, _serialise_results, _deserialise_results
-from session import load_session, save_session, delete_session
-from db import _DB_AVAILABLE, upsert_recording
-from theme import THEME, BLUE, GREEN, MUTED
+from ecg.core.models import FilterParams, EXPERIMENTAL_CONTEXTS
+from ecg.io.loaders import load_mat_signal, _serialise_results, _deserialise_results
+from ecg.io.session import load_session, save_session, delete_session
+from ecg.io.db import _DB_AVAILABLE, upsert_recording
+from ecg.ui.theme import THEME, BLUE, GREEN, MUTED
 
 if TYPE_CHECKING:
-    from app import ECGApp
+    from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
 
@@ -387,7 +387,7 @@ class SessionController:
             self.update_session_ui(has_session=True, saved_at=saved_at)
             # ── SQLite registry upsert ────────────────────────────────────
             if _DB_AVAILABLE:
-                from session import _file_fingerprint
+                from ecg.io.session import _file_fingerprint
                 _stats: dict = {}
                 if self.app.analysis.results:
                     _rdf = self.app.analysis.results.get("rr_df")

@@ -5,7 +5,7 @@ from tkinter import messagebox
 
 
 def main() -> None:
-    from theme import NK_AVAILABLE
+    from ecg.ui.theme import NK_AVAILABLE
     if not NK_AVAILABLE:
         root = tk.Tk()
         root.withdraw()
@@ -15,7 +15,7 @@ def main() -> None:
         )
         root.destroy()
         return
-    from app import ECGApp
+    from ecg.ui.app import ECGApp
     ECGApp().mainloop()
 
 

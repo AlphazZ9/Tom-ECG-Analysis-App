@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
-from models import SESSION_DIR, SESSION_SUFFIX, SESSION_VERSION
+from ecg.core.models import SESSION_DIR, SESSION_SUFFIX, SESSION_VERSION
 
 log = logging.getLogger("ecg")
 

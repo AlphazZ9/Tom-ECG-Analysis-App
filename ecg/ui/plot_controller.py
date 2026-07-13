@@ -24,11 +24,11 @@ import pandas as pd
 from scipy.interpolate import CubicSpline
 from scipy.signal import welch as _scipy_welch
 
-from models import MouseECG
-from filtering import downsample_for_display
-from plots import style_axes
-from wave_editor import WaveTemplateEditor
-from theme import (
+from ecg.core.models import MouseECG
+from ecg.core.filtering import downsample_for_display
+from ecg.ui.plots import style_axes
+from ecg.ui.wave_editor import WaveTemplateEditor
+from ecg.ui.theme import (
     PLOT, RED, AMBER, ORANGE, ORANGE_DARK, ORANGE_DEEP,
     CYAN, BLUE, BLUE_DARK, BLUE_MID, PURPLE, TEAL,
     BORDER2, RED_MID, MUTED, GRAY, GRAY_LIGHT, NAVY,
@@ -36,7 +36,7 @@ from theme import (
 )
 
 if TYPE_CHECKING:
-    from app import ECGApp
+    from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
 

@@ -16,10 +16,10 @@ from typing import Optional, TYPE_CHECKING
 import numpy as np
 from scipy.signal import find_peaks
 
-from models import MouseECG
+from ecg.core.models import MouseECG
 
 if TYPE_CHECKING:
-    from app import ECGApp
+    from ecg.ui.app import ECGApp
 
 WAVE_TEMPLATE_PATH: Path = Path.home() / ".ecg_wave_template.json"
 _WAVE_TEMPLATE_PATH_LEGACY: Path = Path.home() / ".ecg_wave_template.pkl"

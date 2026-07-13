@@ -13,10 +13,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from theme import BLUE_DARK, BORDER, TEXT
+from ecg.ui.theme import BLUE_DARK, BORDER, TEXT
 
 if TYPE_CHECKING:
-    from app import ECGApp
+    from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
 

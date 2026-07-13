@@ -18,8 +18,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
 import pandas as pd
 
-from plots import CanvasSlot, style_axes
-from theme import (
+from ecg.ui.plots import CanvasSlot, style_axes
+from ecg.ui.theme import (
     BG, PANEL, CARD, BORDER, BORDER2, TEXT, MUTED, LIGHT, PLOT,
     RED, BLUE, GREEN, ORANGE, BLUE_HOVER, BLUE_DARK, RED_DARK, RED_LIGHT, ORANGE_DARK,
     CORAL, TEAL, PURPLE,

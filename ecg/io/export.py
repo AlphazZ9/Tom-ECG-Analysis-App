@@ -22,7 +22,7 @@ from openpyxl.worksheet.worksheet import Worksheet as OpenpyxlWorksheet
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from models import AnalysisResults, MouseECG
+from ecg.core.models import AnalysisResults, MouseECG
 
 log = logging.getLogger("ecg")
 

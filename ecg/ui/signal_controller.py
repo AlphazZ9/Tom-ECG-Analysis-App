@@ -16,18 +16,18 @@ from tkinter import messagebox
 
 import numpy as np
 
-from models import MouseECG
-from filtering import bandpass, notch, normalize
-from detection import (
+from ecg.core.models import MouseECG
+from ecg.core.filtering import bandpass, notch, normalize
+from ecg.core.detection import (
     fix_polarity, apply_threshold,
     detect_peaks_sg_derivative, detect_peaks_wavelet, detect_peaks_envelope_max,
 )
-from loaders import load_mat_signal
-from db import _DB_AVAILABLE, get_notes
-from theme import BLUE, GREEN, MUTED, ORANGE, RED, nk
+from ecg.io.loaders import load_mat_signal
+from ecg.io.db import _DB_AVAILABLE, get_notes
+from ecg.ui.theme import BLUE, GREEN, MUTED, ORANGE, RED, nk
 
 if TYPE_CHECKING:
-    from app import ECGApp
+    from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
 

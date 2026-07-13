@@ -5,7 +5,7 @@ Batch-processing pipeline: analyse multiple .mat files in parallel and
 export one Excel workbook per file + a combined summary sheet.
 
 Usage (standalone):
-    from batch import BatchProcessor
+    from ecg.batch import BatchProcessor
     bp = BatchProcessor(filepaths, params, output_dir, progress_cb)
     bp.run()            # blocking
     bp.run_async()      # returns Thread
@@ -39,17 +39,21 @@ def _process_one(
     Tkinter or CTk state.
     """
     import sys, os
-    # Make sure the ecg package is importable in the subprocess
-    _pkg = os.path.dirname(os.path.abspath(__file__))
-    if _pkg not in sys.path:
-        sys.path.insert(0, _pkg)
+    # Make sure the ecg package is importable in the subprocess. __file__ is
+    # .../ecg/batch.py, so its parent is the ecg package directory itself --
+    # `import ecg.io.loaders` needs the package's PARENT (the project root)
+    # on sys.path, one level further up, or Python can't resolve "ecg" as a
+    # top-level package from inside its own directory.
+    _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _project_root not in sys.path:
+        sys.path.insert(0, _project_root)
 
-    from loaders import load_mat_signal
-    from filtering import bandpass, notch, normalize
-    from detection import fix_polarity
-    from analysis import analyse_core, analyse_hrv_freq
-    from export import ExcelExporter
-    from models import MouseECG
+    from ecg.io.loaders import load_mat_signal
+    from ecg.core.filtering import bandpass, notch, normalize
+    from ecg.core.detection import fix_polarity
+    from ecg.core.analysis import analyse_core, analyse_hrv_freq
+    from ecg.io.export import ExcelExporter
+    from ecg.core.models import MouseECG
 
     stem = Path(filepath).stem
     result: dict = {"filepath": filepath, "stem": stem, "ok": False, "error": ""}

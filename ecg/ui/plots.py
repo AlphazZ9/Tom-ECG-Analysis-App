@@ -25,7 +25,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.backends._backend_tk import NavigationToolbar2Tk  # noqa: PLC2701
 import tkinter as tk
 
-from theme import PLOT, PANEL
+from ecg.ui.theme import PLOT, PANEL
 
 log = logging.getLogger("ecg")
 
@@ -69,7 +69,7 @@ plt.rcParams.update({
 # Y-scale bar picks up the new theme instead of freezing at whichever one
 # was active when this module was first imported.
 try:
-    from theme import BG, BORDER, BORDER2, TEXT, MUTED
+    from ecg.ui.theme import BG, BORDER, BORDER2, TEXT, MUTED
     _BAR_BG     = PANEL
     _ENTRY_BG   = BG
     _ENTRY_FG   = TEXT
