@@ -85,8 +85,8 @@ from ecg.ui.theme import (
     RED, BLUE, GREEN, ORANGE,
     BLUE_DARK, BLUE_HOVER, BLUE_DEEP,
     PURPLE, PURPLE_DARK, PINK, TEAL,
-    GREEN_DARK, ORANGE_DARK, ORANGE_DEEP,
-    AMBER_DARK, RED_DARK,
+    GREEN_DARK, ORANGE_DARK,
+    RED_DARK,
     FONT_TITLE, FONT_SECTION_HDR, FONT_LABEL, FONT_SMALL, FONT_BODY, FONT_MONO,
     FONT_KPI_VALUE, FONT_KPI_LABEL, FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR,
     FONT_MICRO, FONT_HINT, FONT_BADGE, FONT_SUBSECTION, FONT_CARD_TITLE,
@@ -304,8 +304,9 @@ class ECGApp(ctk.CTk):
         self._hrv_subframes:     "dict[str, ctk.CTkFrame]" = {}
         self._hrv_seg:           "Optional[ctk.CTkSegmentedButton]" = None
         self._hrv_content_area:  "Optional[ctk.CTkFrame]"           = None
-        # Summary KPI label widgets (populated in _build_tab_summary)
-        self._sum_kpi_vals:      "dict[str, ctk.CTkLabel]" = {}
+        # Summary tab label widgets (populated in _build_tab_summary)
+        self._sum_quality_vals:  "dict[str, ctk.CTkLabel]" = {}
+        self._sum_metric_vals:   "dict[str, ctk.CTkLabel]" = {}
 
     # ─── Legacy state shims ───────────────────────────────────────────────
     # Backward-compatible properties for the old flat self._xxx attributes,
@@ -2644,12 +2645,6 @@ class ECGApp(ctk.CTk):
         body = tk.Frame(t, bg=BG, bd=0, highlightthickness=0)
         body.pack(side="top", fill="both", expand=True, padx=SPACE_S, pady=(0, SPACE_S))
 
-        # Left: violin/box distributions  (30% width)
-        left_card = tk.Frame(body, bg=CARD, bd=0, highlightthickness=0)
-        left_card.pack(side="left", fill="both", expand=False)
-        left_card.pack_propagate(False)
-        left_card.configure(width=1)  # will be reset by pack weight
-
         # Use a PanedWindow for resizable split
         paned = tk.PanedWindow(body, orient=tk.HORIZONTAL,
                                bg=BORDER, sashwidth=4, sashrelief="flat",
@@ -2737,51 +2732,35 @@ class ECGApp(ctk.CTk):
         self.analysis_ctrl.copy_rolling_tsv()
 
     def _build_tab_summary(self) -> None:
+        """Summary tab: a curated verdict, not a wall of duplicate plots.
+
+        Every plot mirrored here used to also exist full-size in its own tab
+        (HRV > Frequency/Non-linear/Rolling, Intervals, Beat Template) --
+        showing it again at ~1/3 the size with the same font/legend/tick
+        density as the full-tab version just looked cramped. The global KPI
+        bar above the tabs already shows the headline numbers, so this tab
+        no longer duplicates them either. What's left: a Signal Quality
+        panel (surfacing numbers the app already computed but never showed
+        anywhere -- mean beat-to-template correlation, % of low-quality
+        beats, artifact-correction counts), the two densest kept visuals
+        (RR tachogram, Poincare), the RR-asymmetry breakdown (unique to this
+        tab, not a duplicate), a plain metrics table with no physiological
+        reference-range judgments, and the detailed text report.
+        """
         t = self.tabs.tab("Summary")
-        t.grid_rowconfigure(0, weight=0)   # KPI header — always visible
+        t.grid_rowconfigure(0, weight=0)   # verdict banner
         t.grid_rowconfigure(1, weight=0)   # action bar
         t.grid_rowconfigure(2, weight=1)   # scrollable body
         t.grid_columnconfigure(0, weight=1)
 
-        # ── KPI header strip ──────────────────────────────────────────────────
-        kpi_frame = ctk.CTkFrame(t, fg_color=PANEL, corner_radius=0, height=76)
-        kpi_frame.grid(row=0, column=0, sticky="ew")
-        kpi_frame.pack_propagate(False)
-        kpi_frame.grid_propagate(False)
-        kpi_inner = ctk.CTkFrame(kpi_frame, fg_color="transparent")
-        kpi_inner.pack(fill="both", expand=True, padx=SPACE_L, pady=SPACE_M)
-
-        _KPI_DEFS = [
-            ("hr_mean", "Mean HR",  "bpm", ORANGE_DARK),
-            ("hr_min",  "Min HR",   "bpm", BLUE_DARK),
-            ("hr_max",  "FC max",   "bpm", "#C62828"),
-            ("sdnn",    "SDNN",     "ms",  "#1B5E20"),
-            ("rmssd",   "RMSSD",    "ms",  PURPLE),
-            ("pnn6",    "pNN6",     "%",   "#00695C"),
-            ("porta",   "Porta",    "%",   "#37474F"),   # NEW — RR asymmetry
-            ("lf_hf",   "LF/HF",   "",    BLUE_DARK),
-            ("pr",      "PR",       "ms",  PINK),
-            ("qrs",     "QRS",      "ms",  GREEN_DARK),
-            ("qtc",     "QTc",      "ms",  ORANGE_DEEP),
-            ("qt_disp", "QT disp.", "ms",  AMBER_DARK),   # NEW — QT dispersion
-        ]
-        self._sum_kpi_vals = {}
-        for key, label, unit, color in _KPI_DEFS:
-            card = ctk.CTkFrame(kpi_inner, fg_color=CARD, corner_radius=6)
-            card.pack(side="left", fill="y", padx=(0, SPACE_S), expand=True)
-            ctk.CTkLabel(card, text=label, font=FONT_BADGE,
-                         text_color=color, anchor="center").pack(pady=(SPACE_S, 0), padx=SPACE_S)
-            val_lbl = ctk.CTkLabel(card, text="—",
-                                   font=FONT_TITLE,
-                                   text_color=TEXT, anchor="center")
-            val_lbl.pack(padx=SPACE_S)
-            if unit:
-                ctk.CTkLabel(card, text=unit, font=FONT_MICRO,
-                             text_color=MUTED, anchor="center").pack(pady=(0, SPACE_S), padx=SPACE_S)
-            else:
-                ctk.CTkFrame(card, height=4, fg_color="transparent").pack()
-            self._sum_kpi_vals[key] = val_lbl
-
+        # ── Verdict banner ───────────────────────────────────────────────────
+        banner = ctk.CTkFrame(t, fg_color=PANEL, corner_radius=0, height=44)
+        banner.grid(row=0, column=0, sticky="ew")
+        banner.pack_propagate(False)
+        self.lbl_sum_verdict = ctk.CTkLabel(
+            banner, text="Run analysis to see the signal-quality summary.",
+            font=FONT_KPI_LABEL, text_color=MUTED, anchor="w")
+        self.lbl_sum_verdict.pack(side="left", padx=SPACE_L, pady=SPACE_S)
         ctk.CTkFrame(t, height=1, fg_color=BORDER).grid(row=0, column=0, sticky="sew")
 
         # ── Action bar ────────────────────────────────────────────────────────
@@ -2790,7 +2769,7 @@ class ECGApp(ctk.CTk):
         btn_row.pack_propagate(False)
         for label, cmd in [
             ("📋  Copy Report",      self._copy_summary),
-            ("💾  Enregistrer .txt",    self._save_summary_txt),
+            ("💾  Save .txt",        self._save_summary_txt),
         ]:
             ctk.CTkButton(btn_row, text=label, command=cmd,
                           fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
@@ -2831,16 +2810,6 @@ class ECGApp(ctk.CTk):
             body.pack(fill="x", padx=SPACE_S, pady=(SPACE_XS, 0))
             return body
 
-        def _slot(parent, key: str, h: int, pad_right: bool = False) -> None:
-            """Single CanvasSlot card, fixed height, fill available width."""
-            card = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=6, height=h)
-            px = (0, 4) if pad_right else (0, 0)
-            card.pack(side="left", fill="both", expand=True, padx=px)
-            card.pack_propagate(False)
-            inner = tk.Frame(card, bg=PLOT["bg"], bd=0, highlightthickness=0)
-            inner.pack(fill="both", expand=True, padx=SPACE_XS, pady=SPACE_XS)
-            self._slots[key] = CanvasSlot(inner, 10, h / 100, toolbar=False)
-
         def _row(parent, specs: "list[tuple[str,int,int]]") -> None:
             """specs = [(key, height_px, weight), ...]  — one horizontal row."""
             row_frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -2855,38 +2824,90 @@ class ECGApp(ctk.CTk):
                 inner.pack(fill="both", expand=True, padx=SPACE_XS, pady=SPACE_XS)
                 self._slots[key] = CanvasSlot(inner, 10 * w, h / 100, toolbar=False)
 
-        # ━━━ SECTION 1 — Rythme cardiaque ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        sec1 = _section(outer_scroll, "❤  Heart Rate & Tachogram", ORANGE_DARK,
-                        subtitle="RR tachogram + instantaneous HR")
-        _row(sec1, [("sum_rr", 260, 1)])
-        _row(sec1, [("sum_rr_hist", 220, 3), ("sum_rr_extra", 220, 2)])
+        # ━━━ SECTION 1 — Signal Quality ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        sec_q = _section(outer_scroll, "✓  Signal Quality", GREEN_DARK,
+                         subtitle="how much to trust this recording, not the physiology itself")
+        stat_row = ctk.CTkFrame(sec_q, fg_color=CARD, corner_radius=6)
+        stat_row.pack(fill="x", pady=(0, SPACE_S))
+        stat_grid = ctk.CTkFrame(stat_row, fg_color="transparent")
+        stat_grid.pack(fill="x", padx=SPACE_L, pady=SPACE_M)
+        for col in range(4):
+            stat_grid.grid_columnconfigure(col, weight=1, uniform="sq")
+        _SQ_DEFS = [
+            ("sq_score",   "Overall score"),
+            ("sq_corr",    "Mean template correlation"),
+            ("sq_badbeats","Beats below 0.90 corr."),
+            ("sq_artifact","Auto-corrected"),
+        ]
+        self._sum_quality_vals: "dict[str, ctk.CTkLabel]" = {}
+        for i, (key, label) in enumerate(_SQ_DEFS):
+            cell = ctk.CTkFrame(stat_grid, fg_color="transparent")
+            cell.grid(row=0, column=i, sticky="ew", padx=(0 if i == 0 else SPACE_M, 0))
+            ctk.CTkLabel(cell, text=label, font=FONT_KPI_LABEL,
+                         text_color=MUTED, anchor="w").pack(anchor="w")
+            val_lbl = ctk.CTkLabel(cell, text="—", font=FONT_KPI_VALUE,
+                                   text_color=TEXT, anchor="w")
+            val_lbl.pack(anchor="w")
+            self._sum_quality_vals[key] = val_lbl
+        _row(sec_q, [("sum_quality_time", 180, 1)])
 
-        # ━━━ SECTION 2 — VFC domaine temps & fréquence ━━━━━━━━━━━━━━━━━━━━━━
-        sec2 = _section(outer_scroll, "〰  HRV — Time & Frequency", BLUE_DARK,
-                        subtitle="PSD · radar · Poincaré")
-        _row(sec2, [("sum_psd", 280, 5), ("sum_radar", 280, 3)])
-        _row(sec2, [("sum_poincare", 260, 3), ("sum_asymmetry", 260, 4)])   # NEW
+        # ━━━ SECTION 2 — Rythme cardiaque ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        sec1 = _section(outer_scroll, "❤  Heart Rate & Rhythm", ORANGE_DARK,
+                        subtitle="densest single views — full plots live in their own tabs")
+        _row(sec1, [("sum_rr", 260, 3), ("sum_poincare", 260, 2)])
+        _row(sec1, [("sum_asymmetry", 220, 1)])
 
-        # ━━━ SECTION 3 — Morphologie des battements ━━━━━━━━━━━━━━━━━━━━━━━━━
-        sec3 = _section(outer_scroll, "📊  Beat Morphology", PURPLE,
-                        subtitle="mean template ± 1 SD · distributions")
-        _row(sec3, [("sum_beat", 300, 1)])
-        _row(sec3, [("sum_beat_dist", 220, 3), ("sum_quality_time", 220, 2)])  # NEW
+        # ━━━ SECTION 3 — Metrics table ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        sec2 = _section(outer_scroll, "▤  Metrics", BLUE_DARK,
+                        subtitle="values only — no reference-range judgment")
+        metrics_card = ctk.CTkFrame(sec2, fg_color=CARD, corner_radius=6)
+        metrics_card.pack(fill="x", pady=(0, SPACE_S))
+        metrics_body = ctk.CTkFrame(metrics_card, fg_color="transparent")
+        metrics_body.pack(fill="x", padx=SPACE_L, pady=SPACE_M)
 
-        # ━━━ SECTION 4 — Intervalles ECG ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        sec4 = _section(outer_scroll, "📏  ECG Intervals", PINK,
-                        subtitle="PR · QRS · QT · QTc  (delineation required)")
-        _row(sec4, [("sum_intervals", 240, 3), ("sum_qt_disp", 240, 2)])     # NEW
-        _row(sec4, [("sum_intervals_ecg", 300, 1)])
+        _METRIC_GROUPS = [
+            ("Rate",                  ORANGE_DARK, [("hr_mean", "HR mean", "bpm"),
+                                                     ("hr_range", "HR range", "bpm")]),
+            ("Time-domain HRV",       BLUE_DARK,   [("sdnn", "SDNN", "ms"),
+                                                     ("rmssd", "RMSSD", "ms"),
+                                                     ("pnn6", "pNN6", "%")]),
+            ("Frequency / non-linear", "#37474F",  [("lf_hf", "LF/HF", ""),
+                                                     ("sampen", "SampEn", ""),
+                                                     ("dfa1", "DFA α1", "")]),
+            ("Intervals (delineation)", PINK,      [("pr", "PR", "ms"),
+                                                     ("qrs", "QRS", "ms"),
+                                                     ("qtc", "QTc", "ms")]),
+        ]
+        self._sum_metric_vals: "dict[str, ctk.CTkLabel]" = {}
+        for gi, (gtitle, gcolor, rows) in enumerate(_METRIC_GROUPS):
+            ctk.CTkLabel(metrics_body, text=gtitle.upper(), font=FONT_SUBSECTION,
+                         text_color=gcolor, anchor="w").pack(
+                anchor="w", pady=(SPACE_S if gi else 0, SPACE_XS))
+            for key, name, unit in rows:
+                r = ctk.CTkFrame(metrics_body, fg_color="transparent")
+                r.pack(fill="x")
+                ctk.CTkLabel(r, text=name, font=FONT_LABEL, text_color=TEXT,
+                             anchor="w", width=160).pack(side="left")
+                val_lbl = ctk.CTkLabel(r, text="—", font=FONT_LABEL,
+                                       text_color=TEXT, anchor="e", width=80)
+                val_lbl.pack(side="left")
+                if unit:
+                    ctk.CTkLabel(r, text=unit, font=FONT_MICRO, text_color=MUTED,
+                                 anchor="w").pack(side="left", padx=(SPACE_XS, 0))
+                self._sum_metric_vals[key] = val_lbl
 
-        # ━━━ SECTION 5 — VFC glissante ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        sec5 = _section(outer_scroll, "📈  Rolling HRV over time", "#00695C",
-                        subtitle="SDNN · RMSSD · HR per rolling windows")
-        _row(sec5, [("sum_rolling", 260, 1)])
+        linkout = ctk.CTkFrame(sec2, fg_color=CARD, corner_radius=6)
+        linkout.pack(fill="x", pady=(0, SPACE_S))
+        ctk.CTkLabel(linkout, text="Full plots for every metric above live in their own tabs.",
+                     font=FONT_SMALL, text_color=MUTED, anchor="w").pack(
+            side="left", padx=SPACE_M, pady=SPACE_S)
+        ctk.CTkLabel(linkout, text="HRV · Intervals · Beat Template · Arrhythmias  →",
+                     font=FONT_SMALL, text_color=BLUE, anchor="e").pack(
+            side="right", padx=SPACE_M, pady=SPACE_S)
 
-        # ━━━ SECTION 6 — Rapport texte ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        sec6 = _section(outer_scroll, "📝  Detailed Report", MUTED)
-        txt_card = ctk.CTkFrame(sec6, fg_color=CARD, corner_radius=6)
+        # ━━━ SECTION 4 — Rapport texte ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        sec3 = _section(outer_scroll, "📝  Detailed Report", MUTED)
+        txt_card = ctk.CTkFrame(sec3, fg_color=CARD, corner_radius=6)
         txt_card.pack(fill="x", pady=(0, SPACE_L))
         self.txt_sum = ctk.CTkTextbox(txt_card, font=FONT_MONO, fg_color=CARD,
                                       text_color=TEXT, border_width=0, height=380)

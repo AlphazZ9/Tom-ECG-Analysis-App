@@ -104,15 +104,14 @@ class ExportController:
         catalogue: "list[tuple[str, str, Optional[Callable]]]" = [
             ("rr",            "01_rr_tachogram",    _rr_clean),
             ("rr_hist",       "02_rr_histogram",     None),
-            ("sum_rr_extra",  "03_hr_histogram",     None),
-            ("psd",           "04_psd",              None),
-            ("poincare",      "05_poincare",         None),
-            ("radar",         "06_hrv_radar",        None),
-            ("beat",          "07_beat_template",    None),
-            ("beat_dist",     "08_beat_morphology",  None),
-            ("intervals",     "09_intervals",        None),
-            ("intervals_ecg", "10_intervals_ecg",    None),
-            ("rolling_hrv",   "11_rolling_hrv",      None),
+            ("psd",           "03_psd",              None),
+            ("poincare",      "04_poincare",         None),
+            ("radar",         "05_hrv_radar",        None),
+            ("beat",          "06_beat_template",    None),
+            ("beat_dist",     "07_beat_morphology",  None),
+            ("intervals",     "08_intervals",        None),
+            ("intervals_ecg", "09_intervals_ecg",    None),
+            ("rolling_hrv",   "10_rolling_hrv",      None),
         ]
 
         saved, skipped = 0, 0

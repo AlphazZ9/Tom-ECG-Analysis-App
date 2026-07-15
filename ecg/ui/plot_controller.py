@@ -1468,7 +1468,9 @@ class PlotController:
         self.app._slots["beat_dist"].update(draw_distributions)
 
     def plot_summary(self, r: dict) -> None:
-        """Populate the Summary tab: KPI cards, all plots, and text report."""
+        """Populate the Summary tab: signal-quality panel, kept plots, metrics
+        table, and text report.
+        """
         hr  = r["hr"]
         td  = r["hrv_time"]
         fd  = r["hrv_freq"]
@@ -1480,52 +1482,91 @@ class PlotController:
         porta_pct: float = float("nan")
         guzik_pct: float = float("nan")
         n_dec: int = 0; n_acc: int = 0; n_tot: int = 0
-        qt_disp: float = float("nan")
-        _qt: "np.ndarray" = np.array([])
 
-        # ── KPI cards ─────────────────────────────────────────────────────────
-        def _kpi(key: str, text: str) -> None:
-            lbl = self.app._sum_kpi_vals.get(key)
+        # ── Metrics table (values only -- no reference-range judgment) ─────────
+        def _metric(key: str, text: str) -> None:
+            lbl = self.app._sum_metric_vals.get(key)
             if lbl is not None:
                 lbl.configure(text=text)
 
         rdf = r.get("rr_df")
         if rdf is not None and not rdf.empty:
-            _kpi("hr_mean", f"{rdf['HR_bpm'].mean():.0f}")
-            _kpi("hr_min",  f"{rdf['HR_bpm'].quantile(0.02):.0f}")
-            _kpi("hr_max",  f"{rdf['HR_bpm'].quantile(0.98):.0f}")
+            _metric("hr_mean", f"{rdf['HR_bpm'].mean():.0f}")
+            _metric("hr_range",
+                    f"{rdf['HR_bpm'].quantile(0.02):.0f}–{rdf['HR_bpm'].quantile(0.98):.0f}")
 
-        _kpi("sdnn",  val(td, "HRV_SDNN",  1))
-        _kpi("rmssd", val(td, "HRV_RMSSD", 1))
-        _kpi("pnn6",  val(td, "HRV_pNN6",  1))
+        _metric("sdnn",  val(td, "HRV_SDNN",  1))
+        _metric("rmssd", val(td, "HRV_RMSSD", 1))
+        _metric("pnn6",  val(td, "HRV_pNN6",  1))
 
         try:
             lfhf = float(fd["HRV_LFHF"].values[0]) if (fd is not None and "HRV_LFHF" in fd.columns) else float("nan")
         except Exception:
             lfhf = float("nan")
-        _kpi("lf_hf", f"{lfhf:.2f}" if np.isfinite(lfhf) else "—")
+        _metric("lf_hf", f"{lfhf:.2f}" if np.isfinite(lfhf) else "—")
+        _metric("sampen", val(nl, "HRV_SampEn", 2))
+        _metric("dfa1",   val(nl, "HRV_DFA_alpha1", 2))
 
         if ivl is not None and not ivl.empty:
             for col, key in [("PR_ms", "pr"), ("QRS_ms", "qrs"), ("QTc_ms", "qtc")]:
                 if col in ivl.columns:
                     d = ivl[col].dropna()
                     if len(d):
-                        _kpi(key, f"{d.median():.0f}")
+                        _metric(key, f"{d.median():.0f}")
 
-        # ── Mirror existing draw_fn into summary slots ─────────────────────────
-        # Each primary slot holds a fully-bound draw closure from the analysis
-        # pipeline. Replaying it into the summary slot renders the same plot.
+        # ── Signal Quality panel ────────────────────────────────────────────────
+        # Surfaces numbers the app already computes but never showed anywhere:
+        # mean beat-to-template correlation, % of beats below the 0.90
+        # threshold, and the artifact-correction breakdown. This is a
+        # judgment about DATA TRUSTWORTHINESS, not physiology -- deliberately
+        # has no experimental-context-dependent reference ranges.
+        beat_corr = r.get("beat_corr")
+        rr_ms     = r.get("rr_ms", np.array([]))
+        n_beats   = len(beat_corr) if beat_corr is not None else 0
+        mean_corr = float(np.nanmean(beat_corr)) if n_beats else float("nan")
+        n_bad     = int(np.sum(beat_corr < 0.90)) if n_beats else 0
+
+        def _sq(key: str, text: str) -> None:
+            lbl = self.app._sum_quality_vals.get(key)
+            if lbl is not None:
+                lbl.configure(text=text)
+
+        score = self.app.detection.sig_quality
+        _sq("sq_score", f"{score}%" if score is not None else "—")
+        _sq("sq_corr", f"{mean_corr:.3f}" if np.isfinite(mean_corr) else "—")
+        _sq("sq_badbeats",
+            f"{100.0 * n_bad / n_beats:.1f}%  ({n_bad}/{n_beats})" if n_beats else "—")
+
+        arep = self.app.analysis.artifact_report
+        if arep:
+            removed = arep["n_in"] - arep["n_out"]
+            _sq("sq_artifact",
+                f"{removed}  ({arep['n_duplicate']} dup · "
+                f"{arep['n_nonphysio']} non-physio · {arep['n_ectopic']} ectopic)")
+        else:
+            _sq("sq_artifact", "not applied")
+
+        if self.app.lbl_sum_verdict is not None:
+            dur_s = float(rdf["Time_s"].iloc[-1]) if rdf is not None and len(rdf) else float("nan")
+            score_word = "good" if (score or 0) >= 70 else ("fair" if (score or 0) >= 40 else "poor")
+            score_color = GREEN if (score or 0) >= 70 else (ORANGE if (score or 0) >= 40 else RED)
+            parts = [f"Signal quality {score}% — {score_word}." if score is not None else "Signal quality not computed."]
+            if hr.get("n"):
+                parts.append(f"{hr['n']} beats")
+            if np.isfinite(dur_s):
+                parts.append(f"{dur_s:.0f} s")
+            if arep:
+                parts.append(f"{arep['n_in'] - arep['n_out']} beats auto-corrected")
+            self.app.lbl_sum_verdict.configure(
+                text="  ·  ".join(parts), text_color=score_color)
+
+        # ── Mirror the two kept plots (RR tachogram, Poincare) ─────────────────
+        # Every other Summary plot used to mirror a full-tab draw_fn at ~1/3
+        # the size with the same font/legend density -- removed in favour of
+        # linking to the full tabs instead (see the "Metrics" section below).
         _MIRRORS = [
             ("rr",            "sum_rr"),
-            ("rr_hist",       "sum_rr_hist"),
-            ("psd",           "sum_psd"),
-            ("radar",         "sum_radar"),
             ("poincare",      "sum_poincare"),
-            ("beat",          "sum_beat"),
-            ("beat_dist",     "sum_beat_dist"),
-            ("intervals",     "sum_intervals"),
-            ("intervals_ecg", "sum_intervals_ecg"),
-            ("rolling_hrv",   "sum_rolling"),
         ]
         for src_key, dst_key in _MIRRORS:
             src = self.app._slots.get(src_key)
@@ -1538,47 +1579,6 @@ class PlotController:
                     dst.update(fn)
                 except Exception as exc:
                     log.debug("sum mirror %s→%s: %s", src_key, dst_key, exc)
-
-        # ── sum_rr_extra: FC distribution + qualité morphologique ─────────────
-        rr_ms     = r.get("rr_ms", np.array([]))
-        beat_corr = r.get("beat_corr")
-        if len(rr_ms) > 4:
-            hr_bpm = 60_000.0 / np.clip(rr_ms, 1, None)
-
-            def draw_rr_extra(fig):
-                axes = fig.subplots(1, 2)
-                style_axes(axes[0]); style_axes(axes[1])
-                bins = min(60, max(10, len(hr_bpm) // 40))
-                axes[0].hist(hr_bpm, bins=bins, color=ORANGE_DARK, alpha=0.72, edgecolor="none")
-                med_hr = float(np.median(hr_bpm))
-                axes[0].axvline(med_hr, color=ORANGE_DARK, lw=1.6, ls="--",
-                                label=f"méd. {med_hr:.0f}")
-                axes[0].set_xlabel("HR (bpm)")
-                axes[0].set_ylabel("Beats")
-                axes[0].set_title("HR Distribution", loc="left")
-                axes[0].legend(framealpha=0, fontsize=8)
-                if beat_corr is not None and len(beat_corr) > 4:
-                    axes[1].hist(beat_corr,
-                                 bins=min(40, max(8, len(beat_corr) // 40)),
-                                 color=RED, alpha=0.70, edgecolor="none")
-                    axes[1].axvline(0.90, color=ORANGE, lw=1.2, ls=":",
-                                    label="threshold 0.90")
-                    mc = float(np.nanmean(beat_corr))
-                    axes[1].axvline(mc, color=RED, lw=1.6, ls="--",
-                                    label=f"moy. {mc:.3f}")
-                    axes[1].set_xlabel("Correlation to template")
-                    axes[1].set_ylabel("Beats")
-                    axes[1].set_title("Morphological quality", loc="left")
-                    axes[1].legend(framealpha=0, fontsize=8)
-                else:
-                    axes[1].text(0.5, 0.5, "Template not computed",
-                                 ha="center", va="center",
-                                 color=PLOT["muted"], transform=axes[1].transAxes)
-                    axes[1].set_axis_off()
-
-            dst = self.app._slots.get("sum_rr_extra")
-            if dst is not None:
-                dst.update(draw_rr_extra)
 
         # ── sum_asymmetry: Asymétrie RR (Porta / Guzik index) ─────────────────
         # Porta index P0: fraction of beats with RR_n+1 < RR_n  (sym → 50 %)
@@ -1642,8 +1642,6 @@ class PlotController:
             dst = self.app._slots.get("sum_asymmetry")
             if dst is not None:
                 dst.update(draw_asymmetry)
-            # KPI
-            _kpi("porta", f"{porta_pct:.0f}")
 
         # ── sum_quality_time: Qualité morphologique dans le temps ──────────────
         if beat_corr is not None and len(beat_corr) > 4 and self.app.detection.rpeaks_ok is not None:
@@ -1691,83 +1689,16 @@ class PlotController:
             if dst is not None:
                 dst.update(draw_quality_time)
 
-        # ── sum_qt_disp: Dispersion QT + relation QT/RR ────────────────────────
+        # QT dispersion -- value only (used in the text report below); the
+        # dedicated QT-variability/QT-RR-relationship plot that used to live
+        # here in a Summary-only slot was dropped as part of de-duplicating
+        # this tab (not mirrored from, or duplicated in, any other tab, but
+        # out of scope for the slimmed-down Summary).
+        _qt = np.array([])
+        qt_disp: float = float("nan")
         if ivl is not None and not ivl.empty:
-            _qt   = ivl["QT_ms"].dropna().values.astype(float)  if "QT_ms"  in ivl.columns else np.array([])
-            _qtc  = ivl["QTc_ms"].dropna().values.astype(float) if "QTc_ms" in ivl.columns else np.array([])
-            _rr_ivl = ivl["RR_ms"].dropna().values.astype(float) if "RR_ms" in ivl.columns else np.array([])
-
+            _qt = ivl["QT_ms"].dropna().values.astype(float) if "QT_ms" in ivl.columns else np.array([])
             qt_disp = float(np.nanmax(_qt) - np.nanmin(_qt)) if len(_qt) > 3 else float("nan")
-            if np.isfinite(qt_disp):
-                _kpi("qt_disp", f"{qt_disp:.0f}")
-
-            if len(_qt) > 10 and len(_rr_ivl) > 10:
-                _n_min = min(len(_qt), len(_rr_ivl))
-                _qt_al = _qt[:_n_min]
-                _rr_al = _rr_ivl[:_n_min]
-                # Simple linear regression QT ~ RR
-                try:
-                    _mask = np.isfinite(_qt_al) & np.isfinite(_rr_al)
-                    _rr_f = _rr_al[_mask]; _qt_f = _qt_al[_mask]
-                    _coef = np.polyfit(_rr_f, _qt_f, 1)
-                    _fit_rr = np.linspace(_rr_f.min(), _rr_f.max(), 100)
-                    _fit_qt = np.polyval(_coef, _fit_rr)
-                    _slope  = _coef[0]
-                    _has_fit = True
-                except Exception:
-                    _has_fit = False
-                    _rr_f = _qt_f = np.array([])
-                    _fit_rr = _fit_qt = _slope = None
-
-                _qt_disp_val = qt_disp
-                _qtc_al = _qtc[:_n_min] if len(_qtc) >= _n_min else _qtc
-
-                def draw_qt_disp(fig):
-                    ax_disp, ax_rel = fig.subplots(1, 2)
-                    style_axes(ax_disp); style_axes(ax_rel)
-
-                    # Left: QT & QTc distribution with dispersion band
-                    if len(_qt_al) > 3:
-                        p2_qt,  p98_qt  = np.percentile(_qt_al,  [2, 98])
-                        ax_disp.violinplot(_qt_al,  positions=[0], widths=0.6,
-                                           showmedians=False, showextrema=False)
-                        ax_disp.boxplot(_qt_al, positions=[0], widths=0.18,
-                                        patch_artist=True,
-                                        boxprops=dict(facecolor=PINK, alpha=0.3, lw=0.7),
-                                        medianprops=dict(color="white", lw=2),
-                                        whiskerprops=dict(color=PINK, lw=0.8),
-                                        capprops=dict(color=PINK, lw=0.8),
-                                        flierprops=dict(marker=".", ms=2, color=MUTED, alpha=0.4))
-                    if len(_qtc_al) > 3:
-                        ax_disp.violinplot(_qtc_al, positions=[1], widths=0.6,
-                                           showmedians=False, showextrema=False)
-                        ax_disp.boxplot(_qtc_al, positions=[1], widths=0.18,
-                                        patch_artist=True,
-                                        boxprops=dict(facecolor=AMBER_DARK, alpha=0.3, lw=0.7),
-                                        medianprops=dict(color="white", lw=2),
-                                        whiskerprops=dict(color=AMBER_DARK, lw=0.8),
-                                        capprops=dict(color=AMBER_DARK, lw=0.8),
-                                        flierprops=dict(marker=".", ms=2, color=MUTED, alpha=0.4))
-                    ax_disp.set_xticks([0, 1])
-                    ax_disp.set_xticklabels(["QT (ms)", "QTc (ms)"], fontsize=9)
-                    ax_disp.set_ylabel("ms")
-                    disp_str = f"disp. {_qt_disp_val:.0f} ms" if np.isfinite(_qt_disp_val) else ""
-                    ax_disp.set_title(f"QT Variability  {disp_str}", loc="left", fontsize=8)
-
-                    # Right: QT vs RR scatter + regression line
-                    ax_rel.scatter(_rr_f, _qt_f, s=2, alpha=0.25,
-                                   color=PINK, rasterized=True, zorder=2)
-                    if _has_fit and _fit_rr is not None:
-                        ax_rel.plot(_fit_rr, _fit_qt, color=ORANGE, lw=1.8, zorder=3,
-                                    label=f"pente {_slope:.3f}")
-                        ax_rel.legend(framealpha=0, fontsize=8)
-                    ax_rel.set_xlabel("RR (ms)")
-                    ax_rel.set_ylabel("QT (ms)")
-                    ax_rel.set_title("QT/RR relationship (dynamic correction)", loc="left", fontsize=8)
-
-                dst = self.app._slots.get("sum_qt_disp")
-                if dst is not None:
-                    dst.update(draw_qt_disp)
 
         # ── Texte du rapport ─────────────────────────────────────────────────
         filter_note = "  ⚠ Signal brut (sans filtres)" if self.app.signal.no_filter_mode else "  Bandpass + notch + NK clean"
@@ -1858,14 +1789,9 @@ class PlotController:
             "beat", "beat_dist",
             "epochs", "rolling_hrv",
             "arr_detail",
-            # Summary mirrors
-            "sum_rr", "sum_rr_hist", "sum_rr_extra",
-            "sum_psd", "sum_radar", "sum_poincare",
-            "sum_beat", "sum_beat_dist",
-            "sum_intervals", "sum_intervals_ecg",
-            "sum_rolling",
-            # New summary panels
-            "sum_asymmetry", "sum_quality_time", "sum_qt_disp",
+            # Summary tab: kept mirrors + its own unique panels
+            "sum_rr", "sum_poincare",
+            "sum_asymmetry", "sum_quality_time",
         )
         for name in result_slots:
             slot = self.app._slots.get(name)
