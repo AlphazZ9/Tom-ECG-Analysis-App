@@ -25,7 +25,7 @@ import numpy as np
 from ecg.ui.theme import (
     THEME, ThemeConfig, apply_theme_config,
     BG, PANEL, CARD, BORDER, BORDER2, TEXT, MUTED, LIGHT, PLOT,
-    RED, BLUE, GREEN, ORANGE, PURPLE, PURPLE_DARK,
+    RED, BLUE, GREEN, GREEN_DARK, ORANGE, PURPLE, PURPLE_DARK,
     BLUE_HOVER, RED_DARK, RED_LIGHT, ORANGE_DARK, ORANGE_DEEP,
     AMBER, GRAY, GRAY_LIGHT,
     FONT_TITLE, FONT_SECTION_HDR, FONT_LABEL, FONT_SMALL,
@@ -33,6 +33,11 @@ from ecg.ui.theme import (
     make_font,
 )
 from ecg.core.models import MouseECG
+from ecg.core.ml_detector import (
+    training_data_summary, list_training_files, delete_training_sample,
+    train_model, MLPeakModel,
+)
+from ecg.io.db import _DB_AVAILABLE, verified_recordings, set_verified
 from ecg.io.export import ANNOTATION_COLORS
 
 if TYPE_CHECKING:
@@ -1026,4 +1031,173 @@ class AnnotationManagerDialog(ctk.CTkToplevel):
 # ════════════════════════════════════════════════════════════════════════
 #  IntervalVerifierPanel — interactive beat-by-beat landmark checker
 # ════════════════════════════════════════════════════════════════════════
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  MLTrainingDialog — train/retrain the ML R-peak detector
+# ════════════════════════════════════════════════════════════════════════
+
+class MLTrainingDialog(ctk.CTkToplevel):
+    """Modal dialog: shows verified-recording stats and trains the ML detector.
+
+    Operates only on the pooled ml_training/*.npz cache and the persisted
+    model (ecg.core.ml_detector) -- independent of whichever recording (if
+    any) is currently open in the main window.
+    """
+
+    ROW_H = 30
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._app = parent
+        self.title("ML R-Peak Detector")
+        self.geometry("560x620")
+        self.minsize(480, 440)
+        self.resizable(True, True)
+        self.configure(fg_color=BG)
+        self.grab_set()
+        self.focus_force()
+
+        ctk.CTkLabel(self, text="🤖  ML R-Peak Detector", font=FONT_TITLE,
+                     text_color=TEXT, anchor="w").pack(fill="x", padx=20, pady=(20, 4))
+        ctk.CTkLabel(
+            self, text="Trains a classifier from recordings marked "
+                       "“Verified for training” (sidebar switch, "
+                       "saved with the session). Verify a few recordings "
+                       "with clean, corrected R-peaks, then train.",
+            font=FONT_SMALL, text_color=MUTED, anchor="w", justify="left",
+            wraplength=510).pack(fill="x", padx=20, pady=(0, 12))
+
+        stats_card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=8,
+                                   border_width=1, border_color=BORDER)
+        stats_card.pack(fill="x", padx=20, pady=(0, 12))
+        self._lbl_verified = ctk.CTkLabel(
+            stats_card, text="", font=FONT_LABEL, text_color=TEXT,
+            anchor="w", justify="left", wraplength=500)
+        self._lbl_verified.pack(fill="x", padx=14, pady=(12, 4))
+        self._lbl_model = ctk.CTkLabel(
+            stats_card, text="", font=FONT_SMALL, text_color=MUTED,
+            anchor="w", justify="left", wraplength=500)
+        self._lbl_model.pack(fill="x", padx=14, pady=(0, 12))
+
+        # ── Verified-file list ──────────────────────────────────────────
+        ctk.CTkLabel(self, text="Verified files", font=FONT_LABEL,
+                     text_color=TEXT, anchor="w").pack(fill="x", padx=20, pady=(0, 4))
+        self._list_frame = ctk.CTkScrollableFrame(self, fg_color=CARD)
+        self._list_frame.pack(fill="both", expand=True, padx=20, pady=(0, 12))
+
+        self._lbl_result = ctk.CTkLabel(
+            self, text="", font=FONT_SMALL, text_color=MUTED,
+            anchor="w", justify="left", wraplength=510)
+        self._lbl_result.pack(fill="x", padx=20, pady=(0, 8))
+
+        self.btn_train = ctk.CTkButton(
+            self, text="▶  Train Model", command=self._train,
+            fg_color=GREEN, hover_color=GREEN_DARK, text_color="white",
+            font=FONT_BTN_PRIMARY, height=36, corner_radius=8)
+        self.btn_train.pack(fill="x", padx=20, pady=(0, 8))
+
+        ctk.CTkButton(
+            self, text="Close", command=self.destroy,
+            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
+            font=FONT_BTN_SEC, height=30, corner_radius=8,
+        ).pack(fill="x", padx=20, pady=(0, 20))
+
+        self._refresh_stats()
+
+    def _refresh_stats(self) -> None:
+        summary = training_data_summary()
+        self._lbl_verified.configure(
+            text=f"{summary['n_files']} verified recording(s)  —  "
+                 f"{summary['n_samples']} labeled candidates "
+                 f"({summary['n_positive']} R-peaks)")
+        model = MLPeakModel.load()
+        if model is not None:
+            meta = model.meta
+            self._lbl_model.configure(
+                text=f"Current model — trained {str(meta.get('trained_at', '?'))[:19]} on "
+                     f"{meta.get('n_training_files', '?')} file(s), "
+                     f"{meta.get('n_training_samples', '?')} samples.  "
+                     f"Hold-out accuracy={meta.get('holdout_accuracy', 0):.2f}, "
+                     f"F1={meta.get('holdout_f1', 0):.2f}")
+        else:
+            self._lbl_model.configure(text="No model trained yet.")
+        self._refresh_file_list()
+
+    def _refresh_file_list(self) -> None:
+        """Repopulate the scrollable list of cached training files.
+
+        Cross-references each cached fingerprint against the sqlite
+        registry (if available) to show a filename instead of a hash --
+        the .npz cache itself has no notion of the original file path.
+        """
+        for w in self._list_frame.winfo_children():
+            w.destroy()
+
+        files = list_training_files()
+        if not files:
+            ctk.CTkLabel(self._list_frame, text="No verified recordings yet.",
+                         text_color=MUTED).pack(padx=12, pady=16)
+            return
+
+        by_fingerprint: "dict[str, dict]" = {}
+        if _DB_AVAILABLE:
+            for row in verified_recordings(limit=1000):
+                by_fingerprint[row.get("fingerprint", "")] = row
+
+        for i, entry in enumerate(files):
+            fp = entry["fingerprint"]
+            row_data = by_fingerprint.get(fp)
+            label = Path(row_data["filepath"]).name if row_data else f"Unknown file ({fp[:12]}…)"
+            filepath = row_data["filepath"] if row_data else None
+
+            row = ctk.CTkFrame(self._list_frame,
+                               fg_color=CARD if i % 2 == 0 else BG,
+                               height=self.ROW_H, corner_radius=0)
+            row.pack(fill="x", padx=2, pady=1)
+            ctk.CTkLabel(row, text=label, font=make_font(11), text_color=TEXT,
+                         anchor="w").pack(side="left", padx=(6, 4), fill="x", expand=True)
+            ctk.CTkLabel(row, text=f"{entry['n_samples']} samples "
+                                    f"({entry['n_positive']} peaks)",
+                         font=make_font(10), text_color=MUTED, width=140,
+                         anchor="e").pack(side="left", padx=4)
+            ctk.CTkButton(
+                row, text="🗑", width=28, height=22,
+                fg_color=RED, hover_color=RED_DARK, text_color="white",
+                font=make_font(10),
+                command=lambda fp=fp, filepath=filepath: self._remove_file(fp, filepath),
+            ).pack(side="left", padx=(4, 6))
+
+    def _remove_file(self, fingerprint: str, filepath: "Optional[str]") -> None:
+        """Un-verify one cached recording: drop its .npz cache and DB flag.
+
+        Does not retrain automatically -- the removed file simply won't be
+        included next time "Train Model" is clicked.
+        """
+        delete_training_sample(fingerprint)
+        if filepath and _DB_AVAILABLE:
+            set_verified(filepath, False)
+        # If the removed file happens to be the one currently open in the
+        # main window, keep its sidebar switch in sync too.
+        app = self._app
+        if filepath and getattr(app, "signal", None) is not None and app.signal.filepath == filepath:
+            app.session.verified_for_training = False
+            app.session_ctrl.sync_verified_switch()
+        self._refresh_stats()
+
+    def _train(self) -> None:
+        self.btn_train.configure(state="disabled", text="Training…")  # type: ignore[union-attr]
+        self.update_idletasks()
+        try:
+            result = train_model()
+        finally:
+            self.btn_train.configure(state="normal", text="▶  Train Model")  # type: ignore[union-attr]
+        if result.get("ok"):
+            self._lbl_result.configure(
+                text=f"✓ {result['message']}  (accuracy={result['accuracy']:.2f}, "
+                     f"F1={result['f1']:.2f})",
+                text_color=GREEN)
+        else:
+            self._lbl_result.configure(text=f"✗ {result['message']}", text_color=ORANGE)
+        self._refresh_stats()
 

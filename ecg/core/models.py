@@ -300,7 +300,7 @@ class FilterParams:
     artifact_correction: bool = False   # OFF by default — use manual review instead
     auto_epochs:  bool  = False
     invert_signal: bool = False   # manual polarity override (flip before auto-detection)
-    detection_method: str = "auto"  # "auto" | "sg_derivative"
+    detection_method: str = "auto"  # "auto" | "sg_derivative" | "wavelet" | "envelope_max" | "ml"
     sg_target_fs: int = 10_000     # Hz — downsample target before SG+derivative
 
     def to_dict(self) -> dict:
@@ -308,10 +308,23 @@ class FilterParams:
         d = dataclasses.asdict(self)
         # _prepare_signal expects key "notch", not "notch_filter"
         d["notch"] = d.pop("notch_filter")
-        # Normalise detection_method to a short key for _compute_preview_bundle
-        dm = d.get("detection_method", "auto")
-        if "sg" in str(dm).lower() or "deriv" in str(dm).lower():
+        # Normalise detection_method to a short key for _compute_preview_bundle.
+        # Must cover every branch signal_controller.py's dispatcher checks --
+        # this used to only recognise "sg"/"deriv" and silently collapsed
+        # everything else (including "Wavelet (CWT)" and "Envelope Max") to
+        # "auto", so selecting either of those two detectors in the UI never
+        # actually reached them: the dispatcher's own wavelet/envelope
+        # branches were unreachable dead code, since this is the function
+        # that produces the string they'd need to match against.
+        dm = str(d.get("detection_method", "auto")).lower()
+        if "wavelet" in dm or "cwt" in dm:
+            d["detection_method"] = "wavelet"
+        elif "sg" in dm or "deriv" in dm:
             d["detection_method"] = "sg_derivative"
+        elif "envelope" in dm or "max" in dm:
+            d["detection_method"] = "envelope_max"
+        elif "ml" in dm or "machine" in dm:
+            d["detection_method"] = "ml"
         else:
             d["detection_method"] = "auto"
         return d

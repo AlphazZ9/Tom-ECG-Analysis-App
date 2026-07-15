@@ -139,3 +139,4 @@ class SessionState:
     recent_files: list[str] = field(default_factory=list)
     dirty: bool = False
     recording_notes: str = ""                    # freetext notes for this recording
+    verified_for_training: bool = False           # user-confirmed clean R-peaks -- ML training data

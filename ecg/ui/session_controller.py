@@ -22,6 +22,7 @@ from ecg.core.models import FilterParams, EXPERIMENTAL_CONTEXTS
 from ecg.io.loaders import load_mat_signal, _serialise_results, _deserialise_results
 from ecg.io.session import load_session, save_session, delete_session
 from ecg.io.db import _DB_AVAILABLE, upsert_recording
+from ecg.core.ml_detector import save_training_sample, delete_training_sample
 from ecg.ui.theme import THEME, BLUE, GREEN, MUTED
 
 if TYPE_CHECKING:
@@ -159,6 +160,7 @@ class SessionController:
             "manual_added":     set(int(x) for x in state.get("manual_added",    [])),
             "signal_inverted":  bool(state.get("signal_inverted", False)),
             "no_filter_mode":   bool(state.get("no_filter_mode",  fp.no_filter)),
+            "verified_for_training": bool(state.get("verified_for_training", False)),
             "results":          _deserialise_results(results_raw) if results_raw else None,
             "artifact_report":  state.get("artifact_report"),
             "epoch_df":         pd.DataFrame(epoch_raw)   if epoch_raw   is not None else None,
@@ -212,6 +214,8 @@ class SessionController:
         self.app.detection.manual_added    = set(bundle["manual_added"])
         self.app.signal.inverted = bundle["signal_inverted"]
         self.app.signal.no_filter_mode  = bundle["no_filter_mode"]
+        self.app.session.verified_for_training = bundle["verified_for_training"]
+        self.sync_verified_switch()
 
         # ── Restore analysis results (DataFrames already deserialised) ───
         self.app.analysis.results         = bundle["results"]
@@ -344,6 +348,7 @@ class SessionController:
             "manual_added":    list(self.app.detection.manual_added),
             "no_filter_mode":  self.app.signal.no_filter_mode,
             "signal_inverted": self.app.signal.inverted,
+            "verified_for_training": self.app.session.verified_for_training,
             # Filter params — use FilterParams.from_widgets so the field list
             # is maintained in a single place.  Falls back to defaults for any
             # widget that hasn't been built yet (e.g. called during startup).
@@ -385,9 +390,10 @@ class SessionController:
             saved_at = state["saved_at"]
             self.app.session.dirty = False
             self.update_session_ui(has_session=True, saved_at=saved_at)
+            from ecg.io.session import _file_fingerprint
+            _fp = _file_fingerprint(self.app.signal.filepath)
             # ── SQLite registry upsert ────────────────────────────────────
             if _DB_AVAILABLE:
-                from ecg.io.session import _file_fingerprint
                 _stats: dict = {}
                 if self.app.analysis.results:
                     _rdf = self.app.analysis.results.get("rr_df")
@@ -404,11 +410,28 @@ class SessionController:
                         _stats["n_peaks"] = int(len(self.app.detection.rpeaks_ok))
                 upsert_recording(
                     filepath=self.app.signal.filepath,
-                    fingerprint=_file_fingerprint(self.app.signal.filepath),
+                    fingerprint=_fp,
                     session_path=str(out_path),
                     stats=_stats,
                     notes=self.app.session.recording_notes,
+                    verified_for_training=self.app.session.verified_for_training,
                 )
+            # ── ML training-data cache ─────────────────────────────────────
+            # Independent of the sqlite registry -- the .npz cache is the
+            # only thing Train/Retrain reads, so it must be kept in sync
+            # here even when _DB_AVAILABLE is False.
+            try:
+                if self.app.session.verified_for_training and self.app.detection.rpeaks_ok is not None:
+                    n_cand = save_training_sample(
+                        _fp, self.app.signal.filtered, self.app.signal.fs,
+                        self.app.detection.rpeaks_ok)
+                    log.info("ML training sample cached for %s (%d candidates)",
+                              self.app.signal.filepath, n_cand)
+                else:
+                    delete_training_sample(_fp)
+            except Exception as exc:
+                log.warning("ML training-data cache update failed: %s", exc)
+            self.app.refresh_ml_status()
             self.app._set_status(f"Session saved — {Path(out_path).name}", GREEN)
         except Exception as exc:
             log.exception("_save_session failed")
@@ -424,6 +447,34 @@ class SessionController:
             self.app._set_status("Session cache deleted.", MUTED)
         else:
             self.app._set_status("No session cache to delete.", MUTED)
+
+    def on_verified_training_toggle(self) -> None:
+        """Sync verified-for-training state from the sidebar switch.
+
+        The switch is the interactive source of truth while a file is open;
+        the actual .npz cache write / registry update happens later, at
+        Save Session (see save_session below), not on every toggle.
+        """
+        sw = self.app.sw_verified_training
+        if sw is not None:
+            self.app.session.verified_for_training = bool(sw.get())
+
+    def sync_verified_switch(self) -> None:
+        """Reflect self.app.session.verified_for_training on the sidebar switch.
+
+        Called after loading a file or restoring a session, since the
+        widget must not carry over the previous recording's checked state.
+        """
+        sw = self.app.sw_verified_training
+        if sw is None:
+            return
+        try:
+            if self.app.session.verified_for_training:
+                sw.select()
+            else:
+                sw.deselect()
+        except Exception as exc:
+            log.debug("sync_verified_switch failed: %s", exc)
 
     def update_session_ui(self, has_session: bool,
                            saved_at: str = "") -> None:

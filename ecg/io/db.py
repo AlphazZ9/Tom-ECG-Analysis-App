@@ -18,6 +18,7 @@ Schema (single table):
         rmssd       REAL,
         notes       TEXT    DEFAULT '',   -- free-text experiment notes
         session_path TEXT,               -- path to JSON sidecar payload
+        verified_for_training INTEGER DEFAULT 0,  -- 1 = usable as ML training data
     )
 
 The registry lives at SESSION_DIR / "ecg_registry.db".
@@ -56,7 +57,8 @@ CREATE TABLE IF NOT EXISTS recordings (
     sdnn         REAL,
     rmssd        REAL,
     notes        TEXT    NOT NULL DEFAULT '',
-    session_path TEXT    NOT NULL DEFAULT ''
+    session_path TEXT    NOT NULL DEFAULT '',
+    verified_for_training INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_fp ON recordings(filepath);
 CREATE INDEX IF NOT EXISTS idx_saved ON recordings(saved_at DESC);
@@ -74,6 +76,16 @@ def _conn() -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     if not _schema_ready:
         con.executescript(_SCHEMA)
+        # CREATE TABLE IF NOT EXISTS above is a no-op on a registry that
+        # already existed before this column was added -- ALTER TABLE is the
+        # only way to bring an older on-disk db.py up to date. Swallow the
+        # "duplicate column" error on every run after the first.
+        try:
+            con.execute(
+                "ALTER TABLE recordings ADD COLUMN verified_for_training "
+                "INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         con.commit()
         _schema_ready = True
     return con
@@ -108,6 +120,7 @@ def upsert_recording(
     session_path: str,
     stats: "Optional[dict[str, Any]]" = None,
     notes: str = "",
+    verified_for_training: bool = False,
 ) -> None:
     """Insert or update a recording row with optional stats summary.
 
@@ -121,6 +134,10 @@ def upsert_recording(
     while this table silently kept the stale old note forever, since '' can
     never overwrite anything under that CASE. Plain overwrite matches
     set_notes()'s semantics below and keeps both write paths consistent.
+
+    *verified_for_training* follows the same plain-overwrite rule -- the
+    caller always passes the current checkbox state, so unmarking a
+    previously verified file and saving correctly clears the flag here too.
     """
     stem = Path(filepath).stem
     now  = datetime.now().isoformat()
@@ -130,8 +147,8 @@ def upsert_recording(
             con.execute("""
                 INSERT INTO recordings
                     (filepath, stem, fingerprint, saved_at, duration_s, n_peaks,
-                     hr_mean, sdnn, rmssd, notes, session_path)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                     hr_mean, sdnn, rmssd, notes, session_path, verified_for_training)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(filepath) DO UPDATE SET
                     fingerprint  = excluded.fingerprint,
                     saved_at     = excluded.saved_at,
@@ -141,11 +158,12 @@ def upsert_recording(
                     sdnn         = excluded.sdnn,
                     rmssd        = excluded.rmssd,
                     session_path = excluded.session_path,
-                    notes        = excluded.notes
+                    notes        = excluded.notes,
+                    verified_for_training = excluded.verified_for_training
             """, (filepath, stem, fingerprint, now,
                   s.get("duration_s"), s.get("n_peaks"),
                   s.get("hr_mean"), s.get("sdnn"), s.get("rmssd"),
-                  notes, session_path))
+                  notes, session_path, int(verified_for_training)))
     except Exception as exc:
         log.warning("db.upsert_recording failed: %s", exc)
 
@@ -182,6 +200,25 @@ def set_notes(filepath: str, notes: str) -> None:
         log.warning("db.set_notes: %s", exc)
 
 
+def set_verified(filepath: str, verified: bool) -> None:
+    """Update (or create) the verified-for-training flag for a recording.
+
+    Partial update, same shape as set_notes() -- used by the ML training
+    dialog's per-file "Remove" action, which must clear this flag without
+    touching notes/stats/session_path for a row it otherwise knows nothing
+    about.
+    """
+    try:
+        with _open() as con:
+            con.execute("""
+                INSERT INTO recordings (filepath, stem, fingerprint, saved_at, verified_for_training)
+                VALUES (?,?,?,?,?)
+                ON CONFLICT(filepath) DO UPDATE SET verified_for_training=excluded.verified_for_training
+            """, (filepath, Path(filepath).stem, "", datetime.now().isoformat(), int(verified)))
+    except Exception as exc:
+        log.warning("db.set_verified: %s", exc)
+
+
 def recent_recordings(limit: int = 20) -> "list[dict]":
     """Return up to *limit* recent recordings ordered by saved_at DESC."""
     try:
@@ -193,6 +230,25 @@ def recent_recordings(limit: int = 20) -> "list[dict]":
             return [dict(r) for r in rows]
     except Exception as exc:
         log.debug("db.recent_recordings: %s", exc)
+        return []
+
+
+def verified_recordings(limit: int = 500) -> "list[dict]":
+    """Return recordings marked verified-for-training, most recent first.
+
+    Used by the ML training dialog to list candidate files/sample counts
+    without opening every session JSON sidecar.
+    """
+    try:
+        with _open() as con:
+            rows = con.execute(
+                "SELECT * FROM recordings WHERE verified_for_training=1 "
+                "ORDER BY saved_at DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception as exc:
+        log.debug("db.verified_recordings: %s", exc)
         return []
 
 

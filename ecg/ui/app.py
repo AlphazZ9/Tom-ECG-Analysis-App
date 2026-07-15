@@ -280,6 +280,9 @@ class ECGApp(ctk.CTk):
         self._sg_frame:         "Optional[ctk.CTkFrame]"     = None
         self.cb_qtc_formula:    "Optional[ctk.CTkComboBox]"  = None
         self.cb_freq_band:      "Optional[ctk.CTkComboBox]"  = None   # HRV band preset
+        self.lbl_ml_status:     "Optional[ctk.CTkLabel]"     = None
+        self.sw_verified_training: "Optional[ctk.CTkSwitch]" = None
+        self.btn_train_ml:      "Optional[ctk.CTkButton]"    = None
         # Sidebar / detection tab widgets (forward-declared)
         self.lbl_npeaks:           "Optional[ctk.CTkLabel]"              = None
         self.btn_review_art:       "Optional[ctk.CTkButton]"             = None
@@ -934,7 +937,7 @@ class ECGApp(ctk.CTk):
             det_card_row, font=FONT_LABEL, height=26,
             fg_color=BG, border_color=BLUE, button_color=BLUE,
             text_color=TEXT, dropdown_fg_color=BG, dropdown_text_color=TEXT,
-            values=["Auto (NeuroKit2)", "SG + Derivative (10 kHz)", "Wavelet (CWT)", "Envelope Max"],
+            values=["Auto (NeuroKit2)", "SG + Derivative (10 kHz)", "Wavelet (CWT)", "Envelope Max", "ML Detector"],
             command=self._on_det_method_change)
         self.cb_det_method.set("SG + Derivative (10 kHz)")
         self.cb_det_method.grid(row=0, column=1, sticky="ew")
@@ -1179,6 +1182,30 @@ class ECGApp(ctk.CTk):
         ctk.CTkLabel(f, text="OFF by default — use Review for full control",
                      font=FONT_KPI_LABEL, text_color=LIGHT,
                      anchor="w", wraplength=230).pack(**fpx, fill="x", pady=(0, SPACE_S))
+
+        # ── ML DETECTOR ───────────────────────────────────────
+        sec_ml = _SidebarSection(s, "ML DETECTOR", initially_open=False)
+        f = sec_ml.frame
+        self.lbl_ml_status = ctk.CTkLabel(
+            f, text="No trained model yet", font=FONT_HINT,
+            text_color=MUTED, anchor="w", wraplength=230, justify="left")
+        self.lbl_ml_status.pack(**fpx, fill="x", pady=(SPACE_S, SPACE_XS))
+        self.sw_verified_training = self._switch(
+            f, "✓ Verified for training", fpx, default_on=False,
+            command=self._on_verified_training_toggle)
+        ctk.CTkLabel(
+            f, text="Marks this recording's corrected R-peaks as clean "
+                    "training data. Takes effect on Save Session.",
+            font=FONT_KPI_LABEL, text_color=LIGHT,
+            anchor="w", wraplength=230, justify="left").pack(**fpx, fill="x", pady=(0, SPACE_S))
+        self.btn_train_ml = ctk.CTkButton(
+            f, text="🤖  Train / Retrain Model…",
+            command=self._open_ml_training_dialog,
+            fg_color=PURPLE, hover_color=PURPLE_DARK, text_color="white",
+            font=FONT_BTN_PRIMARY, height=max(30, int(34 * THEME.font_scale)),
+            corner_radius=8)
+        self.btn_train_ml.pack(**fpx, fill="x", pady=(0, SPACE_S))
+        self.after(0, self.refresh_ml_status)
 
         # ── SESSION & EXPORT ──────────────────────────────────
         sec_ses = _SidebarSection(s, "SESSION & EXPORT", initially_open=False)
@@ -2995,6 +3022,43 @@ class ECGApp(ctk.CTk):
         """Show/hide SG options frame based on selected detection method."""
         self.detection_ctrl.on_det_method_change(choice)
 
+    # ── ML detector: verified-for-training switch ────────────
+    def _on_verified_training_toggle(self) -> None:
+        self.session_ctrl.on_verified_training_toggle()
+
+    def _open_ml_training_dialog(self) -> None:
+        """Open the Train/Retrain dialog for the ML R-peak detector."""
+        from ecg.ui.dialogs import MLTrainingDialog
+        dlg = MLTrainingDialog(self)
+        self.wait_window(dlg)
+        self.refresh_ml_status()
+
+    def refresh_ml_status(self) -> None:
+        """Update the ML-detector sidebar status label.
+
+        Shows verified-file/sample counts and, if a model is trained, its
+        hold-out accuracy/F1 from the metadata sidecar. Called on startup,
+        after Save Session, and after the training dialog closes.
+        """
+        if self.lbl_ml_status is None:
+            return
+        from ecg.core.ml_detector import training_data_summary, MLPeakModel
+        summary = training_data_summary()
+        model = MLPeakModel.load()
+        if model is not None:
+            meta = model.meta
+            text = (f"Model trained on {meta.get('n_training_files', '?')} file(s), "
+                    f"{meta.get('n_training_samples', '?')} samples — "
+                    f"acc={meta.get('holdout_accuracy', 0):.2f} "
+                    f"f1={meta.get('holdout_f1', 0):.2f}\n"
+                    f"{summary['n_files']} file(s) currently verified.")
+            color = GREEN
+        else:
+            text = (f"No trained model yet. {summary['n_files']} file(s) verified "
+                    f"({summary['n_samples']} samples).")
+            color = MUTED
+        self.lbl_ml_status.configure(text=text, text_color=color)  # type: ignore[union-attr]
+
     # ── No-filter master toggle ──────────────────────────────
 
     def _on_no_filter_toggle(self) -> None:
@@ -4809,10 +4873,11 @@ class ECGApp(ctk.CTk):
             e.pack(fill="x")
             setattr(self, f"ent_{attr}", e)
 
-    def _switch(self, parent, label: str, pad: dict, default_on: bool = False) -> ctk.CTkSwitch:
+    def _switch(self, parent, label: str, pad: dict, default_on: bool = False,
+                command=None) -> ctk.CTkSwitch:
         sw = ctk.CTkSwitch(parent, text=label, font=FONT_LABEL,
                             text_color=MUTED, progress_color=BLUE,
-                            button_color=BORDER2)
+                            button_color=BORDER2, command=command)
         if default_on:
             sw.select()
         sw.pack(**pad, anchor="w", pady=(0, SPACE_S))

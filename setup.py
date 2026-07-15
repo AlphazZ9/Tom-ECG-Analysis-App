@@ -22,6 +22,8 @@ setup(
         "neurokit2",
         "openpyxl",
         "Pillow",
+        "scikit-learn",
+        "joblib",
     ],
     extras_require={
         "h5": ["h5py"],

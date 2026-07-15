@@ -22,8 +22,9 @@ from ecg.core.detection import (
     fix_polarity, apply_threshold,
     detect_peaks_sg_derivative, detect_peaks_wavelet, detect_peaks_envelope_max,
 )
+from ecg.core.ml_detector import detect_peaks_ml, MLPeakModel
 from ecg.io.loaders import load_mat_signal
-from ecg.io.db import _DB_AVAILABLE, get_notes
+from ecg.io.db import _DB_AVAILABLE, get_notes, get_recording
 from ecg.ui.theme import BLUE, GREEN, MUTED, ORANGE, RED, nk
 
 if TYPE_CHECKING:
@@ -219,7 +220,50 @@ class SignalController:
                 "all_proms":       proms_em if len(proms_em) else np.ones(len(peaks_em)),
                 "inverted":        inverted,
             }
-            
+
+        if "ml" in det_method.lower() or "machine" in det_method.lower():
+            # ── ML Detector pipeline ──────────────────────────────────────
+            # Classifier-based detection, trained from the user's own
+            # verified/corrected recordings (see ecg.core.ml_detector).
+            # Same polarity requirement as the other detectors: features
+            # (prominence, amplitude, upstroke slope...) all assume the
+            # R-wave is a positive-going deflection.
+            if not params.get("invert_signal", False):
+                _prog(48, "Polarity correction…")
+                sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"])
+            else:
+                inverted = False
+            _prog(55, "ML Detector — scoring candidates…")
+            detector_warning: Optional[str] = None
+            try:
+                model = MLPeakModel.load()
+                peaks_ml, proms_ml, t_amp_ml = detect_peaks_ml(sig, fs, model)
+            except RuntimeError as exc:
+                # No trained model yet -- a clearly different situation from
+                # "detection failed on this signal", surfaced distinctly so
+                # the user isn't left guessing why 0 peaks were found.
+                log.warning("ML detector: %s", exc)
+                detector_warning = str(exc)
+                peaks_ml = np.array([], dtype=int)
+                proms_ml = np.array([])
+                t_amp_ml = 0.0
+            except Exception as exc:
+                log.warning("ML detection failed, falling back to auto: %s", exc)
+                peaks_ml = np.array([], dtype=int)
+                proms_ml = np.array([])
+                t_amp_ml = 0.0
+
+            _prog(95, f"ML Detector candidates: {len(peaks_ml):,}")
+            return {
+                "signal_raw_norm": signal_raw_norm,
+                "signal_flt":      sig,
+                "no_filter_mode":  no_filter,
+                "all_cands":       peaks_ml,
+                "all_proms":       proms_ml if len(proms_ml) else np.ones(len(peaks_ml)),
+                "inverted":        inverted,
+                "detector_warning": detector_warning,
+            }
+
         # ── Auto (NeuroKit2) pipeline — original path ─────────────────────
         sig_out, inverted, cands, proms = fix_polarity(
             sig, fs, params["min_rr_ms"], progress_cb=_polarity_prog)
@@ -634,9 +678,13 @@ class SignalController:
         self.app._update_signal_quality(self.app.detection.rpeaks_ok)  # type: ignore[union-attr]
 
         dur = bundle["dur_s"]
-        self.app._set_status(
-            f"Signal ready — {n} peaks  |  {dur:.0f} s  |  {fs} Hz  "
-            "→ adjust threshold then Run Full Analysis.", GREEN)
+        detector_warning = bundle.get("detector_warning")
+        if detector_warning:
+            self.app._set_status(detector_warning, ORANGE)
+        else:
+            self.app._set_status(
+                f"Signal ready — {n} peaks  |  {dur:.0f} s  |  {fs} Hz  "
+                "→ adjust threshold then Run Full Analysis.", GREEN)
         self.app.tabs.set("Detection")
         self.app._update_ann_count()   # reflect cleared annotations immediately
         # Sync nav bar
@@ -841,6 +889,15 @@ class SignalController:
         self.reset_for_new_file()
         self.app.signal.filepath = path
         self.app.session.recording_notes = get_notes(path) if _DB_AVAILABLE else ""
+        # Mirrors recording_notes above: the registry is the authoritative
+        # source (also backs the ML training dialog's file list), the
+        # session JSON is a fallback restored below when sqlite is unavailable.
+        if _DB_AVAILABLE:
+            _rec = get_recording(path)
+            self.app.session.verified_for_training = bool(_rec.get("verified_for_training")) if _rec else False
+        else:
+            self.app.session.verified_for_training = False
+        self.app.session_ctrl.sync_verified_switch()
         self.app.lbl_file.configure(text=os.path.basename(path), text_color=GREEN)  # type: ignore[union-attr]
         self.app._add_recent(path)
         # ── Try to restore a previously saved session ───────────────
@@ -916,6 +973,7 @@ class SignalController:
         self.app.ui.tsv_store            = {}
         self.app.analysis.wave_template        = None
         self.app.session.dirty        = False
+        self.app.session.verified_for_training = False
         self.app._generation           = getattr(self.app, "_generation", 0) + 1  # invalidate async workers
 
         # ── 2. Result plots → placeholder ────────────────────────────────

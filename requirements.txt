@@ -8,6 +8,8 @@ scipy>=1.11
 neurokit2>=0.2
 openpyxl>=3.1
 Pillow>=10.0
+scikit-learn>=1.4  # ML R-peak detector (was already a transitive neurokit2 dep)
+joblib>=1.3         # ML R-peak detector model persistence
 
 # Optional — only needed for specific features:
 h5py>=3.10       # MATLAB v7.3 / HDF5 file loading
