@@ -278,7 +278,6 @@ class ECGApp(ctk.CTk):
         self.ent_sg_target_fs:  "Optional[ctk.CTkEntry]"     = None
         self.ent_sg_window_ms:  "Optional[ctk.CTkEntry]"     = None
         self._sg_frame:         "Optional[ctk.CTkFrame]"     = None
-        self.btn_lang:          "Optional[ctk.CTkButton]"    = None
         self.cb_qtc_formula:    "Optional[ctk.CTkComboBox]"  = None
         self.cb_freq_band:      "Optional[ctk.CTkComboBox]"  = None   # HRV band preset
         # Sidebar / detection tab widgets (forward-declared)
@@ -1800,13 +1799,6 @@ class ECGApp(ctk.CTk):
                       font=FONT_BTN_SEC, corner_radius=8,
                       command=self._toggle_dark_live,
                       ).pack(side="left", padx=(0, SPACE_S))
-        self.btn_lang = ctk.CTkButton(
-            btn_row_right, text="FR", width=50, height=28,
-            fg_color=BORDER2, hover_color=BLUE, text_color=TEXT,
-            font=FONT_BTN_SEC, corner_radius=8,
-            command=self._toggle_language,
-        )
-        self.btn_lang.pack(side="left", padx=(0, SPACE_S))
         # Quality badge — updated by _update_quality_badge() after analysis
         self._lbl_quality_badge = ctk.CTkLabel(
             btn_row_right, text="", font=FONT_BADGE,
@@ -3994,24 +3986,6 @@ class ECGApp(ctk.CTk):
                 "Wave template updated — re-run Interval Delineation to apply changes.",
                 GREEN)
 
-
-    def _toggle_language(self) -> None:
-        """Switch UI language between English and French and rebuild the UI."""
-        try:
-            from ecg.ui.i18n import get_language, set_language
-        except ImportError:
-            return
-        new_lang = "fr" if get_language() == "en" else "en"
-        set_language(new_lang)
-        # Rebuild so all labels refresh
-        ui_state = self._snapshot_ui_state()
-        self._rebuild_ui()
-        self._restore_ui_state(ui_state)
-        # Update the button label to show the OTHER language (the one we'd switch to)
-        label = "FR" if new_lang == "en" else "EN"
-        if self.btn_lang is not None:
-            self.btn_lang.configure(text=label)
-        self._set_status(f"Language switched to {'English' if new_lang == 'en' else 'Français'}", BLUE)
 
     def _open_params_dialog(self) -> None:
         """Open a dedicated floating parameters window with all settings clearly grouped."""
