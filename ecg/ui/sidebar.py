@@ -2,8 +2,9 @@
 """
 ecg.ui.sidebar
 --------------
-Reusable sidebar components:
-  _SidebarSection  -- collapsible labelled section
+Reusable components:
+  CollapsibleSection  -- collapsible labelled section (left sidebar + right
+                          accordion panel)
   IntervalVerifierPanel  -- beat-by-beat interval review widget
 """
 from __future__ import annotations
@@ -458,15 +459,16 @@ class IntervalVerifierPanel:
 
 
 
-class _SidebarSection:
-    """A collapsible sidebar section with a clickable arrow header.
+class CollapsibleSection:
+    """A collapsible section with a clickable arrow header.
 
-    The outer ``_wrapper`` frame is always packed (preserving its position in
-    the parent's pack order).  Only the inner ``frame`` is shown/hidden, so
+    Shared by the left sidebar and the right accordion panel. The outer
+    ``_wrapper`` frame is always packed (preserving its position in the
+    parent's pack order).  Only the inner ``frame`` is shown/hidden, so
     re-opening a section never moves it to the bottom of the list.
 
     Usage::
-        sec = _SidebarSection(parent, "FILTERS", initially_open=True)
+        sec = CollapsibleSection(parent, "FILTERS", initially_open=True)
         ctk.CTkLabel(sec.frame, text="HP cut").pack(...)
     """
 

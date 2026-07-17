@@ -104,7 +104,7 @@ from ecg.ui.dialogs import (
     AnnotationManagerDialog, PacingPeriodManagerDialog,
 )
 from ecg.ui.wave_editor import WaveTemplateMiniEditor
-from ecg.ui.sidebar import _SidebarSection, IntervalVerifierPanel
+from ecg.ui.sidebar import CollapsibleSection, IntervalVerifierPanel
 
 log = logging.getLogger("ecg")
 
@@ -861,9 +861,13 @@ class ECGApp(ctk.CTk):
         # greyed out at startup (no_filter is ON by default).
         self.after(50, self._on_no_filter_toggle)
 
+        # Packed side="right" BEFORE main, for the same reason the sidebar is
+        # packed before main -- main's expand=True must not claim the space
+        # first.
+        self._build_right_panel()
+
         main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
         main.pack(side="left", fill="both", expand=True)
-        self._build_stat_panel(main)
         self._build_tabs(main)
         # Global keyboard shortcuts
         self.bind("<Control-z>", self._undo_edit)
@@ -926,106 +930,8 @@ class ECGApp(ctk.CTk):
             font=FONT_CARD_TITLE, text_color=BLUE, anchor="w")
         self.lbl_npeaks.pack(**px, fill="x", pady=(0, SPACE_XS))
 
-        # Method selector — always visible, first item in the workflow block
-        # (Detect Peaks/Analyze relocated to the top toolbar)
-        det_card = ctk.CTkFrame(top, fg_color=CARD, corner_radius=8,
-                                border_width=1, border_color=BORDER)
-        det_card.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
-        det_card_row = ctk.CTkFrame(det_card, fg_color="transparent")
-        det_card_row.pack(fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
-        det_card_row.columnconfigure(1, weight=1)
-        ctk.CTkLabel(det_card_row, text="Method",
-                     font=FONT_SIDEBAR_HDR, text_color=TEXT,
-                     anchor="w").grid(row=0, column=0, sticky="w", padx=(0, SPACE_M))
-        self.cb_det_method = ctk.CTkComboBox(
-            det_card_row, font=FONT_LABEL, height=26,
-            fg_color=BG, border_color=BLUE, button_color=BLUE,
-            text_color=TEXT, dropdown_fg_color=BG, dropdown_text_color=TEXT,
-            values=["Auto (NeuroKit2)", "SG + Derivative (10 kHz)", "Wavelet (CWT)", "Envelope Max", "ML Detector"],
-            command=self._on_det_method_change)
-        self.cb_det_method.set("SG + Derivative (10 kHz)")
-        self.cb_det_method.grid(row=0, column=1, sticky="ew")
-
-        # Analysis window (inline, compact)
-        aw_frame = ctk.CTkFrame(top, fg_color=CARD, corner_radius=8,
-                                border_width=1, border_color=BORDER)
-        aw_frame.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
-        aw_hdr = ctk.CTkFrame(aw_frame, fg_color="transparent")
-        aw_hdr.pack(fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
-        ctk.CTkLabel(aw_hdr, text="Analysis window", font=FONT_SUBSECTION,
-                     text_color=TEXT, anchor="w").pack(side="left")
-        ctk.CTkLabel(aw_hdr, text="optional", font=FONT_KPI_LABEL,
-                     text_color=LIGHT).pack(side="right")
-        aw_entries = ctk.CTkFrame(aw_frame, fg_color="transparent")
-        aw_entries.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
-        aw_entries.columnconfigure(1, weight=1)
-        aw_entries.columnconfigure(3, weight=1)
-        ctk.CTkLabel(aw_entries, text="From", font=FONT_SMALL, text_color=MUTED,
-                     width=36, anchor="w").grid(row=0, column=0)
-        self.ent_analysis_t0 = ctk.CTkEntry(
-            aw_entries, height=24, font=FONT_LABEL,
-            fg_color=BG, border_color=BORDER2, text_color=TEXT,
-            corner_radius=5, placeholder_text="0 s")
-        self.ent_analysis_t0.grid(row=0, column=1, sticky="ew", padx=(SPACE_XS, SPACE_M))
-        ctk.CTkLabel(aw_entries, text="To", font=FONT_SMALL, text_color=MUTED,
-                     width=24, anchor="w").grid(row=0, column=2)
-        self.ent_analysis_t1 = ctk.CTkEntry(
-            aw_entries, height=24, font=FONT_LABEL,
-            fg_color=BG, border_color=BORDER2, text_color=TEXT,
-            corner_radius=5, placeholder_text="end")
-        self.ent_analysis_t1.grid(row=0, column=3, sticky="ew", padx=(SPACE_XS, 0))
-        aw_btns = ctk.CTkFrame(aw_frame, fg_color="transparent")
-        aw_btns.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
-        ctk.CTkButton(aw_btns, text="Apply", width=70, height=26,
-                      fg_color=PURPLE, hover_color=PURPLE_DARK, text_color="white",
-                      font=FONT_SMALL, corner_radius=5,
-                      command=self._apply_analysis_window).pack(side="left", padx=(0, SPACE_S))
-        ctk.CTkButton(aw_btns, text="Full", width=56, height=26,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                      font=FONT_SMALL, corner_radius=5,
-                      command=self._reset_analysis_window).pack(side="left")
-        self.lbl_analysis_window = ctk.CTkLabel(
-            aw_btns, text="", font=FONT_KPI_LABEL, text_color=MUTED, anchor="e")
-        self.lbl_analysis_window.pack(side="right", fill="x", expand=True)
-
-        ctk.CTkFrame(top, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
-
-        # Status
-        self.lbl_status = ctk.CTkLabel(
-            top, text="Ready", font=FONT_SMALL, text_color=MUTED,
-            anchor="w", wraplength=260, justify="left")
-        self.lbl_status.pack(**px, pady=(SPACE_XS, SPACE_XS), fill="x")
-
-        # ── THRESHOLD — always visible, prominent ─────────────
-        thr_card = ctk.CTkFrame(top, fg_color=CARD, corner_radius=8,
-                                border_width=1, border_color=BORDER)
-        thr_card.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_S))
-        thr_top_row = ctk.CTkFrame(thr_card, fg_color="transparent")
-        thr_top_row.pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
-        self.lbl_thr = ctk.CTkLabel(
-            thr_top_row, text="Threshold:  0.50",
-            font=FONT_CARD_TITLE, text_color=TEXT, anchor="w")
-        self.lbl_thr.pack(side="left")
-        ctk.CTkLabel(thr_top_row, text="strict ↑  /  sensitive ↓",
-                     font=FONT_KPI_LABEL, text_color=LIGHT, anchor="e").pack(side="right")
-        self.sl_thr = ctk.CTkSlider(
-            thr_card, from_=0.01, to=2.0,  # type: ignore
-            progress_color=RED, button_color=RED,
-            button_hover_color="#FF5252", fg_color=BORDER,
-            height=20, command=self._on_threshold_slide)
-        self.sl_thr.set(0.50)
-        self.sl_thr.pack(fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
-        thr_bot = ctk.CTkFrame(thr_card, fg_color="transparent")
-        thr_bot.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_S))
-        thr_bot.columnconfigure(1, weight=1)
-        ctk.CTkLabel(thr_bot, text="Exact:", font=FONT_SMALL,
-                     text_color=MUTED).grid(row=0, column=0, padx=(0, SPACE_S))
-        self.ent_thr = ctk.CTkEntry(thr_bot, height=24, font=FONT_LABEL,
-                                     fg_color=PANEL, border_color=BORDER2, text_color=TEXT)
-        self.ent_thr.insert(0, "0.50")
-        self.ent_thr.grid(row=0, column=1, sticky="ew")
-        self.ent_thr.bind("<Return>",   self._on_threshold_entry)
-        self.ent_thr.bind("<FocusOut>", self._on_threshold_entry)
+        # Method/Analysis-window/Status/Threshold relocated to the right
+        # panel's DETECTION accordion section (_build_detection_section()).
 
         # ══════════════════════════════════════════════════════
         #  SCROLLABLE SETTINGS
@@ -1039,7 +945,7 @@ class ECGApp(ctk.CTk):
         fpx = dict(padx=SPACE_L)
 
         # ── SIGNAL ────────────────────────────────────────────
-        sec_sig = _SidebarSection(s, "SIGNAL", initially_open=False)
+        sec_sig = CollapsibleSection(s, "SIGNAL", initially_open=False)
         f = sec_sig.frame
         # Project name: a label spanning the whole working session (many
         # recordings), not per-recording metadata like Subject ID below --
@@ -1064,7 +970,7 @@ class ECGApp(ctk.CTk):
         self.sw_show_raw.configure(command=self._on_show_raw_toggle)
 
         # ── FILTERS ───────────────────────────────────────────
-        sec_flt = _SidebarSection(s, "FILTERS", initially_open=False)
+        sec_flt = CollapsibleSection(s, "FILTERS", initially_open=False)
         f = sec_flt.frame
         self.sw_no_filter = self._switch(
             f, "Raw signal — no DSP filters", fpx, default_on=True)
@@ -1105,75 +1011,8 @@ class ECGApp(ctk.CTk):
              _collect_fw(self._adv_filters_group))
         ))
 
-        # ── DETECTION ─────────────────────────────────────────
-        sec_det = _SidebarSection(s, "DETECTION", initially_open=False)
-        f = sec_det.frame
-        self._sidebar_entry(f, "Min R-R physio (ms)", "minrr",
-                            str(int(MouseECG.MIN_RR_MS)), fpx)
-        # SG target-fs/window entries live in the ADVANCED section now (built
-        # later in this method) -- _sg_frame's own pack/pack_forget show/hide
-        # logic (on_det_method_change()) is parent-agnostic, unaffected by
-        # which section frame it's built into.
-        ctk.CTkLabel(f, text="SG+Deriv: downsample → Savitzky-Golay derivative\n"
-                             "Wavelet: CWT bruit/QRS/J-wave séparés (pywt requis)\n"
-                             "Envelope Max: maximum local — idéal signaux saturés (clipping ADC)",
-                     font=FONT_KPI_LABEL, text_color=LIGHT,
-                     anchor="w", wraplength=230).pack(**fpx, fill="x", pady=(0, SPACE_S))
-
-        # ── ARTIFACTS ─────────────────────────────────────────
-        sec_art = _SidebarSection(s, "ARTIFACTS", initially_open=False)
-        f = sec_art.frame
-        self.btn_review_art = ctk.CTkButton(
-            f, text="🔍  Review Artifacts",
-            command=self._open_artifact_review,
-            fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="white",
-            font=FONT_BTN_PRIMARY, height=max(30, int(34 * THEME.font_scale)),
-            corner_radius=8, state="disabled")
-        self.btn_review_art.pack(**fpx, fill="x", pady=(SPACE_S, SPACE_XS))
-        ctk.CTkLabel(f, text="Detect + review every artifact. Run Preview first.",
-                     font=FONT_KPI_LABEL, text_color=LIGHT,
-                     anchor="w", wraplength=230, justify="left").pack(**fpx, fill="x", pady=(0, SPACE_S))
-        self.sw_artifact = self._switch(
-            f, "Auto-correct on Full Analysis", fpx, default_on=False)
-        ctk.CTkLabel(f, text="OFF by default — use Review for full control",
-                     font=FONT_KPI_LABEL, text_color=LIGHT,
-                     anchor="w", wraplength=230).pack(**fpx, fill="x", pady=(0, SPACE_S))
-
-        # ── ML DETECTOR ───────────────────────────────────────
-        sec_ml = _SidebarSection(s, "ML DETECTOR", initially_open=False)
-        f = sec_ml.frame
-        self.lbl_ml_status = ctk.CTkLabel(
-            f, text="No trained model yet", font=FONT_HINT,
-            text_color=MUTED, anchor="w", wraplength=230, justify="left")
-        self.lbl_ml_status.pack(**fpx, fill="x", pady=(SPACE_S, SPACE_XS))
-        self.sw_verified_training = self._switch(
-            f, "✓ Verified for training", fpx, default_on=False,
-            command=self._on_verified_training_toggle)
-        ctk.CTkLabel(
-            f, text="Marks this recording's corrected R-peaks as clean "
-                    "training data. Takes effect on Save Session.",
-            font=FONT_KPI_LABEL, text_color=LIGHT,
-            anchor="w", wraplength=230, justify="left").pack(**fpx, fill="x", pady=(0, SPACE_S))
-        self.btn_save_for_training = ctk.CTkButton(
-            f, text="📥  Save for Training  (no session save)",
-            command=self._save_for_training_only,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            font=FONT_BTN_SEC, height=max(28, int(30 * THEME.font_scale)),
-            corner_radius=8)
-        self.btn_save_for_training.pack(**fpx, fill="x", pady=(0, SPACE_S))
-        ctk.CTkLabel(
-            f, text="Caches this recording's peaks as training data right "
-                    "away, without writing a .ecgsession file or export stats.",
-            font=FONT_KPI_LABEL, text_color=LIGHT,
-            anchor="w", wraplength=230, justify="left").pack(**fpx, fill="x", pady=(0, SPACE_S))
-        self.btn_train_ml = ctk.CTkButton(
-            f, text="🤖  Train / Retrain Model…",
-            command=self._open_ml_training_dialog,
-            fg_color=PURPLE, hover_color=PURPLE_DARK, text_color="white",
-            font=FONT_BTN_PRIMARY, height=max(30, int(34 * THEME.font_scale)),
-            corner_radius=8)
-        self.btn_train_ml.pack(**fpx, fill="x", pady=(0, SPACE_S))
-        self.after(0, self.refresh_ml_status)
+        # DETECTION / ARTIFACTS / ML DETECTOR relocated to the right panel's
+        # accordion (_build_detection_section()).
 
         # ── SESSION & EXPORT ──────────────────────────────────
         # Save Session itself is relocated to the top toolbar's File ops
@@ -1182,7 +1021,7 @@ class ECGApp(ctk.CTk):
         # reference it by attribute name for busy-state text swaps, so it's
         # relocated rather than duplicated. This section keeps the session
         # info label and cache-clearing action.
-        sec_ses = _SidebarSection(s, "SESSION & EXPORT", initially_open=False)
+        sec_ses = CollapsibleSection(s, "SESSION & EXPORT", initially_open=False)
         f = sec_ses.frame
         self.lbl_session_info = ctk.CTkLabel(
             f, text="No session saved for this file", font=FONT_HINT,
@@ -1200,7 +1039,7 @@ class ECGApp(ctk.CTk):
         # to the other 6 sections (not nested inside them), so opening one
         # place shows everything advanced at once. Internally organised with
         # plain (non-collapsible) group labels, not a second accordion level.
-        sec_adv = _SidebarSection(s, "ADVANCED", initially_open=False)
+        sec_adv = CollapsibleSection(s, "ADVANCED", initially_open=False)
         f = sec_adv.frame
 
         def _adv_group(text: str, first: bool = False) -> None:
@@ -1240,13 +1079,8 @@ class ECGApp(ctk.CTk):
         self.cb_clean.set("neurokit")
         self.cb_clean.pack(fill="x", pady=(SPACE_XS, SPACE_S))
 
-        # -- Detection -------------------------------------------------------
-        _adv_group("Detection")
-        self._sg_frame = ctk.CTkFrame(f, fg_color="transparent")
-        self._sidebar_entry_row(self._sg_frame, fpx, [
-            ("Target fs (Hz)", "sg_target_fs", "10000"),
-            ("SG window (ms)", "sg_window_ms",  "20"),
-        ])
+        # Detection sub-group (SG target-fs/window) relocated to the right
+        # panel's DETECTION accordion section (_build_detection_section()).
 
         # -- Export & Notes --------------------------------------------------
         _adv_group("Export & Notes")
@@ -1976,22 +1810,242 @@ class ECGApp(ctk.CTk):
         finally:
             menu.grab_release()
 
-    def _build_stat_panel(self, parent) -> None:
-        """Categorized statistics panel: Heart Rate / RR Intervals / HRV /
-        Signal / Quality. Replaces the old flat 8-cell KPI grid, occupying
-        the same structural slot (full main-content width, above the tabs).
-        All values are still driven by update_kpis() (plot_controller.py),
-        just fanned out to more, better-organised tiles via make_stat_tile()
-        (ecg/ui/widgets.py) instead of the old bare label/value pairs.
-        """
-        panel = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=0)
-        panel.pack(fill="x")
-        ctk.CTkFrame(panel, height=1, fg_color=BORDER).pack(side="bottom", fill="x")
+    # ─── Right accordion panel ───────────────────────────────────
 
-        grid = ctk.CTkFrame(panel, fg_color="transparent")
-        grid.pack(fill="x", padx=SPACE_M, pady=SPACE_S)
-        for col in range(5):
-            grid.columnconfigure(col, weight=1, uniform="cat")
+    def _build_right_panel(self) -> None:
+        """Fixed-width accordion panel on the right edge of the window.
+
+        Sibling of self.sidebar (not nested in `main`) -- packed side="right"
+        before `main` is created so main's fill="both", expand=True doesn't
+        claim the space first, mirroring how the sidebar itself is packed
+        before main. Wrapped in a scrollable frame from the start since later
+        sub-phases add more sections (Detection/Annotations/Export) here.
+        """
+        self.right_panel = ctk.CTkFrame(self, width=280, fg_color=PANEL, corner_radius=0)
+        self.right_panel.pack(side="right", fill="y")
+        self.right_panel.pack_propagate(False)
+        ctk.CTkFrame(self.right_panel, width=1, fg_color=BORDER).pack(side="left", fill="y")
+
+        scroll = ctk.CTkScrollableFrame(self.right_panel, fg_color="transparent")
+        scroll.pack(fill="both", expand=True)
+
+        self._build_detection_section(scroll)
+        self._build_stat_section(scroll)
+
+    def _build_detection_section(self, parent) -> None:
+        """DETECTION / ARTIFACTS / ML DETECTOR accordion sections.
+
+        DETECTION consolidates content that had no independent collapse
+        state before (the sidebar's always-visible Method/Analysis-window/
+        Status/Threshold block, plus its own Min R-R entry and ADVANCED's SG
+        Options sub-group) into one open-by-default section. ARTIFACTS and
+        ML DETECTOR are relocated verbatim -- they already had independent
+        collapse behaviour in the sidebar, so that's preserved unchanged
+        rather than merged in.
+        """
+        fpx = dict(padx=SPACE_L)
+
+        # ══════════════════════════════════════════════════════
+        #  DETECTION
+        # ══════════════════════════════════════════════════════
+        sec_det = CollapsibleSection(parent, "DETECTION", initially_open=True)
+        f = sec_det.frame
+
+        # ── Method ──────────────────────────────────────────
+        det_card = ctk.CTkFrame(f, fg_color=CARD, corner_radius=8,
+                                border_width=1, border_color=BORDER)
+        det_card.pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
+        det_card_row = ctk.CTkFrame(det_card, fg_color="transparent")
+        det_card_row.pack(fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
+        det_card_row.columnconfigure(1, weight=1)
+        ctk.CTkLabel(det_card_row, text="Method",
+                     font=FONT_SIDEBAR_HDR, text_color=TEXT,
+                     anchor="w").grid(row=0, column=0, sticky="w", padx=(0, SPACE_M))
+        self.cb_det_method = ctk.CTkComboBox(
+            det_card_row, font=FONT_LABEL, height=26,
+            fg_color=BG, border_color=BLUE, button_color=BLUE,
+            text_color=TEXT, dropdown_fg_color=BG, dropdown_text_color=TEXT,
+            values=["Auto (NeuroKit2)", "SG + Derivative (10 kHz)", "Wavelet (CWT)", "Envelope Max", "ML Detector"],
+            command=self._on_det_method_change)
+        self.cb_det_method.set("SG + Derivative (10 kHz)")
+        self.cb_det_method.grid(row=0, column=1, sticky="ew")
+
+        # ── Analysis window (inline, compact) ──────────────────
+        aw_frame = ctk.CTkFrame(f, fg_color=CARD, corner_radius=8,
+                                border_width=1, border_color=BORDER)
+        aw_frame.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
+        aw_hdr = ctk.CTkFrame(aw_frame, fg_color="transparent")
+        aw_hdr.pack(fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
+        ctk.CTkLabel(aw_hdr, text="Analysis window", font=FONT_SUBSECTION,
+                     text_color=TEXT, anchor="w").pack(side="left")
+        ctk.CTkLabel(aw_hdr, text="optional", font=FONT_KPI_LABEL,
+                     text_color=LIGHT).pack(side="right")
+        aw_entries = ctk.CTkFrame(aw_frame, fg_color="transparent")
+        aw_entries.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
+        aw_entries.columnconfigure(1, weight=1)
+        aw_entries.columnconfigure(3, weight=1)
+        ctk.CTkLabel(aw_entries, text="From", font=FONT_SMALL, text_color=MUTED,
+                     width=36, anchor="w").grid(row=0, column=0)
+        self.ent_analysis_t0 = ctk.CTkEntry(
+            aw_entries, height=24, font=FONT_LABEL,
+            fg_color=BG, border_color=BORDER2, text_color=TEXT,
+            corner_radius=5, placeholder_text="0 s")
+        self.ent_analysis_t0.grid(row=0, column=1, sticky="ew", padx=(SPACE_XS, SPACE_M))
+        ctk.CTkLabel(aw_entries, text="To", font=FONT_SMALL, text_color=MUTED,
+                     width=24, anchor="w").grid(row=0, column=2)
+        self.ent_analysis_t1 = ctk.CTkEntry(
+            aw_entries, height=24, font=FONT_LABEL,
+            fg_color=BG, border_color=BORDER2, text_color=TEXT,
+            corner_radius=5, placeholder_text="end")
+        self.ent_analysis_t1.grid(row=0, column=3, sticky="ew", padx=(SPACE_XS, 0))
+        aw_btns = ctk.CTkFrame(aw_frame, fg_color="transparent")
+        aw_btns.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
+        ctk.CTkButton(aw_btns, text="Apply", width=70, height=26,
+                      fg_color=PURPLE, hover_color=PURPLE_DARK, text_color="white",
+                      font=FONT_SMALL, corner_radius=5,
+                      command=self._apply_analysis_window).pack(side="left", padx=(0, SPACE_S))
+        ctk.CTkButton(aw_btns, text="Full", width=56, height=26,
+                      fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
+                      font=FONT_SMALL, corner_radius=5,
+                      command=self._reset_analysis_window).pack(side="left")
+        self.lbl_analysis_window = ctk.CTkLabel(
+            aw_btns, text="", font=FONT_KPI_LABEL, text_color=MUTED, anchor="e")
+        self.lbl_analysis_window.pack(side="right", fill="x", expand=True)
+
+        ctk.CTkFrame(f, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
+
+        # ── Status ──────────────────────────────────────────
+        self.lbl_status = ctk.CTkLabel(
+            f, text="Ready", font=FONT_SMALL, text_color=MUTED,
+            anchor="w", wraplength=230, justify="left")
+        self.lbl_status.pack(**fpx, pady=(SPACE_XS, SPACE_XS), fill="x")
+
+        # ── Threshold — always visible, prominent ─────────────
+        thr_card = ctk.CTkFrame(f, fg_color=CARD, corner_radius=8,
+                                border_width=1, border_color=BORDER)
+        thr_card.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_S))
+        thr_top_row = ctk.CTkFrame(thr_card, fg_color="transparent")
+        thr_top_row.pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
+        self.lbl_thr = ctk.CTkLabel(
+            thr_top_row, text="Threshold:  0.50",
+            font=FONT_CARD_TITLE, text_color=TEXT, anchor="w")
+        self.lbl_thr.pack(side="left")
+        ctk.CTkLabel(thr_top_row, text="strict ↑  /  sensitive ↓",
+                     font=FONT_KPI_LABEL, text_color=LIGHT, anchor="e").pack(side="right")
+        self.sl_thr = ctk.CTkSlider(
+            thr_card, from_=0.01, to=2.0,  # type: ignore
+            progress_color=RED, button_color=RED,
+            button_hover_color="#FF5252", fg_color=BORDER,
+            height=20, command=self._on_threshold_slide)
+        self.sl_thr.set(0.50)
+        self.sl_thr.pack(fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
+        thr_bot = ctk.CTkFrame(thr_card, fg_color="transparent")
+        thr_bot.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_S))
+        thr_bot.columnconfigure(1, weight=1)
+        ctk.CTkLabel(thr_bot, text="Exact:", font=FONT_SMALL,
+                     text_color=MUTED).grid(row=0, column=0, padx=(0, SPACE_S))
+        self.ent_thr = ctk.CTkEntry(thr_bot, height=24, font=FONT_LABEL,
+                                     fg_color=PANEL, border_color=BORDER2, text_color=TEXT)
+        self.ent_thr.insert(0, "0.50")
+        self.ent_thr.grid(row=0, column=1, sticky="ew")
+        self.ent_thr.bind("<Return>",   self._on_threshold_entry)
+        self.ent_thr.bind("<FocusOut>", self._on_threshold_entry)
+
+        # ── Min R-R ──────────────────────────────────────────
+        self._sidebar_entry(f, "Min R-R physio (ms)", "minrr",
+                            str(int(MouseECG.MIN_RR_MS)), fpx)
+        ctk.CTkLabel(f, text="SG+Deriv: downsample → Savitzky-Golay derivative\n"
+                             "Wavelet: CWT bruit/QRS/J-wave séparés (pywt requis)\n"
+                             "Envelope Max: maximum local — idéal signaux saturés (clipping ADC)",
+                     font=FONT_KPI_LABEL, text_color=LIGHT,
+                     anchor="w", wraplength=230).pack(**fpx, fill="x", pady=(0, SPACE_S))
+
+        # ── Savitzky-Golay options ──────────────────────────
+        ctk.CTkFrame(f, height=1, fg_color=BORDER).pack(
+            fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
+        ctk.CTkLabel(f, text="Savitzky-Golay options", font=FONT_SUBSECTION,
+                     text_color=MUTED, anchor="w").pack(**fpx, fill="x", pady=(0, SPACE_XS))
+        self._sg_frame = ctk.CTkFrame(f, fg_color="transparent")
+        self._sidebar_entry_row(self._sg_frame, fpx, [
+            ("Target fs (Hz)", "sg_target_fs", "10000"),
+            ("SG window (ms)", "sg_window_ms",  "20"),
+        ])
+        # Sync initial visibility to the Method combobox's default -- DETECTION
+        # defaults open (unlike the old ADVANCED home for this frame, which
+        # defaulted closed), so an un-synced _sg_frame would show an empty
+        # "Savitzky-Golay options" header on first launch even though Method
+        # defaults to "SG + Derivative (10 kHz)".
+        self._on_det_method_change(self.cb_det_method.get())
+
+        # ══════════════════════════════════════════════════════
+        #  ARTIFACTS
+        # ══════════════════════════════════════════════════════
+        sec_art = CollapsibleSection(parent, "ARTIFACTS", initially_open=False)
+        f = sec_art.frame
+        self.btn_review_art = ctk.CTkButton(
+            f, text="🔍  Review Artifacts",
+            command=self._open_artifact_review,
+            fg_color=ORANGE, hover_color=ORANGE_DARK, text_color="white",
+            font=FONT_BTN_PRIMARY, height=max(30, int(34 * THEME.font_scale)),
+            corner_radius=8, state="disabled")
+        self.btn_review_art.pack(**fpx, fill="x", pady=(SPACE_S, SPACE_XS))
+        ctk.CTkLabel(f, text="Detect + review every artifact. Run Preview first.",
+                     font=FONT_KPI_LABEL, text_color=LIGHT,
+                     anchor="w", wraplength=230, justify="left").pack(**fpx, fill="x", pady=(0, SPACE_S))
+        self.sw_artifact = self._switch(
+            f, "Auto-correct on Full Analysis", fpx, default_on=False)
+        ctk.CTkLabel(f, text="OFF by default — use Review for full control",
+                     font=FONT_KPI_LABEL, text_color=LIGHT,
+                     anchor="w", wraplength=230).pack(**fpx, fill="x", pady=(0, SPACE_S))
+
+        # ══════════════════════════════════════════════════════
+        #  ML DETECTOR
+        # ══════════════════════════════════════════════════════
+        sec_ml = CollapsibleSection(parent, "ML DETECTOR", initially_open=False)
+        f = sec_ml.frame
+        self.lbl_ml_status = ctk.CTkLabel(
+            f, text="No trained model yet", font=FONT_HINT,
+            text_color=MUTED, anchor="w", wraplength=230, justify="left")
+        self.lbl_ml_status.pack(**fpx, fill="x", pady=(SPACE_S, SPACE_XS))
+        self.sw_verified_training = self._switch(
+            f, "✓ Verified for training", fpx, default_on=False,
+            command=self._on_verified_training_toggle)
+        ctk.CTkLabel(
+            f, text="Marks this recording's corrected R-peaks as clean "
+                    "training data. Takes effect on Save Session.",
+            font=FONT_KPI_LABEL, text_color=LIGHT,
+            anchor="w", wraplength=230, justify="left").pack(**fpx, fill="x", pady=(0, SPACE_S))
+        self.btn_save_for_training = ctk.CTkButton(
+            f, text="📥  Save for Training  (no session save)",
+            command=self._save_for_training_only,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+            font=FONT_BTN_SEC, height=max(28, int(30 * THEME.font_scale)),
+            corner_radius=8)
+        self.btn_save_for_training.pack(**fpx, fill="x", pady=(0, SPACE_S))
+        ctk.CTkLabel(
+            f, text="Caches this recording's peaks as training data right "
+                    "away, without writing a .ecgsession file or export stats.",
+            font=FONT_KPI_LABEL, text_color=LIGHT,
+            anchor="w", wraplength=230, justify="left").pack(**fpx, fill="x", pady=(0, SPACE_S))
+        self.btn_train_ml = ctk.CTkButton(
+            f, text="🤖  Train / Retrain Model…",
+            command=self._open_ml_training_dialog,
+            fg_color=PURPLE, hover_color=PURPLE_DARK, text_color="white",
+            font=FONT_BTN_PRIMARY, height=max(30, int(34 * THEME.font_scale)),
+            corner_radius=8)
+        self.btn_train_ml.pack(**fpx, fill="x", pady=(0, SPACE_S))
+        self.after(0, self.refresh_ml_status)
+
+    def _build_stat_section(self, parent) -> None:
+        """Categorized statistics: Heart Rate / RR Intervals / HRV / Signal /
+        Quality, as a vertically-stacked accordion section in the right
+        panel. All values are still driven by update_kpis()
+        (plot_controller.py), fanned out to tiles via make_stat_tile()
+        (ecg/ui/widgets.py) exactly as before -- only the layout (vertical
+        stack instead of a 5-column grid, to fit the narrow right panel) and
+        location changed.
+        """
+        sec = CollapsibleSection(parent, "STATISTICS", initially_open=True)
 
         # (key, label, unit, hero) -- unit is baked into the tile once at
         # construction (static), hero=True gets the one FONT_KPI_HERO use.
@@ -2020,11 +2074,10 @@ class ECGApp(ctk.CTk):
             ]),
         ]
 
-        for col, (cat_name, accent, tiles) in enumerate(categories):
-            box = ctk.CTkFrame(grid, fg_color=CARD, corner_radius=8,
+        for cat_name, accent, tiles in categories:
+            box = ctk.CTkFrame(sec.frame, fg_color=CARD, corner_radius=8,
                                 border_width=1, border_color=BORDER)
-            box.grid(row=0, column=col, sticky="nsew",
-                      padx=(0 if col == 0 else SPACE_S, 0))
+            box.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_S))
             ctk.CTkFrame(box, fg_color=accent, height=3, corner_radius=2).pack(
                 fill="x", padx=SPACE_S, pady=(SPACE_XS, 0))
             ctk.CTkLabel(box, text=cat_name.upper(), font=FONT_MICRO,
@@ -2033,6 +2086,11 @@ class ECGApp(ctk.CTk):
             for key, label, unit, hero in tiles:
                 tile = make_stat_tile(box, label, "—", unit=unit, hero=hero, card=False)
                 tile.pack(fill="x", padx=SPACE_S, pady=(0, SPACE_XS))
+                # The right panel is much narrower than the old full-width
+                # strip -- long values (e.g. sq_artifact's "N (a dup · b
+                # non-physio · c ectopic)" breakdown) need to wrap instead of
+                # clipping against the panel edge.
+                tile.value_label.configure(wraplength=220, justify="left")
                 self._kpi[key] = tile.value_label
 
     # ─── Tabs ─────────────────────────────────────────────────
@@ -5224,7 +5282,7 @@ class ECGApp(ctk.CTk):
     def _toolbar_chip(self, parent) -> ctk.CTkFrame:
         """Grouped-control 'chip' background for nav/hdr instrument-toolbar
         clusters -- the same CARD/BORDER treatment already used for the
-        stat-panel category boxes (see _build_stat_panel)."""
+        stat-panel category boxes (see _build_stat_section)."""
         return ctk.CTkFrame(parent, fg_color=CARD, corner_radius=8,
                              border_width=1, border_color=BORDER)
 
