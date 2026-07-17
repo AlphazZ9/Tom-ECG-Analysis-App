@@ -1082,18 +1082,9 @@ class ECGApp(ctk.CTk):
         # Detection sub-group (SG target-fs/window) relocated to the right
         # panel's DETECTION accordion section (_build_detection_section()).
 
-        # -- Export & Notes --------------------------------------------------
-        _adv_group("Export & Notes")
-        self._btn(f, "📊  Export Excel",              self._export_excel,      fpx, variant="secondary", h=28)
-        self._btn(f, "📄  Export RR CSV  (Ctrl+W)",   self._export_rr_csv,     fpx, variant="secondary", h=28)
-        self._btn(f, "🖼  Export Figures  (PNG)",      self._export_figures,    fpx, variant="secondary", h=28)
-        self._btn(f, "📦  Export ZIP  (Excel+Figs)",  self._export_zip,        fpx, variant="secondary", h=28)
-        self._btn(f, "📄  PDF Report  (1 page)",      self._export_pdf_report, fpx, variant="secondary", h=28)
-        self._btn(f, "🔬  Export Arrhythmia PDF",     self._export_arrhythmia_pdf, fpx, variant="secondary", h=28)
-        self._btn(f, "🔬  Export GraphPad Prism",     self._export_prism,      fpx, variant="secondary", h=28)
-        ctk.CTkFrame(f, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_S))
-        self._btn(f, "📝  Notes (this recording)",    self._open_notes_dialog, fpx, variant="secondary", h=28)
-        self._btn(f, "⏱  Event annotations",          self._open_annotation_dialog, fpx, variant="secondary", h=28)
+        # Export & Notes sub-group relocated to the right panel's
+        # ANNOTATIONS and EXPORT accordion sections (_build_annotations_section()
+        # / _build_export_section()).
 
         # ── BOTTOM BUTTONS ────────────────────────────────────
         ctk.CTkFrame(s, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
@@ -1818,8 +1809,8 @@ class ECGApp(ctk.CTk):
         Sibling of self.sidebar (not nested in `main`) -- packed side="right"
         before `main` is created so main's fill="both", expand=True doesn't
         claim the space first, mirroring how the sidebar itself is packed
-        before main. Wrapped in a scrollable frame from the start since later
-        sub-phases add more sections (Detection/Annotations/Export) here.
+        before main. Wrapped in a scrollable frame since it holds the full
+        redesign-brief accordion: DETECTION, STATISTICS, ANNOTATIONS, EXPORT.
         """
         self.right_panel = ctk.CTkFrame(self, width=280, fg_color=PANEL, corner_radius=0)
         self.right_panel.pack(side="right", fill="y")
@@ -1831,6 +1822,8 @@ class ECGApp(ctk.CTk):
 
         self._build_detection_section(scroll)
         self._build_stat_section(scroll)
+        self._build_annotations_section(scroll)
+        self._build_export_section(scroll)
 
     def _build_detection_section(self, parent) -> None:
         """DETECTION / ARTIFACTS / ML DETECTOR accordion sections.
@@ -2092,6 +2085,40 @@ class ECGApp(ctk.CTk):
                 # clipping against the panel edge.
                 tile.value_label.configure(wraplength=220, justify="left")
                 self._kpi[key] = tile.value_label
+
+    def _build_annotations_section(self, parent) -> None:
+        """ANNOTATIONS accordion section: recording notes + event markers.
+
+        Relocates the ADVANCED section's "Notes (this recording)" and
+        "Event annotations" buttons verbatim -- neither return value was
+        captured as a named attribute, so relocating the construction call
+        site carries no downstream reference risk (same rationale as the
+        Export-format buttons in _build_export_section()).
+        """
+        fpx = dict(padx=SPACE_L)
+        sec = CollapsibleSection(parent, "ANNOTATIONS", initially_open=False)
+        f = sec.frame
+        self._btn(f, "📝  Notes (this recording)",  self._open_notes_dialog,      fpx, variant="secondary", h=28)
+        self._btn(f, "⏱  Event annotations",        self._open_annotation_dialog, fpx, variant="secondary", h=28)
+
+    def _build_export_section(self, parent) -> None:
+        """EXPORT accordion section: the 7 export-format buttons.
+
+        Relocates the ADVANCED section's "Export & Notes" export buttons
+        verbatim (same commands as the toolbar's Export ▾ dropdown, kept
+        as an independent entry point) -- see _build_annotations_section()
+        for why relocation is reference-safe here.
+        """
+        fpx = dict(padx=SPACE_L)
+        sec = CollapsibleSection(parent, "EXPORT", initially_open=False)
+        f = sec.frame
+        self._btn(f, "📊  Export Excel",             self._export_excel,          fpx, variant="secondary", h=28)
+        self._btn(f, "📄  Export RR CSV  (Ctrl+W)",  self._export_rr_csv,         fpx, variant="secondary", h=28)
+        self._btn(f, "🖼  Export Figures  (PNG)",     self._export_figures,        fpx, variant="secondary", h=28)
+        self._btn(f, "📦  Export ZIP  (Excel+Figs)", self._export_zip,            fpx, variant="secondary", h=28)
+        self._btn(f, "📄  PDF Report  (1 page)",     self._export_pdf_report,     fpx, variant="secondary", h=28)
+        self._btn(f, "🔬  Export Arrhythmia PDF",    self._export_arrhythmia_pdf, fpx, variant="secondary", h=28)
+        self._btn(f, "🔬  Export GraphPad Prism",    self._export_prism,          fpx, variant="secondary", h=28)
 
     # ─── Tabs ─────────────────────────────────────────────────
 
