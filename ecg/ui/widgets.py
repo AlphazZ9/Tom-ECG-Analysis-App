@@ -114,9 +114,13 @@ def make_quality_gauge(
 
     Zones are Poor/Medium/Good/Excellent (RED/AMBER/GREEN_MID/GREEN), widths
     proportional to the _QUALITY_TIERS boundaries, with a thin marker placed
-    over the track at the current score. Mixing .place() for the marker with
-    .grid() for its zone-frame siblings is safe -- each widget picks its own
-    geometry manager independently of its siblings.
+    over the track at the current score. Each zone frame gets an explicit
+    pixel width computed from its weight and is packed side="left" -- grid
+    column weights on unsized CTkFrame children were found to not partition
+    reliably (each child rendered at its own default size and overlapped
+    the others, so only the last-drawn zone was ever visible). Mixing
+    .place() for the marker with .pack() for its zone-frame siblings is
+    safe -- each widget picks its own geometry manager independently.
 
     compact=True (used in the top bar this phase) is a short, small-caption
     track. compact=False is a larger variant reserved for future reuse (e.g.
@@ -128,8 +132,8 @@ def make_quality_gauge(
     outer = ctk.CTkFrame(parent, fg_color="transparent")
 
     track_h = 8 if compact else 14
-    track = ctk.CTkFrame(outer, height=track_h,
-                          width=90 if compact else 220,
+    track_w = 90 if compact else 220
+    track = ctk.CTkFrame(outer, height=track_h, width=track_w,
                           fg_color="transparent")
     track.pack(fill=("x" if not compact else "none"))
     track.pack_propagate(False)
@@ -138,10 +142,12 @@ def make_quality_gauge(
     # first, Excellent last) so the track reads low-to-high left-to-right.
     zone_weights = [40, 30, 20, 10]  # Poor, Medium, Good, Excellent widths
     zone_colors  = [RED, AMBER, GREEN_MID, GREEN]
+    total_weight = sum(zone_weights)
     for i, (weight, color) in enumerate(zip(zone_weights, zone_colors)):
-        track.columnconfigure(i, weight=weight)
-        ctk.CTkFrame(track, fg_color=color, corner_radius=0).grid(
-            row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 1, 0))
+        zone_w = max(1, round(track_w * weight / total_weight))
+        ctk.CTkFrame(track, fg_color=color, corner_radius=0,
+                     width=zone_w, height=track_h).pack(
+            side="left", fill="both", padx=(0 if i == 0 else 1, 0))
 
     marker = ctk.CTkFrame(track, fg_color=TEXT, width=2, corner_radius=0)
     marker.place(relx=0.0, rely=0, relheight=1.0)
