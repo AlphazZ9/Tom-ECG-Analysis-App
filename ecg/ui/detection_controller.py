@@ -16,7 +16,7 @@ import numpy as np
 from ecg.core.models import MouseECG
 from ecg.core.detection import apply_threshold
 from ecg.ui.theme import (
-    BLUE, BLUE_HOVER, BORDER, BORDER2, GREEN, MUTED, ORANGE, ORANGE_DEEP, RED,
+    BLUE, BORDER, BORDER2, GREEN, MUTED, ORANGE, ORANGE_DEEP, RED,
 )
 from ecg.ui.widgets import update_quality_gauge
 
@@ -305,12 +305,12 @@ class DetectionController:
         self.app.detection.edit_free_placement = not self.app.detection.edit_free_placement
         if self.app.detection.edit_free_placement:
             self.app.btn_free_placement.configure(
-                fg_color=BLUE, hover_color=BLUE_HOVER,
+                fg_color=ORANGE, hover_color=ORANGE_DEEP,
                 text_color="white", text="Free Placement ON",
             )
             self.app._set_status(
                 "Free Placement ON — R-click places a peak at the exact click position, "
-                "no snapping, no proximity guard.", BLUE)
+                "no snapping, no proximity guard.", ORANGE)
         else:
             self.app.btn_free_placement.configure(
                 fg_color=BORDER, hover_color=BORDER2,

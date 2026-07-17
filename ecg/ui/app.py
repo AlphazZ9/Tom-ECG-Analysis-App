@@ -2007,72 +2007,96 @@ class ECGApp(ctk.CTk):
         #   detail plot    (fill=both, expand=True)
 
         # ── Navigation bar ────────────────────────────────────────────────
+        # Instrument-style layout: 3 grouped chips inside the flat PANEL bar
+        # -- Transport | Position & Zoom | Readout (docked right).
         nav = ctk.CTkFrame(t, fg_color=PANEL, corner_radius=0, height=34)
         nav.pack(side="top", fill="x")
         nav.pack_propagate(False)
 
-        # Jump-to-start / jump-to-end
-        ctk.CTkButton(nav, text="⏮", width=36, height=28, font=FONT_LABEL,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      corner_radius=8,
-                      command=self._nav_reset).pack(side="left", padx=(SPACE_M, SPACE_XS), pady=SPACE_XS)
-        ctk.CTkButton(nav, text="◀◀", width=40, height=28, font=FONT_SMALL,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      corner_radius=8,
-                      command=lambda: self._navigate_big(-1)).pack(side="left", padx=SPACE_XS, pady=SPACE_XS)
-        ctk.CTkButton(nav, text="◀", width=36, height=28, font=FONT_LABEL,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      corner_radius=8,
-                      command=lambda: self._navigate(-1)).pack(side="left", padx=SPACE_XS, pady=SPACE_XS)
+        # ── Transport chip: jump/step controls ──────────────────────────
+        transport_chip = self._toolbar_chip(nav)
+        transport_chip.pack(side="left", padx=(SPACE_M, SPACE_S))
 
-        # Current position entry
-        ctk.CTkLabel(nav, text="t =", font=FONT_SMALL,
-                     text_color=MUTED).pack(side="left", padx=(SPACE_L, SPACE_XS))
+        btn_nav_reset = ctk.CTkButton(
+            transport_chip, text="⏮", width=36, height=28, font=FONT_LABEL,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+            corner_radius=8, command=self._nav_reset)
+        btn_nav_reset.pack(side="left", padx=(SPACE_S, SPACE_XS))
+        self._bind_hover_tip(btn_nav_reset, "Jump to start")
+
+        btn_nav_big_back = ctk.CTkButton(
+            transport_chip, text="◀◀", width=44, height=28, font=FONT_LABEL,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+            corner_radius=8, command=lambda: self._navigate_big(-1))
+        btn_nav_big_back.pack(side="left", padx=(0, SPACE_S))
+        self._bind_hover_tip(btn_nav_big_back, "Big step back")
+
+        btn_nav_back = ctk.CTkButton(
+            transport_chip, text="◀", width=36, height=28, font=FONT_LABEL,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+            corner_radius=8, command=lambda: self._navigate(-1))
+        btn_nav_back.pack(side="left", padx=(0, SPACE_M))
+        self._bind_hover_tip(btn_nav_back, "Step back")
+
+        btn_nav_fwd = ctk.CTkButton(
+            transport_chip, text="▶", width=36, height=28, font=FONT_LABEL,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+            corner_radius=8, command=lambda: self._navigate(+1))
+        btn_nav_fwd.pack(side="left", padx=(0, SPACE_S))
+        self._bind_hover_tip(btn_nav_fwd, "Step forward")
+
+        btn_nav_big_fwd = ctk.CTkButton(
+            transport_chip, text="▶▶", width=44, height=28, font=FONT_LABEL,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+            corner_radius=8, command=lambda: self._navigate_big(+1))
+        btn_nav_big_fwd.pack(side="left", padx=(0, SPACE_XS))
+        self._bind_hover_tip(btn_nav_big_fwd, "Big step forward")
+
+        btn_nav_end = ctk.CTkButton(
+            transport_chip, text="⏭", width=36, height=28, font=FONT_LABEL,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+            corner_radius=8, command=self._nav_end)
+        btn_nav_end.pack(side="left", padx=(0, SPACE_S))
+        self._bind_hover_tip(btn_nav_end, "Jump to end")
+
+        # ── Position & Zoom chip: current position + window size ────────
+        pos_chip = self._toolbar_chip(nav)
+        pos_chip.pack(side="left", padx=(0, SPACE_S))
+
+        ctk.CTkLabel(pos_chip, text="t =", font=FONT_SMALL,
+                     text_color=MUTED).pack(side="left", padx=(SPACE_S, SPACE_XS))
         self.ent_nav_pos = ctk.CTkEntry(
-            nav, width=72, height=28, font=FONT_LABEL,
+            pos_chip, width=72, height=28, font=FONT_LABEL,
             fg_color=BG, border_color=BORDER2, text_color=TEXT,
             corner_radius=6,
             placeholder_text="0.000")
         self.ent_nav_pos.pack(side="left", padx=(0, SPACE_XS))  # type: ignore[union-attr]
-        ctk.CTkLabel(nav, text="s", font=FONT_SMALL,
+        ctk.CTkLabel(pos_chip, text="s", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left")
-        ctk.CTkButton(nav, text="Go", width=48, height=28, font=FONT_SMALL,
+        ctk.CTkButton(pos_chip, text="Go", width=48, height=28, font=FONT_SMALL,
                       fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
                       corner_radius=8,
-                      command=self._nav_goto).pack(side="left", padx=(SPACE_S, SPACE_XS))
+                      command=self._nav_goto).pack(side="left", padx=(SPACE_S, SPACE_L))
         # Bind Enter key on the position field
         self.ent_nav_pos.bind("<Return>", lambda _e: self._nav_goto())  # type: ignore[union-attr]
 
-        ctk.CTkButton(nav, text="▶", width=36, height=28, font=FONT_LABEL,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      corner_radius=8,
-                      command=lambda: self._navigate(+1)).pack(side="left", padx=SPACE_XS, pady=SPACE_XS)
-        ctk.CTkButton(nav, text="▶▶", width=40, height=28, font=FONT_SMALL,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      corner_radius=8,
-                      command=lambda: self._navigate_big(+1)).pack(side="left", padx=SPACE_XS, pady=SPACE_XS)
-        ctk.CTkButton(nav, text="⏭", width=36, height=28, font=FONT_LABEL,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      corner_radius=8,
-                      command=self._nav_end).pack(side="left", padx=(SPACE_XS, SPACE_XS), pady=SPACE_XS)
-
-        # Separator + window size
-        ctk.CTkFrame(nav, width=1, fg_color=BORDER).pack(
-            side="left", fill="y", padx=(SPACE_L, SPACE_S), pady=SPACE_XS)
-        ctk.CTkLabel(nav, text="Window:", font=FONT_SMALL,
+        ctk.CTkLabel(pos_chip, text="Window:", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left", padx=(0, SPACE_S))
-        self.ent_window = ctk.CTkEntry(nav, width=48, height=28, font=FONT_LABEL,
+        self.ent_window = ctk.CTkEntry(pos_chip, width=48, height=28, font=FONT_LABEL,
                                        fg_color=BG, border_color=BORDER2, text_color=TEXT,
                                        corner_radius=6)
         self.ent_window.insert(0, "2")
-        self.ent_window.pack(side="left")
-        ctk.CTkLabel(nav, text="s", font=FONT_SMALL,
-                     text_color=MUTED).pack(side="left", padx=(SPACE_XS, 0))
+        self.ent_window.pack(side="left", padx=(0, SPACE_XS))
+        self._bind_hover_tip(self.ent_window, "Visible window duration (s)")
+        ctk.CTkLabel(pos_chip, text="s", font=FONT_SMALL,
+                     text_color=MUTED).pack(side="left", padx=(0, SPACE_S))
 
-        # Duration label (filled after signal load)
+        # ── Readout chip: duration, docked to the bar's right edge ──────
+        readout_chip = self._toolbar_chip(nav)
+        readout_chip.pack(side="right", padx=(SPACE_S, SPACE_M))
         self.lbl_sig_duration = ctk.CTkLabel(
-            nav, text="", font=FONT_SMALL, text_color=MUTED, anchor="w")
-        self.lbl_sig_duration.pack(side="left", padx=(SPACE_L, 0))  # type: ignore[union-attr]
+            readout_chip, text="", font=FONT_MONO, text_color=MUTED, anchor="w")
+        self.lbl_sig_duration.pack(side="left", padx=SPACE_S)  # type: ignore[union-attr]
 
         # Separator
         tk.Frame(t, height=1, bg=BORDER).pack(side="top", fill="x", padx=SPACE_M, pady=SPACE_XS)
@@ -2086,83 +2110,92 @@ class ECGApp(ctk.CTk):
                      text_color=MUTED).pack(side="left", anchor="w")
 
         ctk.CTkFrame(hdr, width=1, fg_color=BORDER).pack(side="left", fill="y", padx=(SPACE_L, SPACE_S), pady=SPACE_XS)
+
+        # ── Edit tools chip ───────────────────────────────────────────────
+        edit_chip = self._toolbar_chip(hdr)
+        edit_chip.pack(side="left", padx=(0, SPACE_M))
         self.btn_edit_mode = ctk.CTkButton(
-            hdr, text="Edit Peaks", width=96, height=28, font=FONT_SMALL,
+            edit_chip, text="Edit Peaks", width=96, height=28, font=FONT_SMALL,
             fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
             corner_radius=8,
             command=self._toggle_edit_mode,
         )
-        self.btn_edit_mode.pack(side="left", padx=SPACE_XS)
+        self.btn_edit_mode.pack(side="left", padx=(SPACE_S, SPACE_XS))
         self.lbl_edit_hint = ctk.CTkLabel(
-            hdr,
+            edit_chip,
             text="L-click: exclude/restore   R-click: add   Ctrl+Z: undo",
             font=FONT_HINT, text_color=ORANGE,
         )
         self.btn_undo_edit = ctk.CTkButton(
-            hdr, text="↩ Undo", width=72, height=28, font=FONT_SMALL,
+            edit_chip, text="↩ Undo", width=72, height=28, font=FONT_SMALL,
             fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
             corner_radius=8,
             state="disabled", command=self._undo_edit,
         )
         self.btn_undo_edit.pack(side="left", padx=(SPACE_XS, 0))
         self.btn_redo_edit = ctk.CTkButton(
-            hdr, text="↪ Redo", width=72, height=28, font=FONT_SMALL,
+            edit_chip, text="↪ Redo", width=72, height=28, font=FONT_SMALL,
             fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
             corner_radius=8,
             state="disabled", command=self._redo_edit,
         )
         self.btn_redo_edit.pack(side="left", padx=(SPACE_XS, SPACE_S))
         self.btn_clear_excl = ctk.CTkButton(
-            hdr, text="Clear Edits", width=100, height=28, font=FONT_SMALL,
+            edit_chip, text="Clear Edits", width=100, height=28, font=FONT_SMALL,
             fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
             corner_radius=8,
             command=self._clear_manual_exclusions,
         )
-        self.btn_clear_excl.pack(side="left", padx=SPACE_XS)
+        self.btn_clear_excl.pack(side="left", padx=(0, SPACE_S))
 
-        # ── Free Placement toggle (bypass proximity guard) ────────────────
-        ctk.CTkFrame(hdr, width=1, fg_color=BORDER).pack(side="left", fill="y", padx=(SPACE_M, SPACE_S), pady=SPACE_XS)
+        # ── Free Placement chip (bypass proximity guard) ──────────────────
+        fp_chip = self._toolbar_chip(hdr)
+        fp_chip.pack(side="left", padx=(0, SPACE_M))
         self.btn_free_placement = ctk.CTkButton(
-            hdr, text="Free Placement", width=118, height=28, font=FONT_SMALL,
+            fp_chip, text="Free Placement", width=118, height=28, font=FONT_SMALL,
             fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
             corner_radius=8,
             command=self._toggle_free_placement,
         )
-        self.btn_free_placement.pack(side="left", padx=SPACE_XS)
+        self.btn_free_placement.pack(side="left", padx=(SPACE_S, SPACE_XS))
         _fp_tip = ctk.CTkLabel(
-            hdr, text="?", width=28, height=28,
+            fp_chip, text="?", width=28, height=28,
             font=FONT_CARD_TITLE, text_color=MUTED,
             fg_color=BORDER, corner_radius=14,
         )
-        _fp_tip.pack(side="left", padx=(SPACE_XS, SPACE_S))
-        _fp_tip.bind("<Enter>", lambda e: self._set_status(
+        _fp_tip.pack(side="left", padx=(0, SPACE_S))
+        self._bind_hover_tip(
+            _fp_tip,
             "Free Placement: right-click adds a peak at the exact clicked position — "
-            "no snapping, no proximity guard, works even on top of existing peaks.", MUTED))
-        _fp_tip.bind("<Leave>", lambda e: self._set_status(""))
+            "no snapping, no proximity guard, works even on top of existing peaks.")
 
-        ctk.CTkFrame(hdr, width=1, fg_color=BORDER).pack(side="left", fill="y", padx=(SPACE_M, SPACE_S), pady=SPACE_XS)
+        # ── Annotations chip ───────────────────────────────────────────────
+        ann_chip = self._toolbar_chip(hdr)
+        ann_chip.pack(side="left", padx=(0, SPACE_M))
         self.btn_annotations = ctk.CTkButton(
-            hdr, text="Annotations", width=110, height=28, font=FONT_SMALL,
+            ann_chip, text="Annotations", width=110, height=28, font=FONT_SMALL,
             fg_color=PURPLE_DARK, hover_color=PURPLE, text_color="white",
             corner_radius=8,
             command=self._open_annotations,
         )
-        self.btn_annotations.pack(side="left", padx=SPACE_XS)  # type: ignore[union-attr]
+        self.btn_annotations.pack(side="left", padx=(SPACE_S, SPACE_XS))  # type: ignore[union-attr]
         self.lbl_ann_count = ctk.CTkLabel(
-            hdr, text="", font=FONT_HINT, text_color=MUTED, anchor="w")
-        self.lbl_ann_count.pack(side="left", padx=(SPACE_XS, SPACE_S))  # type: ignore[union-attr]
+            ann_chip, text="", font=FONT_HINT, text_color=MUTED, anchor="w")
+        self.lbl_ann_count.pack(side="left", padx=(0, SPACE_S))  # type: ignore[union-attr]
 
-        ctk.CTkFrame(hdr, width=1, fg_color=BORDER).pack(side="left", fill="y", padx=(SPACE_M, SPACE_S), pady=SPACE_XS)
+        # ── Pacing Periods chip ────────────────────────────────────────────
+        pace_chip = self._toolbar_chip(hdr)
+        pace_chip.pack(side="left")
         self.btn_pacing = ctk.CTkButton(
-            hdr, text="Pacing Periods", width=130, height=28, font=FONT_SMALL,
+            pace_chip, text="Pacing Periods", width=130, height=28, font=FONT_SMALL,
             fg_color=TEAL_DARK, hover_color=TEAL, text_color="white",
             corner_radius=8,
             command=self._open_pacing_periods,
         )
-        self.btn_pacing.pack(side="left", padx=SPACE_XS)  # type: ignore[union-attr]
+        self.btn_pacing.pack(side="left", padx=(SPACE_S, SPACE_XS))  # type: ignore[union-attr]
         self.lbl_pacing_count = ctk.CTkLabel(
-            hdr, text="", font=FONT_HINT, text_color=MUTED, anchor="w")
-        self.lbl_pacing_count.pack(side="left", padx=(SPACE_XS, SPACE_S))  # type: ignore[union-attr]
+            pace_chip, text="", font=FONT_HINT, text_color=MUTED, anchor="w")
+        self.lbl_pacing_count.pack(side="left", padx=(0, SPACE_S))  # type: ignore[union-attr]
 
         # Overview / minimap strip — full-recording navigator, directly above
         # the detail plot (Audacity/Premiere-style). Fixed height
@@ -5126,6 +5159,13 @@ class ECGApp(ctk.CTk):
         sw.pack(**pad, anchor="w", pady=(0, SPACE_S))
         return sw
 
+    def _toolbar_chip(self, parent) -> ctk.CTkFrame:
+        """Grouped-control 'chip' background for nav/hdr instrument-toolbar
+        clusters -- the same CARD/BORDER treatment already used for the
+        stat-panel category boxes (see _build_stat_panel)."""
+        return ctk.CTkFrame(parent, fg_color=CARD, corner_radius=8,
+                             border_width=1, border_color=BORDER)
+
     def _btn(self, parent, text: str, command, pad: dict,
              variant: str = "secondary", h: int = 28, bold: bool = False) -> ctk.CTkButton:
         """Build a sidebar-style secondary/action button in one of 5 named
@@ -5305,6 +5345,17 @@ class ECGApp(ctk.CTk):
 
     def _set_status(self, text: str, color: str = MUTED) -> None:
         self.lbl_status.configure(text=text, text_color=color)
+
+    def _bind_hover_tip(self, widget, text: str, color: str = MUTED) -> None:
+        """Show *text* in the status bar on hover; clear it on leave.
+
+        Thin wrapper around the existing hand-rolled <Enter>/<Leave> ->
+        _set_status(...) hover pattern (previously duplicated once, for
+        the Free Placement '?' hint). Reuses the persistent status-bar
+        label already on screen -- not a floating tooltip widget.
+        """
+        widget.bind("<Enter>", lambda _e: self._set_status(text, color))
+        widget.bind("<Leave>", lambda _e: self._set_status(""))
 
     def _widget_float(self, widget: "ctk.CTkEntry", default: float = 0.0) -> float:
         """Read a float from a CTk Entry widget.  Returns *default* on any error.
