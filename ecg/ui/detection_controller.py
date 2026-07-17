@@ -34,7 +34,8 @@ class DetectionController:
         """Update all undo/redo button instances (Detection + Arrhythmias tabs)."""
         n_u, n_r = len(self.app.detection.edit_undo), len(self.app.detection.edit_redo)
         for attr, n in [("btn_undo_edit", n_u), ("btn_redo_edit", n_r),
-                        ("btn_arr_undo",  n_u), ("btn_arr_redo",  n_r)]:
+                        ("btn_arr_undo",  n_u), ("btn_arr_redo",  n_r),
+                        ("btn_toolbar_undo", n_u), ("btn_toolbar_redo", n_r)]:
             try:
                 btn = getattr(self.app, attr)
                 key = "undo" if "undo" in attr else "redo"
@@ -148,7 +149,7 @@ class DetectionController:
 
         def _update_gauge(q=quality, c=color) -> None:
             self.app.lbl_quality.configure(text=f"Signal quality: {q}%", text_color=c)
-            # lbl_quality IS the gauge's caption label (see app._build_top_bar) --
+            # lbl_quality IS the gauge's caption label (see app._build_toolbar) --
             # this immediately overwrites the line above with the finer
             # Excellent/Good/Medium/Poor tiering, which is the intended
             # visible result; the line above needs no changes of its own.

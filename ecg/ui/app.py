@@ -223,7 +223,7 @@ class ECGApp(ctk.CTk):
         # predictable None rather than raising AttributeError, and so that
         # hasattr(self, ...) guards can be replaced with "is not None" checks.
         #
-        # Top bar (built in _build_top_bar)
+        # Top toolbar (built in _build_toolbar)
         self.ent_project_name:  "Optional[ctk.CTkEntry]"   = None
         self.lbl_topbar_project:"Optional[ctk.CTkLabel]"   = None
         self.lbl_topbar_file:   "Optional[ctk.CTkLabel]"   = None
@@ -846,7 +846,7 @@ class ECGApp(ctk.CTk):
         # it span the full window width rather than being confined to main's
         # width the way the old KPI bar was (sidebar's own side="left" would
         # otherwise claim the left edge first).
-        self._build_top_bar()
+        self._build_toolbar()
         w = self.winfo_width() or 1480
         _sidebar_w = max(220, min(340, int(w * 0.20)))
         self.sidebar = ctk.CTkFrame(self, width=_sidebar_w, fg_color=PANEL, corner_radius=0)
@@ -926,16 +926,8 @@ class ECGApp(ctk.CTk):
             font=FONT_CARD_TITLE, text_color=BLUE, anchor="w")
         self.lbl_npeaks.pack(**px, fill="x", pady=(0, SPACE_XS))
 
-        # ── WORKFLOW: 3 inline action rows ───────────────────
-        # Row 1: Preview Detection
-        self.btn_preview = ctk.CTkButton(
-            top, text="1 ▶  Preview Detection",
-            command=self._preview,
-            fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
-            font=FONT_BTN_PRIMARY, height=34, corner_radius=8)
-        self.btn_preview.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
-
-        # Method selector — always visible, directly under Preview
+        # Method selector — always visible, first item in the workflow block
+        # (Detect Peaks/Analyze relocated to the top toolbar)
         det_card = ctk.CTkFrame(top, fg_color=CARD, corner_radius=8,
                                 border_width=1, border_color=BORDER)
         det_card.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
@@ -954,13 +946,13 @@ class ECGApp(ctk.CTk):
         self.cb_det_method.set("SG + Derivative (10 kHz)")
         self.cb_det_method.grid(row=0, column=1, sticky="ew")
 
-        # Row 2: Analysis window (inline, compact)
+        # Analysis window (inline, compact)
         aw_frame = ctk.CTkFrame(top, fg_color=CARD, corner_radius=8,
                                 border_width=1, border_color=BORDER)
         aw_frame.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
         aw_hdr = ctk.CTkFrame(aw_frame, fg_color="transparent")
         aw_hdr.pack(fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
-        ctk.CTkLabel(aw_hdr, text="2  Analysis window", font=FONT_SUBSECTION,
+        ctk.CTkLabel(aw_hdr, text="Analysis window", font=FONT_SUBSECTION,
                      text_color=TEXT, anchor="w").pack(side="left")
         ctk.CTkLabel(aw_hdr, text="optional", font=FONT_KPI_LABEL,
                      text_color=LIGHT).pack(side="right")
@@ -995,20 +987,6 @@ class ECGApp(ctk.CTk):
         self.lbl_analysis_window = ctk.CTkLabel(
             aw_btns, text="", font=FONT_KPI_LABEL, text_color=MUTED, anchor="e")
         self.lbl_analysis_window.pack(side="right", fill="x", expand=True)
-
-        # Row 3: Run Full Analysis
-        run_color = GREEN if NK_AVAILABLE else BORDER2
-        self.btn_run = ctk.CTkButton(
-            top, text="3 ▶▶  Run Full Analysis",
-            command=self._run_analysis,
-            fg_color=run_color, hover_color=GREEN_DARK if NK_AVAILABLE else BORDER2,
-            text_color="white", font=FONT_BTN_PRIMARY, height=34, corner_radius=8,
-            state="normal" if NK_AVAILABLE else "disabled")
-        self.btn_run.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
-
-        if not NK_AVAILABLE:
-            ctk.CTkLabel(top, text="⚠  pip install neurokit2",
-                         font=FONT_HINT, text_color=ORANGE, anchor="w").pack(**px, fill="x")
 
         ctk.CTkFrame(top, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
 
@@ -1198,18 +1176,18 @@ class ECGApp(ctk.CTk):
         self.after(0, self.refresh_ml_status)
 
         # ── SESSION & EXPORT ──────────────────────────────────
+        # Save Session itself is relocated to the top toolbar's File ops
+        # chip (self.btn_save_session, built in _build_toolbar()) --
+        # session_controller.py/signal_controller.py/analysis_controller.py
+        # reference it by attribute name for busy-state text swaps, so it's
+        # relocated rather than duplicated. This section keeps the session
+        # info label and cache-clearing action.
         sec_ses = _SidebarSection(s, "SESSION & EXPORT", initially_open=False)
         f = sec_ses.frame
-        self.btn_save_session = ctk.CTkButton(
-            f, text="💾  Save Session", command=self._save_session,
-            fg_color=GREEN, hover_color=GREEN_DARK, text_color="white",
-            font=FONT_CARD_TITLE, height=34, corner_radius=8,
-            state="disabled")
-        self.btn_save_session.pack(**fpx, fill="x", pady=(SPACE_S, SPACE_S))
         self.lbl_session_info = ctk.CTkLabel(
             f, text="No session saved for this file", font=FONT_HINT,
             text_color=MUTED, anchor="w", wraplength=230, justify="left")
-        self.lbl_session_info.pack(**fpx, pady=(0, SPACE_S), fill="x")
+        self.lbl_session_info.pack(**fpx, pady=(SPACE_S, SPACE_S), fill="x")
         self._btn(f, "🗑  Clear Session Cache", self._delete_session, fpx, variant="secondary", h=26)
         # Export-format buttons + Notes/Annotations live in the ADVANCED
         # section now (built later in this method) -- none of their return
@@ -1825,15 +1803,22 @@ class ECGApp(ctk.CTk):
 
     # ─── KPI bar ──────────────────────────────────────────────
 
-    def _build_top_bar(self) -> None:
-        """Compact strip spanning the FULL window width.
+    def _build_toolbar(self) -> None:
+        """Primary instrument-style toolbar spanning the FULL window width.
 
         Packed on self (not inside main -- see _build()), before the
-        sidebar/main split, so it isn't confined to main's width. Holds only
-        the essentials per the redesign brief: project name, file, duration,
-        beat count, mean HR, a quality gauge, the correlation badge, theme
-        controls, and analysis progress. Detailed metrics moved to
-        _build_stat_panel()'s categorized cards.
+        sidebar/main split, so it isn't confined to main's width. Consolidates
+        what used to be split across the old KPI/top bar AND the sidebar's
+        numbered workflow buttons (Preview/Run) into one real toolbar, per
+        the Adaptive Workbench brief: Open/Save/Export/Detect Peaks/Analyze/
+        Settings, Undo/Redo, project name, progress indicator.
+
+        btn_preview/btn_run/btn_save_session are RELOCATED here (same
+        attribute names, same CTkButton objects) rather than recreated --
+        session_controller.py/signal_controller.py/analysis_controller.py all
+        reference them by name for busy-state text swaps ("Loading…",
+        "Analysing…", "Saving…", "Restoring…") and must keep working
+        unchanged.
         """
         bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
         bar.pack(side="top", fill="x")
@@ -1841,9 +1826,8 @@ class ECGApp(ctk.CTk):
 
         # Progress row -- child of `bar` itself (not the inline row below) so
         # that _start_async's existing self._prog_row.pack(side="bottom",
-        # fill="x", ...) call spans the full top-bar width, exactly as it did
-        # in the old KPI bar. Not packed here -- _start_async/_stop_progress
-        # show/hide it dynamically, unchanged.
+        # fill="x", ...) call spans the full toolbar width, unchanged. Not
+        # packed here -- _start_async/_stop_progress show/hide it dynamically.
         self._prog_row = ctk.CTkFrame(bar, fg_color="transparent", height=20)
         self.progress = ctk.CTkProgressBar(
             self._prog_row, height=4, mode="determinate",
@@ -1857,10 +1841,73 @@ class ECGApp(ctk.CTk):
         )
         self.lbl_progress.pack(side="left", padx=(0, SPACE_M))
 
-        row = ctk.CTkFrame(bar, fg_color="transparent")
-        row.pack(fill="x", padx=SPACE_M, pady=SPACE_XS)
+        row = ctk.CTkFrame(bar, fg_color="transparent", height=44)
+        row.pack(fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
+        row.pack_propagate(False)
 
-        # ── Left: project name + file ──────────────────────────
+        # ── File ops chip: Open / Save / Export ──────────────────────────
+        file_chip = self._toolbar_chip(row)
+        file_chip.pack(side="left", padx=(0, SPACE_M))
+
+        ctk.CTkButton(
+            file_chip, text="Open", width=84, height=34,
+            fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
+            font=FONT_BTN_PRIMARY, corner_radius=8,
+            command=self._open_file,
+        ).pack(side="left", padx=(SPACE_S, SPACE_XS))
+
+        self.btn_save_session = ctk.CTkButton(
+            file_chip, text="💾  Save", command=self._save_session,
+            fg_color=GREEN, hover_color=GREEN_DARK, text_color="white",
+            font=FONT_CARD_TITLE, height=34, corner_radius=8,
+            state="disabled")
+        self.btn_save_session.pack(side="left", padx=(0, SPACE_XS))
+
+        self.btn_export = ctk.CTkButton(
+            file_chip, text="Export ▾", width=96, height=34,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+            font=FONT_BTN_SEC, corner_radius=8,
+            command=self._open_export_menu,
+        )
+        self.btn_export.pack(side="left", padx=(0, SPACE_S))
+
+        # ── Analysis actions chip: Detect Peaks / Analyze ─────────────────
+        analysis_chip = self._toolbar_chip(row)
+        analysis_chip.pack(side="left", padx=(0, SPACE_M))
+
+        self.btn_preview = ctk.CTkButton(
+            analysis_chip, text="Detect Peaks",
+            command=self._preview,
+            fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
+            font=FONT_BTN_PRIMARY, height=34, corner_radius=8)
+        self.btn_preview.pack(side="left", padx=(SPACE_S, SPACE_XS))
+
+        run_color = GREEN if NK_AVAILABLE else BORDER2
+        self.btn_run = ctk.CTkButton(
+            analysis_chip, text="Analyze",
+            command=self._run_analysis,
+            fg_color=run_color, hover_color=GREEN_DARK if NK_AVAILABLE else BORDER2,
+            text_color="white", font=FONT_BTN_PRIMARY, height=34,
+            corner_radius=8, state="normal" if NK_AVAILABLE else "disabled")
+        self.btn_run.pack(side="left", padx=(0, SPACE_S))
+        if not NK_AVAILABLE:
+            self._bind_hover_tip(self.btn_run, "pip install neurokit2 to enable", ORANGE)
+
+        # ── Edit chip: Undo / Redo toolbar mirrors ────────────────────────
+        edit_chip = self._toolbar_chip(row)
+        edit_chip.pack(side="left", padx=(0, SPACE_M))
+        self.btn_toolbar_undo = ctk.CTkButton(
+            edit_chip, text="↩ Undo", width=88, height=34, font=FONT_BTN_SEC,
+            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
+            corner_radius=8, state="disabled", command=self._undo_edit)
+        self.btn_toolbar_undo.pack(side="left", padx=(SPACE_S, SPACE_XS))
+        self.btn_toolbar_redo = ctk.CTkButton(
+            edit_chip, text="↪ Redo", width=88, height=34, font=FONT_BTN_SEC,
+            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
+            corner_radius=8, state="disabled", command=self._redo_edit)
+        self.btn_toolbar_redo.pack(side="left", padx=(0, SPACE_S))
+
+        # ── Identity: project name + file name ────────────────────────────
         left = ctk.CTkFrame(row, fg_color="transparent")
         left.pack(side="left")
         self.lbl_topbar_project = ctk.CTkLabel(
@@ -1871,20 +1918,7 @@ class ECGApp(ctk.CTk):
             left, text="No file loaded", font=FONT_HINT, text_color=MUTED, anchor="w")
         self.lbl_topbar_file.pack(side="left")
 
-        # ── Middle: compact metric mirrors (full tiles live in the stat panel) ──
-        mid = ctk.CTkFrame(row, fg_color="transparent")
-        mid.pack(side="left", padx=SPACE_L)
-        for label, key in (("Duration", "dur"), ("Beats", "n_beats"), ("Mean HR", "hr_mean")):
-            cell = ctk.CTkFrame(mid, fg_color="transparent")
-            cell.pack(side="left", padx=(0, SPACE_L))
-            ctk.CTkLabel(cell, text=label, font=FONT_MICRO, text_color=LIGHT,
-                         anchor="w").pack(anchor="w")
-            val = ctk.CTkLabel(cell, text="—", font=FONT_SIDEBAR_HDR,
-                                text_color=TEXT, anchor="w")
-            val.pack(anchor="w")
-            self._topbar_vals[key] = val
-
-        # ── Right: quality gauge + correlation badge + theme controls ──
+        # ── Right: quality gauge + badge + Settings/Theme ─────────────────
         right = ctk.CTkFrame(row, fg_color="transparent")
         right.pack(side="right")
 
@@ -1904,15 +1938,43 @@ class ECGApp(ctk.CTk):
             corner_radius=6, width=120, height=22, anchor="center")
         self._lbl_quality_badge.pack(side="left", padx=(0, SPACE_M))
 
-        ctk.CTkButton(right, text="Theme", width=76, height=28,
+        ctk.CTkButton(right, text="⚙ Settings", width=100, height=34,
+                      fg_color=BLUE_DARK, hover_color=BLUE, text_color="white",
+                      font=FONT_BTN_SEC, command=self._open_params_dialog,
+                      corner_radius=8).pack(side="left", padx=(0, SPACE_S))
+        ctk.CTkButton(right, text="Theme", width=76, height=34,
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
                       font=FONT_BTN_SEC, command=self._open_theme_dialog,
                       corner_radius=8).pack(side="left", padx=(0, SPACE_S))
-        ctk.CTkButton(right, text="☀/☾", width=52, height=28,
+        ctk.CTkButton(right, text="☀/☾", width=52, height=34,
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
                       font=FONT_BTN_SEC, corner_radius=8,
                       command=self._toggle_dark_live,
                       ).pack(side="left")
+
+    def _open_export_menu(self) -> None:
+        """Post the Export dropdown under the toolbar's Export button.
+
+        Lists the same 7 export commands previously reachable only from the
+        sidebar's ADVANCED section -- no new export logic, just consolidated
+        access, per the toolbar brief's single "Export" button.
+        """
+        menu = tk.Menu(self, tearoff=0, bg=CARD, fg=TEXT,
+                        activebackground=BLUE, activeforeground="white",
+                        relief="flat", bd=1)
+        menu.add_command(label="📊  Export Excel", command=self._export_excel)
+        menu.add_command(label="📄  Export RR CSV  (Ctrl+W)", command=self._export_rr_csv)
+        menu.add_command(label="🖼  Export Figures  (PNG)", command=self._export_figures)
+        menu.add_command(label="📦  Export ZIP  (Excel+Figs)", command=self._export_zip)
+        menu.add_command(label="📄  PDF Report  (1 page)", command=self._export_pdf_report)
+        menu.add_command(label="🔬  Export Arrhythmia PDF", command=self._export_arrhythmia_pdf)
+        menu.add_command(label="🔬  Export GraphPad Prism", command=self._export_prism)
+        try:
+            x = self.btn_export.winfo_rootx()
+            y = self.btn_export.winfo_rooty() + self.btn_export.winfo_height()
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
 
     def _build_stat_panel(self, parent) -> None:
         """Categorized statistics panel: Heart Rate / RR Intervals / HRV /
