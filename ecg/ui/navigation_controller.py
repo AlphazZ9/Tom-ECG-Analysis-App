@@ -30,7 +30,7 @@ class NavigationController:
         """Keyboard left/right arrow navigation — only active on Detection tab."""
         app = self.app
         try:
-            if app.tabs.get() != "Detection":
+            if app.tabs.get() != "📈 Detection":
                 return
         except Exception:
             return

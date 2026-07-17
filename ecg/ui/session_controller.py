@@ -30,6 +30,22 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("ecg")
 
+# Migration map: pre-Phase-5 plain tab names -> Phase-5 emoji-prefixed
+# names. CTkTabview uses the display string itself as the lookup key (no
+# separate internal id), so a .ecgsession file saved before this phase
+# still has the old plain name in "current_tab". Applied once, where the
+# raw saved string is first read, so every downstream consumer already
+# sees a current-format name. Old->new only; anything already in the new
+# format (or unrecognized) passes through unchanged via .get(x, x).
+_TAB_KEY_MAP = {
+    "Detection":     "📈 Detection",
+    "HRV":           "💓 HRV",
+    "Intervals":     "📏 Intervals",
+    "Beat Template": "〰 Beat Template",
+    "Arrhythmias":   "⚠ Arrhythmias",
+    "Summary":       "📋 Summary",
+}
+
 
 class SessionController:
     def __init__(self, app: "ECGApp") -> None:
@@ -173,7 +189,9 @@ class SessionController:
             "exp_context":      state.get("exp_context", "telemetry_awake"),
             "nav_pos":          float(state.get("nav_pos", 0.0)),
             "edit_mode":        bool(state.get("edit_mode", False)),
-            "current_tab":      state.get("current_tab", "Detection"),
+            "current_tab":      _TAB_KEY_MAP.get(
+                state.get("current_tab", "Detection"),
+                state.get("current_tab", "Detection")),
         }
 
     def on_restore_session_done(self, bundle: dict, saved_at: str) -> None:
@@ -330,7 +348,7 @@ class SessionController:
         try:
             return self.app.tabs.get()
         except Exception:
-            return "Detection"
+            return "📈 Detection"
 
     def collect_session_state(self) -> dict:
         """Gather all serialisable app state into a flat dict.
@@ -630,7 +648,7 @@ class SessionController:
         try:
             s["current_tab"] = self.app.tabs.get()
         except Exception:
-            s["current_tab"] = "Detection"
+            s["current_tab"] = "📈 Detection"
         s["edit_mode"] = self.app.detection.edit_mode
         s["nav_pos"]   = self.app.ui.nav_pos
         s["dark_mode"] = self.app.ui.dark_mode
@@ -691,7 +709,7 @@ class SessionController:
         except Exception as _exc:
             log.debug("cb_det_method restore: %s", _exc)
         try:
-            self.app.tabs.set(s.get("current_tab", "Detection"))
+            self.app.tabs.set(s.get("current_tab", "📈 Detection"))
         except Exception as _exc:
             log.debug("restore current_tab failed: %s", _exc, exc_info=True)
         # Re-apply non-widget state

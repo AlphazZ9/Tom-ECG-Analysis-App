@@ -218,7 +218,7 @@ class AnalysisController:
                            else (ORANGE if n else GREEN),
             )
             self.app._set_status(f"Arrhythmia classification — {n} episode(s)", GREEN)
-            self.app.tabs.set("Arrhythmias")
+            self.app.tabs.set("⚠ Arrhythmias")
 
         if self.app.btn_run_arrhythmia is None:
             return
@@ -606,7 +606,7 @@ class AnalysisController:
                 text=f"  {n} windows · {win_s:.0f}s · pas {step_s:.0f}s  ✓",
                 text_color=GREEN)
             self.app._set_status(f"Rolling HRV — {n} windows computed", GREEN)
-            self.app.tabs.set("HRV"); self.app.after(50, lambda: self.app._on_hrv_view_change("Rolling"))
+            self.app.tabs.set("💓 HRV"); self.app.after(50, lambda: self.app._on_hrv_view_change("Rolling"))
 
         self.app._start_async_result(
             self.app.btn_roll_compute, "Computing…", _worker, _done)
@@ -1154,7 +1154,7 @@ class AnalysisController:
             # Update the label in the Summary tab (shows last-computed epoch info)
             self.app.lbl_epoch_info.configure(
                 text=f"Last epoch run: {n_ep} × {epoch_s:.0f}s", text_color=MUTED)
-            self.app.tabs.set("HRV"); self.app.after(50, lambda: self.app._on_hrv_view_change("Epochs"))
+            self.app.tabs.set("💓 HRV"); self.app.after(50, lambda: self.app._on_hrv_view_change("Epochs"))
             self.app._set_status(f"Epoch analysis done — {n_ep} epochs", GREEN)
 
         self.app._start_async_result(self.app.btn_compute_epochs, "Computing…", _worker, _done)

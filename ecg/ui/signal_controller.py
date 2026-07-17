@@ -468,7 +468,7 @@ class SignalController:
         self.app._set_status(
             f"Raw signal loaded — {dur:.0f} s  |  {fs} Hz  "
             "→ click '1 ▶ Preview Detection' to filter and detect peaks.", BLUE)
-        self.app.tabs.set("Detection")
+        self.app.tabs.set("📈 Detection")
         self.app._update_ann_count()
         self.app._update_pacing_count()
         self.app.ui.nav_pos = 0.0
@@ -696,7 +696,7 @@ class SignalController:
             self.app._set_status(
                 f"Signal ready — {n} peaks  |  {dur:.0f} s  |  {fs} Hz  "
                 "→ adjust threshold then Run Full Analysis.", GREEN)
-        self.app.tabs.set("Detection")
+        self.app.tabs.set("📈 Detection")
         self.app._update_ann_count()   # reflect cleared annotations immediately
         self.app._update_pacing_count()
         # Sync nav bar
@@ -1087,6 +1087,6 @@ class SignalController:
 
         # ── 12. Switch to Detection tab so user lands in the right place ──
         try:
-            self.app.tabs.set("Detection")
+            self.app.tabs.set("📈 Detection")
         except Exception as e:
             log.debug("tabs.set Detection (reset) failed: %s", e)

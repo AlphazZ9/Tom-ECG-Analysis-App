@@ -813,7 +813,7 @@ class PlotController:
                 self.app.ui.nav_pos = max(0.0, min(t_nav - win / 2, sig_dur - win))
             self.app._sync_nav_pos_entry()
             try:
-                self.app.tabs.set("Detection")
+                self.app.tabs.set("📈 Detection")
             except Exception as e:
                 log.debug("tabs.set Detection failed: %s", e)
             self.app._draw_detail()

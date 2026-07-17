@@ -1981,13 +1981,13 @@ class ECGApp(ctk.CTk):
             segmented_button_fg_color=PANEL,
             segmented_button_selected_color=BLUE,
             segmented_button_selected_hover_color=BLUE_HOVER,
-            segmented_button_unselected_color=PANEL,
+            segmented_button_unselected_color=CARD,
             segmented_button_unselected_hover_color=BORDER,
             text_color=TEXT, text_color_disabled=MUTED,
         )
         self.tabs.pack(fill="both", expand=True)
-        for name in ["Detection", "HRV", "Intervals",
-                     "Beat Template", "Arrhythmias", "Summary"]:
+        for name in ["📈 Detection", "💓 HRV", "📏 Intervals",
+                     "〰 Beat Template", "⚠ Arrhythmias", "📋 Summary"]:
             self.tabs.add(name)
 
         self._build_tab_detection()
@@ -1998,7 +1998,7 @@ class ECGApp(ctk.CTk):
         self._build_tab_summary()
 
     def _build_tab_detection(self) -> None:
-        t = self.tabs.tab("Detection")
+        t = self.tabs.tab("📈 Detection")
 
         # Layout (top → bottom, all pack):
         #   nav bar     (fill=x, no expand) — time navigation controls
@@ -2231,7 +2231,7 @@ class ECGApp(ctk.CTk):
 
         Merges: RR / HR  |  Temporel  |  Fréquentiel  |  Non-linéaire  |  Epochs  |  Glissant
         """
-        t = self.tabs.tab("HRV")
+        t = self.tabs.tab("💓 HRV")
         t.grid_rowconfigure(1, weight=1)
         t.grid_columnconfigure(0, weight=1)
 
@@ -2606,7 +2606,7 @@ class ECGApp(ctk.CTk):
 
     def _build_tab_arrhythmias(self) -> None:
         """Build the Arrhythmias tab: event cards (left) + ECG viewer (right)."""
-        t = self.tabs.tab("Arrhythmias")
+        t = self.tabs.tab("⚠ Arrhythmias")
         t.grid_rowconfigure(1, weight=1)
         t.grid_columnconfigure(0, weight=1)
 
@@ -2821,7 +2821,7 @@ class ECGApp(ctk.CTk):
 
     def _build_tab_intervals(self) -> None:
         """Interval delineation tab: P/Q/R/S/T measurement per beat."""
-        t = self.tabs.tab("Intervals")
+        t = self.tabs.tab("📏 Intervals")
 
         # ── Action bar ─────────────────────────────────────────────────────
         bar = ctk.CTkFrame(t, fg_color="transparent")
@@ -2890,7 +2890,7 @@ class ECGApp(ctk.CTk):
 
     def _build_tab_beat_template(self) -> None:
         """Beat template tab: mean beat ± SD and morphology distributions."""
-        t = self.tabs.tab("Beat Template")
+        t = self.tabs.tab("〰 Beat Template")
         t.grid_rowconfigure(1, weight=3)
         t.grid_rowconfigure(2, weight=2)
         t.grid_columnconfigure(0, weight=1)
@@ -2968,7 +2968,7 @@ class ECGApp(ctk.CTk):
         tab, not a duplicate), a plain metrics table with no physiological
         reference-range judgments, and the detailed text report.
         """
-        t = self.tabs.tab("Summary")
+        t = self.tabs.tab("📋 Summary")
         t.grid_rowconfigure(0, weight=0)   # verdict banner
         t.grid_rowconfigure(1, weight=0)   # action bar
         t.grid_rowconfigure(2, weight=1)   # scrollable body
