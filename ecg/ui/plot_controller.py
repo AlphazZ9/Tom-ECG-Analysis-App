@@ -33,20 +33,23 @@ from scipy.signal import welch as _scipy_welch
 _trapz = getattr(np, "trapz", None) or getattr(np, "trapezoid", None)
 
 from ecg.core.models import MouseECG
-from ecg.core.filtering import downsample_for_display
+from ecg.core.filtering import downsample_for_display, downsample_envelope
 from ecg.ui.plots import style_axes
 from ecg.ui.wave_editor import WaveTemplateEditor
 from ecg.ui.theme import (
     PLOT, RED, AMBER, ORANGE, ORANGE_DARK, ORANGE_DEEP,
-    CYAN, BLUE, BLUE_DARK, BLUE_MID, PURPLE, TEAL,
+    CYAN, BLUE, BLUE_DARK, BLUE_MID, PURPLE, TEAL, TEAL_DARK,
     BORDER2, RED_MID, MUTED, GRAY, GRAY_LIGHT, NAVY,
-    GREEN, GREEN_DARK, PINK, AMBER_DARK,
+    GREEN, GREEN_DARK, PINK, AMBER_DARK, ARTIFACT_TYPE_COLOR,
 )
+from ecg.ui.widgets import update_quality_gauge
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
+
+_OVERVIEW_MAX_POINTS = 2_000
 
 
 class PlotController:
@@ -171,9 +174,78 @@ class PlotController:
         self.app._slots["arr_detail"].update(draw)
 
 
+    def _ensure_overview_cache(self) -> bool:
+        """Lazily compute+cache the minimap's envelope arrays.
+
+        Filtered signal only -- the minimap's job is "where am I in the
+        recording," not raw-vs-filtered comparison; that toggle stays
+        detail-plot-only. Returns False if there's no filtered signal yet.
+        """
+        time, sig_flt = self.app.signal.time, self.app.signal.filtered
+        if time is None or sig_flt is None:
+            return False
+        if self.app.ui.ds_time is None or self.app.ui.ds_sig is None:
+            mins, maxs = downsample_envelope(sig_flt, max_points=_OVERVIEW_MAX_POINTS)
+            self.app.ui.ds_sig     = mins
+            self.app.ui.ds_sig_max = maxs
+            self.app.ui.ds_sig_mid = (mins + maxs) / 2.0
+            self.app.ui.ds_time    = np.linspace(float(time[0]), float(time[-1]), len(mins))
+        return True
+
     def draw_overview(self) -> None:
-        """Stub — overview removed; detail view is the sole signal display."""
-        pass  # all callers now use _draw_detail() directly
+        """Full-recording minimap strip above the detail plot.
+
+        Filled min/max envelope band (cached, filtered signal only),
+        accepted R-peaks only (no rejected/excluded/added markers -- keeps
+        this compact strip uncluttered), and a "current window" highlight
+        recomputed fresh from live ui.nav_pos/ent_window on every call
+        (never cached, so drag/scrub always reflects the true position).
+        Click/drag navigation is wired by NavigationController.on_overview_*,
+        not here -- this method only renders. No-ops gracefully if no
+        signal is loaded yet.
+        """
+        if not self._ensure_overview_cache():
+            return
+
+        time, fs, sig_flt = self.app.signal.time, self.app.signal.fs, self.app.signal.filtered
+        t_ds, lo_ds, hi_ds, mid_ds = (self.app.ui.ds_time, self.app.ui.ds_sig,
+                                       self.app.ui.ds_sig_max, self.app.ui.ds_sig_mid)
+        rp_ok = self.app.detection.rpeaks_ok if self.app.detection.rpeaks_ok is not None else np.array([])
+        t_amp = self.app.detection.thresh_amp
+        t_max = float(time[-1])
+
+        try:
+            win = float(self.app.ent_window.get())
+            if not (0 < win < 1e6):
+                win = 10.0
+        except Exception:
+            win = 10.0
+        t_start = self.app.ui.nav_pos
+        t_end   = min(t_max, t_start + win)
+
+        def draw(fig):
+            ax = fig.add_subplot(111)
+            style_axes(ax)
+            ax.fill_between(t_ds, lo_ds, hi_ds, color=PLOT["signal"], alpha=0.55, lw=0, zorder=2)
+            ax.plot(t_ds, mid_ds, color=PLOT["signal"], lw=0.5, alpha=0.35, zorder=3)
+            if len(rp_ok):
+                ax.scatter(rp_ok / fs, sig_flt[rp_ok], color=PLOT["rpeak_ok"],
+                           s=6, zorder=5, alpha=0.6, linewidths=0)
+            ax.axhline(t_amp, color=PLOT["threshold"], lw=0.8, ls="--", alpha=0.5, zorder=1)
+
+            # Current-window indicator -- the Audacity/Premiere "viewport" box.
+            ax.axvspan(t_start, t_end, color=ORANGE, alpha=0.16, zorder=6, linewidth=0)
+            ax.axvline(t_start, color=ORANGE, lw=1.0, alpha=0.8, zorder=7)
+            ax.axvline(t_end, color=ORANGE, lw=1.0, alpha=0.8, zorder=7)
+
+            ax.set_xlim(float(time[0]), t_max)
+            ax.set_yticks([])
+            ax.tick_params(axis="x", labelsize=7, colors=PLOT["muted"])
+            ax.margins(x=0, y=0.05)
+            for sp in ("top", "right", "left"):
+                ax.spines[sp].set_visible(False)
+
+        self.app._slots["overview"].update(draw)
 
     def draw_detail(self, t_start: float | None = None) -> None:
         """Draw the time-windowed detail view with peak markers.
@@ -270,6 +342,21 @@ class PlotController:
         n_excl     = int(mask_excl.sum())
         n_added_view = int(mask_added.sum())
 
+        _art_snap = list(self.app.analysis.artifact_candidates)
+        _art_removed_by_type: dict[str, np.ndarray] = {}
+        if sig_flt is not None and _art_snap:
+            for _cat in ("nonphysio", "ectopic", "duplicate"):
+                _samps = np.array(
+                    [c["sample"] for c in _art_snap
+                     if c.get("decision") == "remove" and c.get("type") == _cat],
+                    dtype=int)
+                if len(_samps):
+                    _samps = _samps[_in_view(_samps)]
+                    if len(_samps):
+                        _art_removed_by_type[_cat] = _samps
+
+        _pace_snap = list(self.app.analysis.pacing_periods)
+
         primary_sig   = sig_raw   if show_raw else sig_flt
         primary_color = PLOT["raw"]    if show_raw else PLOT["signal"]
         ghost_sig     = sig_flt   if show_raw else sig_raw
@@ -284,6 +371,39 @@ class PlotController:
         def draw(fig):
             ax = fig.add_subplot(111)
             style_axes(ax)
+            # Detail-plot-only typography/contrast bump (Phase 3a) — scoped
+            # here, not in style_axes(), so the other plots sharing it are
+            # unaffected: this is the app's single most-stared-at view.
+            ax.tick_params(axis="both", labelsize=10, colors=PLOT["text"])
+            ax.grid(True, color=PLOT["grid"], lw=0.5, alpha=0.85)
+
+            # ── Pacing / stimulation period markers ─────────────────────────
+            # Rendered BEHIND the trace (zorder=0.5 < ghost trace's zorder=1),
+            # unlike annotation spans (zorder=6, drawn OVER the trace) -- these
+            # read as ambient background context. Uses ax.get_xaxis_transform()
+            # (data-x, axes-fraction-y) rather than ax.get_ylim() for the label
+            # position -- the annotation block's ax.get_ylim() read below only
+            # works because it runs AFTER the trace is plotted; this block runs
+            # BEFORE, so ax.get_ylim() would still be the (0,1) default here.
+            for pp in _pace_snap:
+                p0, p1 = float(pp["t_start"]), float(pp["t_end"])
+                if p1 < t_start or p0 > t_end:
+                    continue
+                ax.axvspan(max(p0, t_start), min(p1, t_end),
+                           color=TEAL, alpha=0.15, zorder=0.5, linewidth=0)
+                for _px in (p0, p1):
+                    if t_start <= _px <= t_end:
+                        ax.axvline(_px, color=TEAL_DARK, lw=1.0, ls=":",
+                                   alpha=0.55, zorder=3.5)
+                note = pp.get("note", "")
+                if note:
+                    _lx = p0 if t_start <= p0 <= t_end else (p0 + p1) / 2
+                    if t_start <= _lx <= t_end:
+                        ax.text(_lx + 0.01, 0.04, note, transform=ax.get_xaxis_transform(),
+                                ha="left", va="bottom", fontsize=8,
+                                color=TEAL_DARK, fontweight="bold", zorder=3.5,
+                                bbox=dict(boxstyle="round,pad=0.2", fc="white",
+                                          ec=TEAL_DARK, alpha=0.75, lw=0.7))
 
             # Ghost trace — suppressed in no-filter mode (signals identical)
             # and in raw-only mode (no filtered signal exists yet).
@@ -332,6 +452,19 @@ class PlotController:
                            color=CYAN, s=140, zorder=7,
                            marker="*", linewidths=1.2, edgecolors="#006064",
                            label=f"Added ({n_added_view})")
+
+            # ── Artifact-review markers ─────────────────────────────────────
+            # A beat removed via Artifact Review otherwise vanishes with no
+            # trace. zorder=4.5 sits just above "rejected" (never-accepted
+            # candidates, z4) and below current-state markers (accepted z5,
+            # excluded z6, added z7) -- these are historical/audit markers, so
+            # a current-state marker at the same position stays dominant.
+            for _cat, _samps in _art_removed_by_type.items():
+                _col = ARTIFACT_TYPE_COLOR[_cat]
+                ax.scatter(_samps / fs, sig_flt[_samps],
+                           color=_col, s=45, zorder=4.5,
+                           marker="v", linewidths=1.0, edgecolors=_col, alpha=0.85,
+                           label=f"Artifact removed ({_cat})")
 
             # ── Hover preview (edit mode — shows snapped R-peak position) ───
             if edit_mode and hover_samp is not None and sig_flt is not None:
@@ -388,8 +521,8 @@ class PlotController:
             if not raw_only:
                 ax.axhline(t_amp, color=PLOT["threshold"], lw=1.4, ls="--",
                            label=f"Threshold ({t_amp:.3f})")
-            ax.set_xlabel("Time (s)")
-            ax.set_ylabel("Amplitude (norm.)")
+            ax.set_xlabel("Time (s)", fontsize=11, fontweight="bold")
+            ax.set_ylabel("Amplitude (norm.)", fontsize=11, fontweight="bold")
             filter_tag    = ""   # no_filter is the default — no need for a warning tag
             inverted_tag  = "  ·  ↕ auto-inverted" if signal_inverted else ""
             if edit_mode:
@@ -683,7 +816,7 @@ class PlotController:
                 self.app.tabs.set("Detection")
             except Exception as e:
                 log.debug("tabs.set Detection failed: %s", e)
-            self.draw_detail()
+            self.app._draw_detail()
             if spike_info:
                 self.app._set_status(f"Navigation → {spike_info}", AMBER)
 
@@ -1080,6 +1213,13 @@ class PlotController:
             n_beats = len(picks)
             from matplotlib.gridspec import GridSpec
             ratios = [1] * n_beats + [0.55]
+            # This figure now arrives from CanvasSlot with constrained_layout
+            # active, which would recompute/override the explicit margins
+            # below -- opt this one figure out so they stay pixel-identical.
+            try:
+                fig.set_layout_engine(None)
+            except Exception as exc:
+                log.debug("draw_ecg_preview: set_layout_engine(None) failed: %s", exc)
             gs = GridSpec(1, n_beats + 1, figure=fig,
                           width_ratios=ratios,
                           left=0.06, right=0.98, top=0.88, bottom=0.12,
@@ -1309,7 +1449,13 @@ class PlotController:
         def draw_intervals(fig):
             from matplotlib.gridspec import GridSpec
             n_cols = len(col_data)
-            # Use explicit GridSpec to avoid constrained_layout conflicts
+            # This figure now arrives from CanvasSlot with constrained_layout
+            # active, which would recompute/override the explicit margins
+            # below -- opt this one figure out so they stay pixel-identical.
+            try:
+                fig.set_layout_engine(None)
+            except Exception as exc:
+                log.debug("draw_intervals: set_layout_engine(None) failed: %s", exc)
             gs = GridSpec(1, n_cols, figure=fig,
                           left=0.10, right=0.97, top=0.88, bottom=0.08,
                           wspace=0.40)
@@ -1827,10 +1973,15 @@ class PlotController:
     def reset_kpis(self) -> None:
         """Reset all KPI labels to dash when results are invalidated."""
         for key in ("hr_mean", "hr_range", "rr_mean", "n_beats",
-                    "sdnn", "rmssd", "pnn50", "dur"):
+                    "sdnn", "rmssd", "pnn50", "dur",
+                    "sq_score", "sq_corr", "sq_badbeats", "sq_artifact"):
             widget = self.app._kpi.get(key)
             if widget is not None:
                 widget.configure(text="--")
+        for key in ("hr_mean", "n_beats", "dur"):
+            widget = self.app._topbar_vals.get(key)
+            if widget is not None:
+                widget.configure(text="—")
 
     def update_kpis(self) -> None:
         if self.app.analysis.results is None:
@@ -1846,11 +1997,15 @@ class PlotController:
             except Exception:
                 return "—"
 
-        self.app._kpi["hr_mean"].configure(text=f"{hr['mean']:.0f} bpm")
+        # Value text is bare (no unit suffix) -- units are baked into the
+        # stat-panel tiles once at construction (make_stat_tile's unit=),
+        # so the value stays the visually-prominent element per the redesign
+        # brief ("valeurs numériques mises en évidence, unités discrètes").
+        self.app._kpi["hr_mean"].configure(text=f"{hr['mean']:.0f}")
         self.app._kpi["hr_range"].configure(text=f"{hr['min']:.0f}–{hr['max']:.0f}")
         try:
             rr_mean = float(np.nanmean(r["rr_ms"]))
-            self.app._kpi["rr_mean"].configure(text=f"{rr_mean:.0f} ms")
+            self.app._kpi["rr_mean"].configure(text=f"{rr_mean:.0f}")
         except Exception:
             self.app._kpi["rr_mean"].configure(text="—")
         n_valid = hr.get("n_valid", hr["n"])
@@ -1858,10 +2013,56 @@ class PlotController:
         self.app._kpi["sdnn"].configure(text=hrv_val("HRV_SDNN"))
         self.app._kpi["rmssd"].configure(text=hrv_val("HRV_RMSSD"))
         self.app._kpi["pnn50"].configure(text=hrv_val("HRV_pNN6"))
+        dur_text = "—"
         try:
-            self.app._kpi["dur"].configure(text=f"{rdf['Time_s'].iloc[-1]:.0f} s")
+            dur_text = f"{rdf['Time_s'].iloc[-1]:.0f}"
+            self.app._kpi["dur"].configure(text=dur_text)
         except Exception:
             self.app._kpi["dur"].configure(text="—")
+
+        # Top-bar compact mirrors of the 3 values shown there (§1 of the
+        # Phase 1 plan) -- same source numbers as the tiles above, just a
+        # second, smaller display in the full-width top bar.
+        for key, widget in self.app._topbar_vals.items():
+            src = self.app._kpi.get(key)
+            if src is not None:
+                widget.configure(text=src.cget("text"))
+
+        # ── Signal Quality tiles ────────────────────────────────────────────
+        # Duplicates plot_summary()'s cheap ~6-line computation
+        # (plot_controller.py, Summary-tab redraw) rather than sharing a
+        # helper -- that method runs on a different/deferred schedule and
+        # must keep working completely unchanged; this is a deliberate small
+        # duplication traded for zero risk to the existing Summary tab.
+        beat_corr = r.get("beat_corr")
+        n_beats_c = len(beat_corr) if beat_corr is not None else 0
+        mean_corr = float(np.nanmean(beat_corr)) if n_beats_c else float("nan")
+        n_bad     = int(np.sum(beat_corr < 0.90)) if n_beats_c else 0
+
+        score = self.app.detection.sig_quality
+        self.app._kpi["sq_score"].configure(text=f"{score}" if score is not None else "—")
+        self.app._kpi["sq_corr"].configure(
+            text=f"{mean_corr:.3f}" if np.isfinite(mean_corr) else "—")
+        self.app._kpi["sq_badbeats"].configure(
+            text=f"{100.0 * n_bad / n_beats_c:.1f}%  ({n_bad}/{n_beats_c})"
+            if n_beats_c else "—")
+
+        arep = self.app.analysis.artifact_report
+        if arep:
+            removed = arep["n_in"] - arep["n_out"]
+            self.app._kpi["sq_artifact"].configure(
+                text=f"{removed}  ({arep['n_duplicate']} dup · "
+                     f"{arep['n_nonphysio']} non-physio · {arep['n_ectopic']} ectopic)")
+        else:
+            self.app._kpi["sq_artifact"].configure(text="not applied")
+
+        # Repaint the gauge too -- covers the case where update_kpis() is the
+        # only thing that ran (e.g. _rebuild_ui()'s trailing call, where the
+        # gauge widget was just destroyed/recreated but sig_quality survived
+        # as plain data). update_signal_quality() also calls this directly
+        # for the real-time-computation path (detection_controller.py).
+        if self.app.quality_gauge is not None:
+            update_quality_gauge(self.app.quality_gauge, score)
 
     def redraw_annotations(self) -> None:
         """Re-render the RR tachogram to reflect updated annotations."""

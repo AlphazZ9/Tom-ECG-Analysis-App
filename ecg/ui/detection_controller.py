@@ -18,6 +18,7 @@ from ecg.core.detection import apply_threshold
 from ecg.ui.theme import (
     BLUE, BLUE_HOVER, BORDER, BORDER2, GREEN, MUTED, ORANGE, ORANGE_DEEP, RED,
 )
+from ecg.ui.widgets import update_quality_gauge
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
@@ -144,8 +145,17 @@ class DetectionController:
 
         self.app.detection.sig_quality = quality
         color = GREEN if quality >= 70 else (ORANGE if quality >= 40 else RED)
-        self.app.after(0, lambda q=quality, c=color:
-                   self.app.lbl_quality.configure(text=f"Signal quality: {q}%", text_color=c))
+
+        def _update_gauge(q=quality, c=color) -> None:
+            self.app.lbl_quality.configure(text=f"Signal quality: {q}%", text_color=c)
+            # lbl_quality IS the gauge's caption label (see app._build_top_bar) --
+            # this immediately overwrites the line above with the finer
+            # Excellent/Good/Medium/Poor tiering, which is the intended
+            # visible result; the line above needs no changes of its own.
+            if self.app.quality_gauge is not None:
+                update_quality_gauge(self.app.quality_gauge, q)
+
+        self.app.after(0, _update_gauge)
 
     def on_det_method_change(self, choice: str) -> None:
         """Show/hide SG options frame based on selected detection method."""
@@ -186,8 +196,8 @@ class DetectionController:
                     except Exception as e:
                         log.debug("_set_state_recursive failed: %s", e)
             _set_state_recursive(self.app._filter_widgets_frame)
-            if self.app._adv_filters_frame is not None:
-                _set_state_recursive(self.app._adv_filters_frame)
+            if self.app._adv_filters_group is not None:
+                _set_state_recursive(self.app._adv_filters_group)
 
     def on_show_raw_toggle(self) -> None:
         """Switch the overview and detail plots between raw and filtered signals.

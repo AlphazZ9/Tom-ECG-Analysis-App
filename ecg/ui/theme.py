@@ -12,6 +12,7 @@ references (captured at import time) stay current.
 """
 from __future__ import annotations
 
+import colorsys
 import dataclasses
 import json
 import logging
@@ -327,30 +328,121 @@ LIGHT   = THEME._colors.get("LIGHT",   "#AEAEB2")
 TEXT    = THEME._colors.get("TEXT",    "#1D1D1F")
 
 # ── Extended colour palette (hover states, domain-specific accents) ──────
-BLUE_DARK    = "#1565C0"   # dark variant of BLUE (titles, active states)
-BLUE_HOVER   = "#1344A8"   # hover state for BLUE buttons
-BLUE_MID     = "#2196F3"   # mid-tone blue (info badges)
-BLUE_DEEP    = "#0D47A1"   # deep navy blue
-PURPLE       = "#6A1B9A"   # interpretation / annotation accent
-PURPLE_DARK  = "#4A148C"   # darker purple (annotation button)
-PINK         = "#AD1457"   # PR / cardiac axis accent
-TEAL         = "#26A69A"   # HRV / frequency domain accent
-CYAN         = "#00BCD4"   # nonlinear metrics accent
-CYAN_BRIGHT  = "#00E5FF"   # Poincaré / scatter accent
-GREEN_DARK   = "#2E7D32"   # QRS / normal range accent
-GREEN_MID    = "#4CAF50"   # healthy threshold indicator
-ORANGE_DARK  = "#E65100"   # RR / heart-rate accent
-ORANGE_DEEP  = "#BF360C"   # QTc / deep orange accent
-AMBER        = "#FF9800"   # warning / marginal value
-AMBER_DARK   = "#FF6F00"   # QT dispersion accent
-RED_DARK     = "#B71C1C"   # arrhythmia / danger hover
-RED_MID      = "#F44336"   # arrhythmia mid-tone
-RED_LIGHT    = "#EF5350"   # arrhythmia light tone
-CORAL        = "#FF7043"   # rolling HRV accent
-NAVY         = "#1A1A2E"   # dark background accent
-GRAY         = "#888888"   # neutral / disabled text
-GRAY_LIGHT   = "#E0E0E0"   # light separator / disabled bg
+# Base (light-mode) hex values -- dark-mode variants are derived
+# algorithmically by _adapt_for_mode()/_apply_extended_palette() below,
+# computed once at import time and again in apply_theme_config(), rather
+# than hand-tuned per preset: none of these historically varied with
+# light/dark at all (unlike BG/PANEL/BLUE/... above, which come from
+# THEME.PRESETS and already have real per-preset light+dark values).
+_EXTENDED_PALETTE_BASE: "dict[str, str]" = {
+    "BLUE_DARK":   "#1565C0",   # dark variant of BLUE (titles, active states)
+    "BLUE_HOVER":  "#1344A8",   # hover state for BLUE buttons
+    "BLUE_MID":    "#2196F3",   # mid-tone blue (info badges)
+    "BLUE_DEEP":   "#0D47A1",   # deep navy blue
+    "PURPLE":      "#6A1B9A",   # interpretation / annotation accent
+    "PURPLE_DARK": "#4A148C",   # darker purple (annotation button)
+    "PURPLE_LIGHT": "#AB47BC",  # artifact-review "duplicate" marker accent
+    "PINK":        "#AD1457",   # PR / cardiac axis accent
+    "TEAL":        "#26A69A",   # HRV / frequency domain accent
+    "TEAL_DARK":   "#00695C",   # hover state for TEAL buttons (Compare Segments)
+    "CYAN":        "#00BCD4",   # nonlinear metrics accent
+    "CYAN_BRIGHT": "#00E5FF",   # Poincaré / scatter accent
+    "GREEN_DARK":  "#2E7D32",   # QRS / normal range accent
+    "GREEN_MID":   "#4CAF50",   # healthy threshold indicator
+    "ORANGE_DARK": "#E65100",   # RR / heart-rate accent
+    "ORANGE_DEEP": "#BF360C",   # QTc / deep orange accent
+    "AMBER":       "#FF9800",   # warning / marginal value
+    "AMBER_DARK":  "#FF6F00",   # QT dispersion accent
+    "RED_DARK":    "#B71C1C",   # arrhythmia / danger hover
+    "RED_MID":     "#F44336",   # arrhythmia mid-tone
+    "RED_LIGHT":   "#EF5350",   # arrhythmia light tone
+    "CORAL":       "#FF7043",   # rolling HRV accent
+    "NAVY":        "#1A1A2E",   # dark background accent
+    "GRAY":        "#888888",   # neutral / disabled text
+    "GRAY_LIGHT":  "#E0E0E0",   # light separator / disabled bg
+}
 
+
+def _adapt_for_mode(hex_val: str, is_dark: bool) -> str:
+    """Lighten an extended-palette colour for dark mode; unchanged in light.
+
+    These accents never varied with the theme preset before. Rather than
+    hand-tune 24 colours x 8 presets, bump HSL lightness by a fixed amount
+    in dark mode so they stay legible/vivid against dark backgrounds
+    instead of looking identical to (and often too dark/muddy on) light
+    ones. Light mode returns hex_val unchanged, so the default theme's
+    rendering is byte-for-byte the same as before this function existed.
+    """
+    if not is_dark:
+        return hex_val
+    r = int(hex_val[1:3], 16) / 255.0
+    g = int(hex_val[3:5], 16) / 255.0
+    b = int(hex_val[5:7], 16) / 255.0
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    r2, g2, b2 = colorsys.hls_to_rgb(h, min(1.0, l + 0.13), s)
+    return "#{:02X}{:02X}{:02X}".format(
+        int(round(r2 * 255)), int(round(g2 * 255)), int(round(b2 * 255)))
+
+
+def _apply_extended_palette(is_dark: bool) -> "dict[str, str]":
+    """(Re)compute every extended-palette global for the given mode.
+
+    Uses globals()[...] rather than a `global` statement + per-name
+    assignment -- every one of these 24 names follows the exact same
+    "look up base value, adapt for dark, done" recipe, so a loop expresses
+    that uniformity directly. globals() here is theme.py's own module
+    dict regardless of the caller, so `from ecg.ui.theme import BLUE_DARK`
+    and _sync_to_submodules()'s getattr/setattr both see real attributes,
+    identical in effect to writing `BLUE_DARK = ...` by hand.
+
+    Also returns the computed dict, so callers that need a specific value
+    right away (the semantic COLOR_* aliases below) can subscript it
+    instead of reading the bare name -- a bare `BLUE_HOVER` reference has
+    no static assignment anywhere in this file (only the dynamic
+    globals()[...] write above), which is invisible to pyflakes and would
+    read as an undefined name in any function that isn't this one.
+    """
+    values = {name: _adapt_for_mode(base, is_dark)
+              for name, base in _EXTENDED_PALETTE_BASE.items()}
+    globals().update(values)
+    return values
+
+
+_EXT = _apply_extended_palette(THEME.is_dark)
+
+
+def _make_artifact_type_color(ext: "dict[str, str]") -> "dict[str, str]":
+    return {"nonphysio": ext["RED_LIGHT"], "ectopic": ext["AMBER"], "duplicate": ext["PURPLE_LIGHT"]}
+
+
+ARTIFACT_TYPE_COLOR: dict[str, str] = _make_artifact_type_color(_EXT)
+
+# ── Semantic action-colour tokens (rationalised palette, UI redesign) ────
+# Aliases onto the already theme-aware core palette above -- not new
+# colours, just names that describe INTENT (primary action / success /
+# warning / danger / secondary) instead of a raw hue, so call sites stop
+# picking colours ad hoc. See _btn()'s variant= parameter in app.py.
+COLOR_PRIMARY         = BLUE
+COLOR_PRIMARY_HOVER   = _EXT["BLUE_HOVER"]
+COLOR_SUCCESS         = GREEN
+COLOR_SUCCESS_HOVER   = _EXT["GREEN_DARK"]
+COLOR_WARNING         = ORANGE
+COLOR_WARNING_HOVER   = _EXT["ORANGE_DARK"]
+COLOR_DANGER          = RED
+COLOR_DANGER_HOVER    = _EXT["RED_DARK"]
+COLOR_SECONDARY       = BORDER
+COLOR_SECONDARY_HOVER = BORDER2
+
+# ── Layout spacing tokens (single source of truth) ────────────────────────
+# Previously duplicated byte-for-byte in app.py (twice) and re-derived with
+# a `_`-prefixed local copy in analysis_controller.py/plots.py/sidebar.py to
+# work around an imagined circular import -- theme.py is a leaf module (it
+# imports nothing from ecg.ui.*), so every one of those modules can import
+# these directly instead.
+SPACE_XS = 2
+SPACE_S  = 4
+SPACE_M  = 8
+SPACE_L  = 12
 
 
 def _make_plot_theme(tc: "ThemeConfig") -> "dict[str, str]":
@@ -394,8 +486,12 @@ def apply_theme_config(tc: "ThemeConfig") -> None:
     """
     global BG, PANEL, CARD, BORDER, BORDER2, RED, BLUE, GREEN, ORANGE
     global MUTED, LIGHT, TEXT, PLOT
+    global COLOR_PRIMARY, COLOR_PRIMARY_HOVER, COLOR_SUCCESS, COLOR_SUCCESS_HOVER
+    global COLOR_WARNING, COLOR_WARNING_HOVER, COLOR_DANGER, COLOR_DANGER_HOVER
+    global COLOR_SECONDARY, COLOR_SECONDARY_HOVER
     global FONT_TITLE, FONT_SECTION_HDR, FONT_LABEL, FONT_SMALL, FONT_BODY, FONT_MONO
-    global FONT_KPI_VALUE, FONT_KPI_LABEL, FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR
+    global FONT_KPI_VALUE, FONT_KPI_LABEL, FONT_KPI_HERO, FONT_BTN_PRIMARY, FONT_BTN_SEC
+    global FONT_SIDEBAR_HDR
     global FONT_MICRO, FONT_HINT, FONT_BADGE, FONT_SUBSECTION, FONT_CARD_TITLE
 
     BG      = tc._colors.get("BG",      BG)
@@ -410,6 +506,22 @@ def apply_theme_config(tc: "ThemeConfig") -> None:
     MUTED   = tc._colors.get("MUTED",   MUTED)
     LIGHT   = tc._colors.get("LIGHT",   LIGHT)
     TEXT    = tc._colors.get("TEXT",    TEXT)
+
+    # Extended palette must be recomputed before the semantic aliases below,
+    # which reference BLUE_HOVER/GREEN_DARK/ORANGE_DARK/RED_DARK from it.
+    _ext = _apply_extended_palette(tc.is_dark)
+    ARTIFACT_TYPE_COLOR.update(_make_artifact_type_color(_ext))
+
+    COLOR_PRIMARY         = BLUE
+    COLOR_PRIMARY_HOVER   = _ext["BLUE_HOVER"]
+    COLOR_SUCCESS         = GREEN
+    COLOR_SUCCESS_HOVER   = _ext["GREEN_DARK"]
+    COLOR_WARNING         = ORANGE
+    COLOR_WARNING_HOVER   = _ext["ORANGE_DARK"]
+    COLOR_DANGER          = RED
+    COLOR_DANGER_HOVER    = _ext["RED_DARK"]
+    COLOR_SECONDARY       = BORDER
+    COLOR_SECONDARY_HOVER = BORDER2
 
     plot_theme = _make_plot_theme(tc)
     PLOT.update(plot_theme)
@@ -435,6 +547,7 @@ def apply_theme_config(tc: "ThemeConfig") -> None:
     # Extended scale-aware font tokens
     FONT_KPI_VALUE    = tc.font(14, bold=True)
     FONT_KPI_LABEL    = tc.font(9)
+    FONT_KPI_HERO     = tc.font(20, bold=True)
     FONT_BTN_PRIMARY  = tc.font(13, bold=True)
     FONT_BTN_SEC      = tc.font(11)
     FONT_SIDEBAR_HDR  = tc.font(11, bold=True)
@@ -468,6 +581,7 @@ FONT_MONO         = THEME.mono_font(12)
 # Extended scale-aware font tokens
 FONT_KPI_VALUE    = make_font(14, bold=True)
 FONT_KPI_LABEL    = make_font(9)
+FONT_KPI_HERO     = make_font(20, bold=True)  # one emphasized number in a stat grid
 FONT_BTN_PRIMARY  = make_font(13, bold=True)
 FONT_BTN_SEC      = make_font(11)
 FONT_SIDEBAR_HDR  = make_font(11, bold=True)
@@ -494,14 +608,19 @@ def _sync_to_submodules() -> None:
         "BG", "PANEL", "CARD", "BORDER", "BORDER2",
         "RED", "BLUE", "GREEN", "ORANGE", "MUTED", "LIGHT", "TEXT", "PLOT",
         "BLUE_DARK", "BLUE_HOVER", "BLUE_MID", "BLUE_DEEP",
-        "PURPLE", "PURPLE_DARK", "PINK", "TEAL", "CYAN", "CYAN_BRIGHT",
+        "PURPLE", "PURPLE_DARK", "PURPLE_LIGHT", "PINK", "TEAL", "TEAL_DARK", "CYAN", "CYAN_BRIGHT",
         "GREEN_DARK", "GREEN_MID", "ORANGE_DARK", "ORANGE_DEEP",
         "AMBER", "AMBER_DARK", "RED_DARK", "RED_MID", "RED_LIGHT",
         "CORAL", "NAVY", "GRAY", "GRAY_LIGHT",
+        # Semantic action-colour tokens (rationalised palette, UI redesign)
+        "COLOR_PRIMARY", "COLOR_PRIMARY_HOVER", "COLOR_SUCCESS", "COLOR_SUCCESS_HOVER",
+        "COLOR_WARNING", "COLOR_WARNING_HOVER", "COLOR_DANGER", "COLOR_DANGER_HOVER",
+        "COLOR_SECONDARY", "COLOR_SECONDARY_HOVER",
+        "ARTIFACT_TYPE_COLOR",
     )
     _font_names = (
         "FONT_TITLE", "FONT_SECTION_HDR", "FONT_LABEL", "FONT_SMALL",
-        "FONT_BODY", "FONT_MONO", "FONT_KPI_VALUE", "FONT_KPI_LABEL",
+        "FONT_BODY", "FONT_MONO", "FONT_KPI_VALUE", "FONT_KPI_LABEL", "FONT_KPI_HERO",
         "FONT_BTN_PRIMARY", "FONT_BTN_SEC", "FONT_SIDEBAR_HDR",
         "FONT_MICRO", "FONT_HINT", "FONT_BADGE", "FONT_SUBSECTION", "FONT_CARD_TITLE",
     )
@@ -527,6 +646,9 @@ def _sync_to_submodules() -> None:
         "ecg.ui.plot_controller", "ecg.ui.session_controller",
         "ecg.ui.detection_controller", "ecg.ui.signal_controller",
         "ecg.ui.analysis_controller",
+        # New in the UI redesign (Phase 0) -- same requirement as every
+        # module above: it imports colour/font names at module scope.
+        "ecg.ui.widgets",
     )
     _this = sys.modules[__name__]
     _all  = _colour_names + _font_names

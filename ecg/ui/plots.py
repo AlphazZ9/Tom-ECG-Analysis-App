@@ -25,16 +25,9 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.backends._backend_tk import NavigationToolbar2Tk  # noqa: PLC2701
 import tkinter as tk
 
-from ecg.ui.theme import PLOT, PANEL
+from ecg.ui.theme import PLOT, PANEL, SPACE_XS, SPACE_S, SPACE_M
 
 log = logging.getLogger("ecg")
-
-# Échelle d'espacement locale — miroir des constantes SPACE_* définies dans
-# app.py (non importables ici sans dépendance circulaire). Garder les deux
-# synchronisées si la grille d'espacement de l'app évolue.
-_SPACE_XS = 2
-_SPACE_S  = 4
-_SPACE_M  = 8
 
 # Apply matplotlib defaults once at import time
 plt.rcParams.update({
@@ -173,7 +166,7 @@ class CanvasSlot:
             self._bar.pack_propagate(False)
 
             tk.Label(self._bar, text="Y:", bg=_BAR_BG, fg=_LABEL_FG,
-                     font=("DejaVu Sans", 8)).pack(side="left", padx=(_SPACE_M, _SPACE_XS))
+                     font=("DejaVu Sans", 8)).pack(side="left", padx=(SPACE_M, SPACE_XS))
 
             # Min entry
             self._var_ylo = tk.StringVar(value="auto")
@@ -182,7 +175,7 @@ class CanvasSlot:
                 width=7, bg=_ENTRY_BG, fg=_ENTRY_FG, relief="flat",
                 highlightbackground=_ENTRY_BD, highlightthickness=1,
                 insertbackground=_ENTRY_FG, font=("DejaVu Sans", 8))
-            self._ent_ylo.pack(side="left", padx=(0, _SPACE_XS), pady=_SPACE_S)
+            self._ent_ylo.pack(side="left", padx=(0, SPACE_XS), pady=SPACE_S)
 
             tk.Label(self._bar, text="–", bg=_BAR_BG,
                      fg=_LABEL_FG, font=("DejaVu Sans", 8)).pack(side="left")
@@ -194,7 +187,7 @@ class CanvasSlot:
                 width=7, bg=_ENTRY_BG, fg=_ENTRY_FG, relief="flat",
                 highlightbackground=_ENTRY_BD, highlightthickness=1,
                 insertbackground=_ENTRY_FG, font=("DejaVu Sans", 8))
-            self._ent_yhi.pack(side="left", padx=(_SPACE_XS, _SPACE_M), pady=_SPACE_S)
+            self._ent_yhi.pack(side="left", padx=(SPACE_XS, SPACE_M), pady=SPACE_S)
 
             # Auto reset button
             auto_btn = tk.Button(
@@ -202,12 +195,12 @@ class CanvasSlot:
                 relief="flat", cursor="hand2",
                 font=("DejaVu Sans", 8), activebackground=_ENTRY_BD,
                 command=self._on_yscale_auto)
-            auto_btn.pack(side="left", padx=(0, _SPACE_S))
+            auto_btn.pack(side="left", padx=(0, SPACE_S))
 
             tk.Label(self._bar,
                      text="(edit Y min/max then press Enter  ·  or use toolbar zoom)",
                      bg=_BAR_BG, fg=_LABEL_FG,
-                     font=("DejaVu Sans", 7)).pack(side="left", padx=(_SPACE_S, 0))
+                     font=("DejaVu Sans", 7)).pack(side="left", padx=(SPACE_S, 0))
 
             # Bind Enter / FocusOut on both entries
             for ent in (self._ent_ylo, self._ent_yhi):
@@ -223,7 +216,7 @@ class CanvasSlot:
 
         self.fig = matplotlib.figure.Figure(
             figsize=(width, height), dpi=self._DPI,
-            facecolor=PLOT["bg"])
+            facecolor=PLOT["bg"], layout="constrained")
         self._set_cl_pads()
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=self._cv_frame)

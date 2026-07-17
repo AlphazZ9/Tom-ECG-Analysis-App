@@ -21,7 +21,7 @@ import pandas as pd
 from ecg.core.models import FilterParams, EXPERIMENTAL_CONTEXTS
 from ecg.io.loaders import load_mat_signal, _serialise_results, _deserialise_results
 from ecg.io.session import load_session, save_session, delete_session
-from ecg.io.db import _DB_AVAILABLE, upsert_recording
+from ecg.io.db import _DB_AVAILABLE, upsert_recording, set_verified
 from ecg.core.ml_detector import save_training_sample, delete_training_sample
 from ecg.ui.theme import THEME, BLUE, GREEN, MUTED
 
@@ -163,9 +163,11 @@ class SessionController:
             "verified_for_training": bool(state.get("verified_for_training", False)),
             "results":          _deserialise_results(results_raw) if results_raw else None,
             "artifact_report":  state.get("artifact_report"),
+            "artifact_candidates": state.get("artifact_candidates", []),
             "epoch_df":         pd.DataFrame(epoch_raw)   if epoch_raw   is not None else None,
             "rolling_hrv_df":   pd.DataFrame(rolling_raw) if rolling_raw is not None else None,
             "annotations":      list(state.get("annotations", [])),
+            "pacing_periods":   list(state.get("pacing_periods", [])),
             "analysis_t_start": float(state.get("analysis_t_start", 0.0)),
             "analysis_t_end":   float(state.get("analysis_t_end",   0.0)),
             "exp_context":      state.get("exp_context", "telemetry_awake"),
@@ -220,9 +222,11 @@ class SessionController:
         # ── Restore analysis results (DataFrames already deserialised) ───
         self.app.analysis.results         = bundle["results"]
         self.app.analysis.artifact_report = bundle["artifact_report"]
+        self.app.analysis.artifact_candidates = bundle["artifact_candidates"]
         self.app.analysis.epoch_df        = bundle["epoch_df"]
         self.app.analysis.rolling_hrv_df  = bundle["rolling_hrv_df"]
         self.app.analysis.annotations     = list(bundle["annotations"])
+        self.app.analysis.pacing_periods  = list(bundle["pacing_periods"])
 
         self.app.analysis.t_start = bundle["analysis_t_start"]
         self.app.analysis.t_end   = bundle["analysis_t_end"]
@@ -284,6 +288,7 @@ class SessionController:
         # ── Render ───────────────────────────────────────────────────────
         self.app._draw_detail(self.app.ui.nav_pos)
         self.app._update_ann_count()
+        self.app._update_pacing_count()
         # Restore active tab
         try:
             saved_tab = bundle["current_tab"]
@@ -367,75 +372,166 @@ class SessionController:
             state["results"] = _serialise_results(self.app.analysis.results)
         if self.app.analysis.artifact_report is not None:
             state["artifact_report"] = self.app.analysis.artifact_report
+        if self.app.analysis.artifact_candidates:
+            state["artifact_candidates"] = self.app.analysis.artifact_candidates
         if self.app.analysis.epoch_df is not None and not self.app.analysis.epoch_df.empty:
             state["epoch_df"] = self.app.analysis.epoch_df.to_dict(orient="list")
         if self.app.analysis.rolling_hrv_df is not None and not self.app.analysis.rolling_hrv_df.empty:
             state["rolling_hrv_df"] = self.app.analysis.rolling_hrv_df.to_dict(orient="list")
         if self.app.analysis.annotations:
             state["annotations"] = self.app.analysis.annotations
+        if self.app.analysis.pacing_periods:
+            state["pacing_periods"] = self.app.analysis.pacing_periods
         return state
 
+    def save_for_training_only(self) -> None:
+        """Cache this recording's corrected R-peaks as ML training data only.
+
+        Lighter-weight alternative to save_session() for a user who wants
+        to contribute training data right away -- mid-review, or before
+        full analysis results exist -- without writing a .ecgsession file
+        or computing/storing export stats. Sets the same verified flag
+        save_session() would (DB + in-memory state + sidebar switch), so
+        a later Save Session on this file is a no-op for the ML cache.
+
+        Runs in the background via _start_async: feature extraction over
+        the whole signal is the single most expensive step in this whole
+        feature (see save_session_worker's docstring), and this button
+        exists specifically to trigger it on demand, so it must not
+        freeze the UI either.
+        """
+        if self.app.signal.filepath is None:
+            messagebox.showwarning("No file", "Open a file first.")
+            return
+        if self.app.signal.filtered is None or self.app.detection.rpeaks_ok is None:
+            messagebox.showwarning("Not ready", "Run Preview Detection first.")
+            return
+        self.app._start_async(
+            self.app.btn_save_for_training, "Saving…", "Saving training data…",
+            self.save_for_training_worker,
+            self.on_save_for_training_done,
+            pass_result=True,
+        )
+
+    def save_for_training_worker(self) -> dict:
+        """Background worker for save_for_training_only -- no widget access."""
+        def _prog(pct: int, msg: str) -> None:
+            self.app.after(0, lambda p=pct, m=msg: self.app._set_progress(p, m))
+
+        filepath = self.app.signal.filepath
+        from ecg.io.session import _file_fingerprint
+        fp = _file_fingerprint(filepath)
+        n_cand = save_training_sample(
+            fp, self.app.signal.filtered, self.app.signal.fs,
+            self.app.detection.rpeaks_ok, progress_cb=_prog)
+        if _DB_AVAILABLE:
+            set_verified(filepath, True)
+        return {"n_cand": n_cand}
+
+    def on_save_for_training_done(self, result: dict) -> None:
+        """Main thread: sync state/widgets after save_for_training_worker."""
+        self.app.session.verified_for_training = True
+        self.sync_verified_switch()
+        self.app.refresh_ml_status()
+        self.app._set_status(
+            f"Training data saved — {result['n_cand']} candidates cached "
+            "(session not saved).", GREEN)
+
     def save_session(self) -> None:
-        """Serialise full analysis state to a .ecgsession cache file and update registry."""
+        """Serialise full analysis state to a .ecgsession cache file and update registry.
+
+        collect_session_state() reads widget values, so it must stay on
+        the main thread; everything after that point (JSON write, sqlite
+        upsert, ML training-cache refresh) only touches plain self.app.*
+        dataclass state, so it runs in a background thread via
+        _start_async -- mirroring the _preview_worker / _on_preview_done
+        split. This used to run entirely on the main thread and would
+        visibly freeze the UI, worst case when "Verified for training" is
+        on: save_training_sample() runs full-signal candidate generation
+        + feature extraction inline, which is the single most expensive
+        step in this whole feature.
+        """
         if self.app.signal.filepath is None:
             messagebox.showwarning("No file", "Open a file first.")
             return
         if self.app.signal.filtered is None:
             messagebox.showwarning("Not ready", "Run Preview Detection first.")
             return
+
+        state = self.collect_session_state()   # main-thread widget reads
+
+        self.app._start_async(
+            self.app.btn_save_session, "Saving…", "Saving session…",
+            lambda: self.save_session_worker(state),
+            self.on_save_session_done,
+            pass_result=True,
+        )
+
+    def save_session_worker(self, state: dict) -> dict:
+        """Background worker for save_session -- MUST NOT touch Tkinter widgets."""
+        def _prog(pct: int, msg: str) -> None:
+            self.app.after(0, lambda p=pct, m=msg: self.app._set_progress(p, m))
+
+        filepath = self.app.signal.filepath
+
+        _prog(5, "Writing session file…")
+        out_path = save_session(filepath, state)
+
+        from ecg.io.session import _file_fingerprint
+        fp = _file_fingerprint(filepath)
+
+        # ── SQLite registry upsert ────────────────────────────────────
+        if _DB_AVAILABLE:
+            _prog(20, "Updating registry…")
+            _stats: dict = {}
+            if self.app.analysis.results:
+                _rdf = self.app.analysis.results.get("rr_df")
+                _hrv = self.app.analysis.results.get("hrv_td")
+                if _rdf is not None and len(_rdf):
+                    _stats["hr_mean"] = float(_rdf["HR_bpm"].mean())
+                if _hrv is not None and "HRV_SDNN" in _hrv.columns:
+                    _stats["sdnn"]  = float(_hrv["HRV_SDNN"].values[0])
+                if _hrv is not None and "HRV_RMSSD" in _hrv.columns:
+                    _stats["rmssd"] = float(_hrv["HRV_RMSSD"].values[0])
+                if self.app.signal.time is not None and self.app.signal.fs:
+                    _stats["duration_s"] = float(len(self.app.signal.time)) / self.app.signal.fs
+                if self.app.detection.rpeaks_ok is not None:
+                    _stats["n_peaks"] = int(len(self.app.detection.rpeaks_ok))
+            upsert_recording(
+                filepath=filepath,
+                fingerprint=fp,
+                session_path=str(out_path),
+                stats=_stats,
+                notes=self.app.session.recording_notes,
+                verified_for_training=self.app.session.verified_for_training,
+            )
+
+        # ── ML training-data cache ─────────────────────────────────────
+        # Independent of the sqlite registry -- the .npz cache is the
+        # only thing Train/Retrain reads, so it must be kept in sync
+        # here even when _DB_AVAILABLE is False.
+        n_cand = None
         try:
-            self.app._set_status("Saving session…", MUTED)
-            state    = self.collect_session_state()
-            out_path = save_session(self.app.signal.filepath, state)
-            saved_at = state["saved_at"]
-            self.app.session.dirty = False
-            self.update_session_ui(has_session=True, saved_at=saved_at)
-            from ecg.io.session import _file_fingerprint
-            _fp = _file_fingerprint(self.app.signal.filepath)
-            # ── SQLite registry upsert ────────────────────────────────────
-            if _DB_AVAILABLE:
-                _stats: dict = {}
-                if self.app.analysis.results:
-                    _rdf = self.app.analysis.results.get("rr_df")
-                    _hrv = self.app.analysis.results.get("hrv_td")
-                    if _rdf is not None and len(_rdf):
-                        _stats["hr_mean"] = float(_rdf["HR_bpm"].mean())
-                    if _hrv is not None and "HRV_SDNN" in _hrv.columns:
-                        _stats["sdnn"]  = float(_hrv["HRV_SDNN"].values[0])
-                    if _hrv is not None and "HRV_RMSSD" in _hrv.columns:
-                        _stats["rmssd"] = float(_hrv["HRV_RMSSD"].values[0])
-                    if self.app.signal.time is not None and self.app.signal.fs:
-                        _stats["duration_s"] = float(len(self.app.signal.time)) / self.app.signal.fs
-                    if self.app.detection.rpeaks_ok is not None:
-                        _stats["n_peaks"] = int(len(self.app.detection.rpeaks_ok))
-                upsert_recording(
-                    filepath=self.app.signal.filepath,
-                    fingerprint=_fp,
-                    session_path=str(out_path),
-                    stats=_stats,
-                    notes=self.app.session.recording_notes,
-                    verified_for_training=self.app.session.verified_for_training,
-                )
-            # ── ML training-data cache ─────────────────────────────────────
-            # Independent of the sqlite registry -- the .npz cache is the
-            # only thing Train/Retrain reads, so it must be kept in sync
-            # here even when _DB_AVAILABLE is False.
-            try:
-                if self.app.session.verified_for_training and self.app.detection.rpeaks_ok is not None:
-                    n_cand = save_training_sample(
-                        _fp, self.app.signal.filtered, self.app.signal.fs,
-                        self.app.detection.rpeaks_ok)
-                    log.info("ML training sample cached for %s (%d candidates)",
-                              self.app.signal.filepath, n_cand)
-                else:
-                    delete_training_sample(_fp)
-            except Exception as exc:
-                log.warning("ML training-data cache update failed: %s", exc)
-            self.app.refresh_ml_status()
-            self.app._set_status(f"Session saved — {Path(out_path).name}", GREEN)
+            if self.app.session.verified_for_training and self.app.detection.rpeaks_ok is not None:
+                n_cand = save_training_sample(
+                    fp, self.app.signal.filtered, self.app.signal.fs,
+                    self.app.detection.rpeaks_ok, progress_cb=_prog)
+                log.info("ML training sample cached for %s (%d candidates)",
+                          filepath, n_cand)
+            else:
+                delete_training_sample(fp)
         except Exception as exc:
-            log.exception("_save_session failed")
-            messagebox.showerror("Save failed", str(exc))
+            log.warning("ML training-data cache update failed: %s", exc)
+
+        _prog(100, "Done")
+        return {"out_path": out_path, "saved_at": state["saved_at"]}
+
+    def on_save_session_done(self, result: dict) -> None:
+        """Main thread: write UI state after save_session_worker completes."""
+        self.app.session.dirty = False
+        self.update_session_ui(has_session=True, saved_at=result["saved_at"])
+        self.app.refresh_ml_status()
+        self.app._set_status(f"Session saved — {Path(result['out_path']).name}", GREEN)
 
     def delete_session(self) -> None:
         """Delete the session cache file for the current file."""
@@ -504,7 +600,7 @@ class SessionController:
     def snapshot_ui_state(self) -> dict:
         """Capture all editable widget values before a UI rebuild."""
         s: dict = {}
-        for attr in ("ent_channel", "ent_subject", "ent_fs", "ent_t_start",
+        for attr in ("ent_project_name", "ent_channel", "ent_subject", "ent_fs", "ent_t_start",
                      "ent_t_end", "ent_lp", "ent_hp", "ent_minrr",
                      "ent_epoch", "ent_overlap", "ent_thr", "ent_window",
                      "ent_sg_target_fs", "ent_sg_window_ms"):
@@ -530,10 +626,6 @@ class SessionController:
             s["cb_det_method"] = self.app.cb_det_method.get() if self.app.cb_det_method is not None else "SG + Derivative (10 kHz)"
         except Exception:
             s["cb_det_method"] = "SG + Derivative (10 kHz)"
-        try:
-            s["adv_filters_open"] = getattr(self.app, "_adv_filters_open", False)
-        except Exception:
-            s["adv_filters_open"] = False
         s["exp_context"] = self.app.analysis.exp_context
         try:
             s["current_tab"] = self.app.tabs.get()
@@ -546,7 +638,7 @@ class SessionController:
 
     def restore_ui_state(self, s: dict) -> None:
         """Restore widget values captured before a UI rebuild."""
-        for attr in ("ent_channel", "ent_subject", "ent_fs", "ent_t_start",
+        for attr in ("ent_project_name", "ent_channel", "ent_subject", "ent_fs", "ent_t_start",
                      "ent_t_end", "ent_lp", "ent_hp", "ent_minrr",
                      "ent_epoch", "ent_overlap", "ent_thr", "ent_window",
                      "ent_sg_target_fs", "ent_sg_window_ms"):
@@ -561,6 +653,10 @@ class SessionController:
                 w.insert(0, str(val))
             except Exception as _exc:
                 log.debug("_restore_ui_state entry %s: %s", attr, _exc)
+        # ent_project_name's restored text doesn't auto-propagate to its top-
+        # bar mirror label (that label was just rebuilt fresh at "—") --
+        # explicitly resync it, same as the file-info/peak-count labels below.
+        self.app._on_project_name_change()
 
         sw_map = {
             "sw_show_raw": "sw_show_raw",
@@ -594,13 +690,6 @@ class SessionController:
                 self.app._on_det_method_change(dm)
         except Exception as _exc:
             log.debug("cb_det_method restore: %s", _exc)
-        # Restore advanced-filter panel state
-        try:
-            was_open = bool(s.get("adv_filters_open", False))
-            if was_open != getattr(self.app, "_adv_filters_open", False):
-                self.app._btn_adv_flt.invoke()   # toggles the sub-section
-        except Exception as _exc:
-            log.debug("adv_filters restore: %s", _exc)
         try:
             self.app.tabs.set(s.get("current_tab", "Detection"))
         except Exception as _exc:

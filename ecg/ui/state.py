@@ -86,6 +86,12 @@ class AnalysisState:
     last_seg_a: Optional[dict] = None           # last Compare A result
     last_seg_b: Optional[dict] = None           # last Compare B result
     artifact_report: Optional[dict] = None
+    # Full edited candidate list from the last Artifact Review pass (schema:
+    # {index, sample, type, rr_prev_ms, rr_next_ms, rr_ref_ms, deviation,
+    # decision}) -- kept so draw_detail() can render former peak positions
+    # that were removed. Overwritten (not appended) on every review, exactly
+    # like artifact_report above; only the latest pass's markers are shown.
+    artifact_candidates: list[dict] = field(default_factory=list)
     # Experimental context -- key into EXPERIMENTAL_CONTEXTS
     exp_context: str = "telemetry_awake"
 
@@ -96,6 +102,10 @@ class AnalysisState:
 
     # Time annotations: list of dicts {t_start, t_end, label, color}
     annotations: list[dict] = field(default_factory=list)
+    # Manually-marked pacing/stimulation periods: {t_start, t_end, note}.
+    # Deliberately a separate list from `annotations` above (per product
+    # decision) -- fixed render color, no per-item color choice.
+    pacing_periods: list[dict] = field(default_factory=list)
     wave_template: Optional[WaveTemplate] = None
 
 
@@ -112,6 +122,7 @@ class UIState:
     thr_debounce_id: "str | None" = None        # slider debounce handle
     hover_motion_cid: Optional[int] = None       # mpl event connection id
     hover_after_id: "str | None" = None          # motion debounce handle
+    ov_drag_after_id: "str | None" = None        # minimap drag-to-scrub debounce handle
     beat_nav_cid: Optional[int] = None           # mpl event ID for beat navigator
     rr_click_cid: Optional[int] = None           # mpl event connection id for RR click-to-navigate
     ov_ylim: Optional[tuple] = None              # y-axis zoom cache for overview

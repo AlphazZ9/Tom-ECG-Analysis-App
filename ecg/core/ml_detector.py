@@ -36,7 +36,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 from scipy.signal import find_peaks
@@ -53,6 +53,15 @@ TRAINING_DATA_DIR: Path = SESSION_DIR / "ml_training"
 # Candidate within this many ms of an accepted R-peak counts as a positive
 # training example.
 LABEL_TOLERANCE_MS = 5.0
+
+# find_peaks' `distance` constraint already bounds candidate count to
+# roughly duration_ms / PEAK_DISTANCE_MS (~180k for a 2h recording at the
+# app's default 40ms spacing) -- this cap is a defensive backstop, not the
+# primary control, in case that assumption is ever violated (e.g. a custom
+# PEAK_DISTANCE_MS override, or fs/duration combinations not anticipated
+# here). Tripping it means something is genuinely degenerate about the
+# input, not just "a long recording" -- see detect_peaks_ml's docstring.
+MAX_CANDIDATES = 300_000
 
 FEATURE_NAMES: "list[str]" = [
     "prominence", "amplitude",
@@ -74,14 +83,41 @@ def _generate_candidates(signal: np.ndarray, fs: float) -> np.ndarray:
     file to file. A single, consistent generator keeps the feature
     distribution the classifier sees the same at training-label time and at
     inference time.
+
+    Raises RuntimeError if the signal contains NaN/Inf: np.ptp() propagates
+    NaN into the prominence floor, and scipy's prominence search around
+    non-finite samples is undefined behaviour, not just "slow" -- this was
+    observed to make the whole pipeline hang for minutes on a real
+    recording instead of failing fast, so it's rejected explicitly here
+    rather than silently sanitised (silently dropping/replacing bad
+    samples would hide whatever upstream filtering step produced them).
+    RuntimeError (not ValueError) specifically because signal_controller's
+    ML dispatch branch catches RuntimeError to surface a clear message to
+    the user instead of silently returning 0 peaks.
     """
     if len(signal) == 0:
         return np.array([], dtype=int)
+    n_bad = int(np.count_nonzero(~np.isfinite(signal)))
+    if n_bad:
+        raise RuntimeError(
+            f"Signal contains {n_bad:,} non-finite value(s) (NaN/Inf) -- "
+            "cannot generate ML candidates. This usually means a filter "
+            "step produced invalid output; check the channel/filter "
+            "settings for this recording.")
     distance = max(1, int(round(MouseECG.PEAK_DISTANCE_MS / 1000.0 * fs)))
     sig_range = float(np.ptp(signal))
     prominence_floor = max(1e-9, 0.03 * sig_range)
     peaks, _ = find_peaks(signal, distance=distance, prominence=prominence_floor)
-    return peaks.astype(int)
+    peaks = peaks.astype(int)
+    if len(peaks) > MAX_CANDIDATES:
+        raise RuntimeError(
+            f"ML candidate generation produced {len(peaks):,} candidates, "
+            f"over the {MAX_CANDIDATES:,} safety cap -- this points to a "
+            "degenerate signal (e.g. a very flat/low-amplitude recording "
+            "collapsing the prominence floor) rather than a normal long "
+            "recording. Try a different detector, or check the signal "
+            "quality for this file.")
+    return peaks
 
 
 def extract_features(signal: np.ndarray, candidates: np.ndarray, fs: float) -> np.ndarray:
@@ -196,6 +232,7 @@ def detect_peaks_ml(
     signal: np.ndarray,
     fs: float,
     model: "Optional[MLPeakModel]" = None,
+    progress_cb: "Optional[Callable[[int, str], None]]" = None,
 ) -> "tuple[np.ndarray, np.ndarray, float]":
     """R-peak detection via a trained classifier.
 
@@ -206,8 +243,23 @@ def detect_peaks_ml(
     Raises RuntimeError if no trained model is available (mirrors
     _require_nk()'s pattern in analysis.py) -- the UI layer is responsible
     for catching this and showing a clear "not trained yet" message rather
-    than silently falling back to another detector.
+    than silently falling back to another detector. Also raises (via
+    _generate_candidates) on non-finite input or a pathological candidate
+    count -- both surface through the same UI pathway as "no model yet",
+    rather than grinding silently: a real recording was observed to hang
+    for 600s+ with the previous static "scoring candidates…" message and
+    no candidate-count visibility, indistinguishable from a normal but
+    slow run until it was far too late to tell.
+
+    *progress_cb*, if given, reports real stage checkpoints -- notably the
+    candidate count as soon as it's known, which is the single most useful
+    number for telling "this is just a big recording" apart from "this
+    signal is degenerate" while a run is still in progress.
     """
+    def _prog(pct: int, msg: str) -> None:
+        if progress_cb:
+            progress_cb(pct, msg)
+
     if model is None:
         model = MLPeakModel.load()
     if model is None:
@@ -216,15 +268,20 @@ def detect_peaks_ml(
             "“Verified for training” and use Train / Retrain Model first."
         )
 
+    _prog(5, "Generating candidates…")
     candidates = _generate_candidates(signal, fs)
     if len(candidates) == 0:
         return np.array([], dtype=int), np.array([]), 0.0
 
+    _prog(30, f"{len(candidates):,} candidates — extracting features…")
     feats = extract_features(signal, candidates, fs)
     feats = np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
+
+    _prog(80, f"Classifying {len(candidates):,} candidates…")
     proba = model.estimator.predict_proba(feats)[:, 1]
     peaks = np.sort(candidates[proba >= 0.5])
 
+    _prog(95, "Finalising…")
     prominences = _topographic_prominences(signal, peaks) if len(peaks) else np.array([])
     thresh_amp = float(np.percentile(prominences, 10)) if len(prominences) else 0.0
     return peaks, prominences, thresh_amp
@@ -234,23 +291,40 @@ def detect_peaks_ml(
 #  TRAINING DATA CAPTURE
 # ════════════════════════════════════════════════════════════
 
-def save_training_sample(fingerprint: str, signal: np.ndarray, fs: float,
-                          rpeaks_ok: np.ndarray) -> int:
+def save_training_sample(
+    fingerprint: str, signal: np.ndarray, fs: float,
+    rpeaks_ok: np.ndarray,
+    progress_cb: "Optional[Callable[[int, str], None]]" = None,
+) -> int:
     """Extract features+labels for one verified recording and cache them.
 
     Called once, immediately, when the user marks the currently-open file
     "verified for training" -- signal and rpeaks_ok are already in memory,
     so this never needs to reopen or re-filter anything later.
 
+    *progress_cb*, if given, is called with coarse (pct, message) stage
+    checkpoints -- feature extraction has no natural per-item loop to
+    report finer-grained progress from (it's vectorised, see
+    extract_features), so callers driving a UI progress bar off this
+    should rely on the caller-side heartbeat pulse to fill the gaps.
+
     Returns the number of labeled candidates saved (0 if the signal produced
     no candidates at all).
     """
+    def _prog(pct: int, msg: str) -> None:
+        if progress_cb:
+            progress_cb(pct, msg)
+
+    _prog(10, "Generating candidates…")
     candidates = _generate_candidates(signal, fs)
     if len(candidates) == 0:
         return 0
+    _prog(40, f"Extracting features ({len(candidates):,} candidates)…")
     feats  = extract_features(signal, candidates, fs)
+    _prog(80, "Labeling against corrected R-peaks…")
     labels = _label_candidates(candidates, rpeaks_ok, fs)
 
+    _prog(95, "Writing training cache…")
     TRAINING_DATA_DIR.mkdir(parents=True, exist_ok=True)
     out_path = TRAINING_DATA_DIR / f"{fingerprint}.npz"
     np.savez(out_path, features=feats, labels=labels)

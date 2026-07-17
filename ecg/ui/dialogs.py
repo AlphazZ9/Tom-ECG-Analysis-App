@@ -26,8 +26,8 @@ from ecg.ui.theme import (
     THEME, ThemeConfig, apply_theme_config,
     BG, PANEL, CARD, BORDER, BORDER2, TEXT, MUTED, LIGHT, PLOT,
     RED, BLUE, GREEN, GREEN_DARK, ORANGE, PURPLE, PURPLE_DARK,
-    BLUE_HOVER, RED_DARK, RED_LIGHT, ORANGE_DARK, ORANGE_DEEP,
-    AMBER, GRAY, GRAY_LIGHT,
+    BLUE_HOVER, RED_DARK, ORANGE_DARK, ORANGE_DEEP,
+    GRAY, GRAY_LIGHT, ARTIFACT_TYPE_COLOR,
     FONT_TITLE, FONT_SECTION_HDR, FONT_LABEL, FONT_SMALL,
     FONT_BODY, FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR,
     make_font,
@@ -417,11 +417,6 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
     ``apply_artifact_decisions()``.
     """
 
-    _TYPE_COLOR = {
-        "nonphysio": RED_LIGHT,   # red
-        "ectopic":   AMBER,   # orange
-        "duplicate": "#AB47BC",   # purple
-    }
     _TYPE_LABEL = {
         "nonphysio": "Non-physiological (outside HR bounds)",
         "ectopic":   "Ectopic beat (RR deviation from local median)",
@@ -632,7 +627,7 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
                  f"({sum(1 for x in self._candidates if x['decision'] == 'remove')} to remove)")
 
         type_str = self._TYPE_LABEL.get(c["type"], c["type"])
-        color    = self._TYPE_COLOR.get(c["type"], ORANGE)
+        color    = ARTIFACT_TYPE_COLOR.get(c["type"], ORANGE)
         self.lbl_title.configure(
             text=f"Artifact #{self._idx + 1}  —  {c['type'].capitalize()}",
             text_color=color)
@@ -1025,6 +1020,210 @@ class AnnotationManagerDialog(ctk.CTkToplevel):
         self._app._session_dirty = True
         self._app._draw_detail()
         self._app._update_ann_count()
+        self._refresh()
+
+
+class PacingPeriodDialog(ctk.CTkToplevel):
+    """Modal dialog to add or edit a single pacing/stimulation period.
+
+    Fields: start time (s), end time (s), note text. No colour picker --
+    every pacing period shares one fixed render colour (see draw_detail()).
+    On OK, calls *on_save(period_dict)* with the validated period dict.
+    """
+
+    def __init__(self, parent, on_save: "Callable[[dict], None]",
+                 existing: "Optional[dict]" = None,
+                 t_max: float = 1e6) -> None:
+        super().__init__(parent)
+        self.title("Add pacing period" if existing is None else "Edit pacing period")
+        self.resizable(False, False)
+        self.grab_set()
+        self._on_save = on_save
+        self._t_max   = t_max
+
+        pad = dict(padx=12, pady=6)
+
+        row = 0
+        ctk.CTkLabel(self, text="Start (s):", anchor="e").grid(
+            row=row, column=0, sticky="e", **pad)
+        self._ent_start = ctk.CTkEntry(self, width=110)
+        self._ent_start.insert(0, str((existing or {}).get("t_start", "")))
+        self._ent_start.grid(row=row, column=1, sticky="w", **pad)
+
+        row += 1
+        ctk.CTkLabel(self, text="End (s):", anchor="e").grid(
+            row=row, column=0, sticky="e", **pad)
+        self._ent_end = ctk.CTkEntry(self, width=110)
+        self._ent_end.insert(0, str((existing or {}).get("t_end", "")))
+        self._ent_end.grid(row=row, column=1, sticky="w", **pad)
+
+        row += 1
+        ctk.CTkLabel(self, text="Note:", anchor="e").grid(
+            row=row, column=0, sticky="e", **pad)
+        self._ent_note = ctk.CTkEntry(self, width=220)
+        self._ent_note.insert(0, (existing or {}).get("note", ""))
+        self._ent_note.grid(row=row, column=1, sticky="w", **pad)
+
+        row += 1
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.grid(row=row, column=0, columnspan=2, pady=(4, 10))
+        ctk.CTkButton(btn_frame, text="OK", width=90,
+                      command=self._ok).pack(side="left", padx=6)
+        ctk.CTkButton(btn_frame, text="Cancel", width=90,
+                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+                      command=self.destroy).pack(side="left", padx=6)
+
+        self._ent_start.focus_set()
+        self.bind("<Return>", lambda _: self._ok())
+        self.bind("<Escape>", lambda _: self.destroy())
+
+    def _ok(self) -> None:
+        try:
+            t0 = float(self._ent_start.get())
+            t1 = float(self._ent_end.get())
+        except ValueError:
+            messagebox.showerror("Invalid input", "Start and end must be numbers (seconds).",
+                                 parent=self)
+            return
+        if t0 >= t1:
+            messagebox.showerror("Invalid range",
+                                 "Start must be less than end.", parent=self)
+            return
+        if t0 < 0 or t1 > self._t_max + 1:
+            messagebox.showwarning("Out of range",
+                                   f"Times are outside the recording (0 – {self._t_max:.1f} s).",
+                                   parent=self)
+            return
+        period = {
+            "t_start": round(t0, 4),
+            "t_end":   round(t1, 4),
+            "note":    self._ent_note.get().strip(),
+        }
+        self._on_save(period)
+        self.destroy()
+
+
+class PacingPeriodManagerDialog(ctk.CTkToplevel):
+    """Dialog listing all pacing/stimulation periods with Add/Edit/Delete.
+
+    Shows the full list in a scrollable table; changes are applied
+    immediately to the parent app's _pacing_periods list and the plots
+    are redrawn after each change.
+    """
+
+    ROW_H = 36
+
+    def __init__(self, parent: "ECGApp") -> None:
+        super().__init__(parent)
+        self.title("Pacing Periods")
+        self.geometry("580x420")
+        self.resizable(True, True)
+        self.grab_set()
+        self._app = parent
+
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(side="top", fill="x", padx=10, pady=(8, 4))
+        ctk.CTkButton(bar, text="＋  Add pacing period", width=150,
+                      command=self._add).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(bar, text="✏  Edit selected", width=130,
+                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+                      command=self._edit).pack(side="left", padx=2)
+        ctk.CTkButton(bar, text="🗑  Delete selected", width=140,
+                      fg_color=RED, hover_color=RED_DARK, text_color="white",
+                      command=self._delete).pack(side="left", padx=(6, 0))
+
+        self._list_frame = ctk.CTkScrollableFrame(self, fg_color=CARD)
+        self._list_frame.pack(side="top", fill="both", expand=True,
+                              padx=10, pady=(0, 8))
+
+        self._row_vars: "list[tk.BooleanVar]" = []
+        self._refresh()
+
+    def _refresh(self) -> None:
+        for w in self._list_frame.winfo_children():
+            w.destroy()
+        self._row_vars = []
+
+        periods = self._app._pacing_periods
+        if not periods:
+            ctk.CTkLabel(self._list_frame, text="No pacing periods yet.",
+                         text_color=MUTED).pack(padx=12, pady=20)
+            return
+
+        hdr = ctk.CTkFrame(self._list_frame, fg_color=BORDER, height=28, corner_radius=4)
+        hdr.pack(fill="x", padx=2, pady=(0, 2))
+        for txt, w in [("", 30), ("Start (s)", 90), ("End (s)", 90),
+                       ("Duration", 80), ("Note", 240)]:
+            ctk.CTkLabel(hdr, text=txt, width=w, font=make_font(10, bold=True),
+                         text_color=TEXT).pack(side="left", padx=3)
+
+        for i, pp in enumerate(periods):
+            row = ctk.CTkFrame(self._list_frame,
+                               fg_color=CARD if i % 2 == 0 else BG,
+                               height=self.ROW_H, corner_radius=0)
+            row.pack(fill="x", padx=2, pady=1)
+            var = tk.BooleanVar(value=False)
+            self._row_vars.append(var)
+            ctk.CTkCheckBox(row, text="", variable=var, width=30,
+                            checkbox_width=16, checkbox_height=16
+                            ).pack(side="left", padx=(4, 0))
+            dur = pp["t_end"] - pp["t_start"]
+            for txt, w in [
+                (f"{pp['t_start']:.3f}", 90),
+                (f"{pp['t_end']:.3f}",   90),
+                (f"{dur:.3f} s",          80),
+                (pp.get("note", ""),    240),
+            ]:
+                ctk.CTkLabel(row, text=txt, width=w,
+                             font=make_font(11), text_color=TEXT,
+                             anchor="w").pack(side="left", padx=3)
+
+    def _add(self) -> None:
+        t_max = float(self._app._time[-1]) if self._app._time is not None else 1e6
+        def _save(period: dict) -> None:
+            self._app._pacing_periods.append(period)
+            self._app._session_dirty = True
+            self._app._draw_detail()
+            self._app._update_pacing_count()
+            self._refresh()
+        PacingPeriodDialog(self, on_save=_save, t_max=t_max)
+
+    def _selected_indices(self) -> "list[int]":
+        return [i for i, v in enumerate(self._row_vars) if v.get()]
+
+    def _edit(self) -> None:
+        sel = self._selected_indices()
+        if not sel:
+            messagebox.showinfo("No selection", "Tick one pacing period to edit.", parent=self)
+            return
+        if len(sel) > 1:
+            messagebox.showinfo("Multiple selected",
+                                "Select exactly one pacing period to edit.", parent=self)
+            return
+        idx = sel[0]
+        existing = dict(self._app._pacing_periods[idx])
+        t_max = float(self._app._time[-1]) if self._app._time is not None else 1e6
+        def _save(period: dict) -> None:
+            self._app._pacing_periods[idx] = period
+            self._app._session_dirty = True
+            self._app._draw_detail()
+            self._app._update_pacing_count()
+            self._refresh()
+        PacingPeriodDialog(self, on_save=_save, existing=existing, t_max=t_max)
+
+    def _delete(self) -> None:
+        sel = self._selected_indices()
+        if not sel:
+            messagebox.showinfo("No selection", "Tick pacing period(s) to delete.", parent=self)
+            return
+        if not messagebox.askyesno("Confirm delete",
+                                   f"Delete {len(sel)} pacing period(s)?", parent=self):
+            return
+        for i in sorted(sel, reverse=True):
+            del self._app._pacing_periods[i]
+        self._app._session_dirty = True
+        self._app._draw_detail()
+        self._app._update_pacing_count()
         self._refresh()
 
 

@@ -233,11 +233,19 @@ class SignalController:
                 sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"])
             else:
                 inverted = False
-            _prog(55, "ML Detector — scoring candidates…")
             detector_warning: Optional[str] = None
+
+            def _ml_prog(pct: int, msg: str) -> None:
+                # Rescale detect_peaks_ml's own 0-100 stage progress into the
+                # 55-95 slice of the overall preview-bundle progress bar, so
+                # its checkpoints (crucially, the candidate count) actually
+                # reach the UI instead of sitting on one static message for
+                # however long candidate generation + feature extraction take.
+                _prog(55 + int(pct * 0.40), msg)
+
             try:
                 model = MLPeakModel.load()
-                peaks_ml, proms_ml, t_amp_ml = detect_peaks_ml(sig, fs, model)
+                peaks_ml, proms_ml, t_amp_ml = detect_peaks_ml(sig, fs, model, progress_cb=_ml_prog)
             except RuntimeError as exc:
                 # No trained model yet -- a clearly different situation from
                 # "detection failed on this signal", surfaced distinctly so
@@ -423,6 +431,7 @@ class SignalController:
         self.app.analysis.results       = None
         self.app.analysis.epoch_df      = None
         self.app.analysis.annotations   = []
+        self.app.analysis.pacing_periods = []
         self.app.analysis.wave_template = None
         self.app.session.dirty = False
         self.app._generation    = getattr(self.app, "_generation", 0) + 1
@@ -461,6 +470,7 @@ class SignalController:
             "→ click '1 ▶ Preview Detection' to filter and detect peaks.", BLUE)
         self.app.tabs.set("Detection")
         self.app._update_ann_count()
+        self.app._update_pacing_count()
         self.app.ui.nav_pos = 0.0
         self.app._sync_nav_pos_entry()
         if self.app.lbl_sig_duration is not None:
@@ -624,6 +634,7 @@ class SignalController:
         self.app.analysis.results       = None
         self.app.analysis.epoch_df      = None
         self.app.analysis.annotations   = []    # annotations belong to a specific file
+        self.app.analysis.pacing_periods = []   # pacing periods belong to a specific file
         self.app.analysis.wave_template = None  # template may not suit new signal
         self.app.session.dirty = False
         # Increment generation so any in-flight bg workers discard their results
@@ -687,6 +698,7 @@ class SignalController:
                 "→ adjust threshold then Run Full Analysis.", GREEN)
         self.app.tabs.set("Detection")
         self.app._update_ann_count()   # reflect cleared annotations immediately
+        self.app._update_pacing_count()
         # Sync nav bar
         self.app.ui.nav_pos = 0.0
         self.app._sync_nav_pos_entry()
@@ -951,6 +963,7 @@ class SignalController:
         self.app.analysis.arr_edit_mode        = False
         self.app.detection.sig_quality          = None
         self.app.analysis.artifact_report      = None
+        self.app.analysis.artifact_candidates  = []
         self.app.ui.ds_time              = None
         self.app.ui.ds_sig               = None
         self.app.ui.ds_sig_max           = None
@@ -970,6 +983,7 @@ class SignalController:
         self.app.signal.raw_only_loaded      = False
         self.app.ui.thr_debounce_id      = None
         self.app.analysis.annotations          = []
+        self.app.analysis.pacing_periods       = []
         self.app.ui.tsv_store            = {}
         self.app.analysis.wave_template        = None
         self.app.session.dirty        = False

@@ -31,6 +31,7 @@ from ecg.ui.theme import (
     CARD, BORDER, BORDER2, NK_AVAILABLE, nk,
     FONT_SIDEBAR_HDR, FONT_BADGE, FONT_HINT, FONT_SUBSECTION, FONT_KPI_LABEL,
     FONT_SMALL,
+    SPACE_XS, SPACE_S, SPACE_L,
 )
 from ecg.ui.plots import style_axes
 
@@ -38,13 +39,6 @@ if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
-
-# Spacing scale mirrored from app.py's local constants (SPACE_XS/S/M/L) --
-# not exported by theme.py, so duplicated here for the few widgets this
-# controller still builds directly (arrhythmia event cards).
-SPACE_XS = 2
-SPACE_S = 4
-SPACE_L = 12
 
 
 class AnalysisController:
@@ -563,7 +557,15 @@ class AnalysisController:
                 axes = fig.subplots(n_plots, 1, sharex=True)
                 if n_plots == 1:
                     axes = [axes]
-                fig.subplots_adjust(hspace=0.08)
+                # subplots_adjust() is a no-op (with a UserWarning) once
+                # constrained_layout is active on fig -- partial-override the
+                # engine's own hspace instead so the stacked panels keep
+                # their tighter author-tuned spacing (vs. CanvasSlot's wider
+                # default _CL_SPACE) rather than silently losing the tuning.
+                try:
+                    fig.set_constrained_layout_pads(hspace=0.08)
+                except Exception as exc:
+                    log.debug("draw_rolling: set_constrained_layout_pads failed: %s", exc)
                 t = df["t_mid"].values
 
                 for ax, metric in zip(axes, active):

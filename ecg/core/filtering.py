@@ -110,6 +110,26 @@ def downsample_for_display(arr: np.ndarray, max_points: int = 6_000,
     return out
 
 
+def downsample_envelope(arr: np.ndarray, max_points: int = 2_000) -> "tuple[np.ndarray, np.ndarray]":
+    """Bucket *arr* into at most *max_points* buckets, returning (mins, maxs).
+
+    Unlike downsample_for_display() -- which interleaves one min/max pair
+    per bucket into a single array for ax.plot() -- this returns two
+    parallel arrays of equal length, suited for ax.fill_between(t, mins,
+    maxs) to render a filled envelope band (e.g. a minimap). Decimated
+    time axis is NOT computed here: signal.time is always uniformly spaced
+    (np.arange(n)/fs), so callers build it directly with
+    np.linspace(time[0], time[-1], len(mins)).
+    """
+    n = len(arr)
+    if n <= max_points:
+        return arr, arr
+    bucket   = max(1, n // max_points)
+    n_trim   = (n // bucket) * bucket
+    reshaped = arr[:n_trim].reshape(-1, bucket)
+    return reshaped.min(axis=1), reshaped.max(axis=1)
+
+
 def downsample_signal(
     signal: np.ndarray,
     fs_in: float,

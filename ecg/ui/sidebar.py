@@ -25,17 +25,12 @@ from ecg.ui.theme import (
     CORAL, TEAL, PURPLE,
     FONT_LABEL, FONT_SMALL, FONT_BODY, FONT_MONO,
     FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR,
+    SPACE_S, SPACE_M,
     make_font,
 )
 
 log = logging.getLogger("ecg")
 
-# Échelle d'espacement locale — miroir des constantes SPACE_* définies dans
-# app.py (non importables ici sans dépendance circulaire ; app.py importe ce
-# module). Garder synchronisée si l'échelle de app.py évolue.
-_SPACE_XS = 2
-_SPACE_S  = 4
-_SPACE_M  = 8
 
 class IntervalVerifierPanel:
     """Interactive per-beat landmark verifier embedded in the Intervals tab.
@@ -490,7 +485,7 @@ class _SidebarSection:
         # sections). text_color raised from MUTED to TEXT so section titles
         # read clearly at a glance instead of blending into the background.
         hdr = ctk.CTkFrame(self._wrapper, fg_color=BORDER, corner_radius=6, height=26)
-        hdr.pack(fill="x", padx=_SPACE_M, pady=(_SPACE_S, 0))
+        hdr.pack(fill="x", padx=SPACE_M, pady=(SPACE_S, 0))
         hdr.pack_propagate(False)
 
         arrow = "▾" if initially_open else "▸"

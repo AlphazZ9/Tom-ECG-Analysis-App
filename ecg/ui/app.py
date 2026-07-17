@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -83,54 +84,33 @@ from ecg.ui.theme import (
     NK_AVAILABLE, APP_ICON_PATH,
     BG, PANEL, CARD, BORDER, BORDER2, TEXT, MUTED, LIGHT, PLOT,
     RED, BLUE, GREEN, ORANGE,
-    BLUE_DARK, BLUE_HOVER, BLUE_DEEP,
-    PURPLE, PURPLE_DARK, PINK, TEAL,
+    BLUE_DARK, BLUE_HOVER, BLUE_MID, BLUE_DEEP,
+    PURPLE, PURPLE_DARK, PINK, TEAL, TEAL_DARK,
     GREEN_DARK, ORANGE_DARK,
     RED_DARK,
+    COLOR_PRIMARY, COLOR_PRIMARY_HOVER, COLOR_SUCCESS, COLOR_SUCCESS_HOVER,
+    COLOR_WARNING, COLOR_WARNING_HOVER, COLOR_DANGER, COLOR_DANGER_HOVER,
+    COLOR_SECONDARY, COLOR_SECONDARY_HOVER,
+    SPACE_XS, SPACE_S, SPACE_M, SPACE_L,
     FONT_TITLE, FONT_SECTION_HDR, FONT_LABEL, FONT_SMALL, FONT_BODY, FONT_MONO,
-    FONT_KPI_VALUE, FONT_KPI_LABEL, FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR,
+    FONT_KPI_VALUE, FONT_KPI_LABEL, FONT_BTN_PRIMARY, FONT_BTN_SEC,
+    FONT_SIDEBAR_HDR,
     FONT_MICRO, FONT_HINT, FONT_BADGE, FONT_SUBSECTION, FONT_CARD_TITLE,
 )
+from ecg.ui.widgets import make_stat_tile, make_quality_gauge
 from ecg.ui.plots import CanvasSlot, style_axes
 from ecg.ui.dialogs import (
     ThemeDialog, ArtifactReviewDialog,
-    AnnotationManagerDialog,
+    AnnotationManagerDialog, PacingPeriodManagerDialog,
 )
 from ecg.ui.wave_editor import WaveTemplateMiniEditor
 from ecg.ui.sidebar import _SidebarSection, IntervalVerifierPanel
 
 log = logging.getLogger("ecg")
 
-# ════════════════════════════════════════════════════════════
-#  SPACING SCALE — single source of truth for padx/pady values
-# ════════════════════════════════════════════════════════════
-# Avant : 30+ couples (a, b) différents et arbitraires dispersés dans le
-# fichier (pady=(0,4), (8,4), (6,2), (18,4), (5,1)...) → rythme visuel
-# incohérent entre cartes/sections, sans logique apparente.
-#
-# Après : 4 paliers nommés couvrant tous les usages réels du fichier.
-# Toute nouvelle valeur doit être l'un de ces 4 paliers plutôt qu'un
-# nombre choisi au hasard. La valeur 0 (pas d'espacement, volontaire)
-# reste un littéral explicite — elle n'est jamais arrondie à SPACE_XS.
-SPACE_XS = 2   # éléments très liés : label + son champ, icône + texte
-SPACE_S  = 4   # lignes à l'intérieur d'une même carte
-SPACE_M  = 8   # entre cartes / sous-sections, entre graphiques empilés
-SPACE_L  = 12  # entre blocs majeurs, séparateurs horizontaux, top-level
+# SPACE_XS/S/M/L (padx/pady spacing scale) now live in ecg.ui.theme, the
+# single source of truth — see the "Layout spacing tokens" section there.
 
-# ════════════════════════════════════════════════════════════
-#  SPACING SCALE — single source of truth for padx/pady values
-# ════════════════════════════════════════════════════════════
-# Avant : 30+ couples (a, b) différents et arbitraires dispersés dans le
-# fichier (pady=(0, SPACE_S), (8,4), (6,2), (18,4), (5,1)...) → rythme visuel
-# incohérent entre cartes/sections.
-#
-# Après : 4 paliers nommés couvrant tous les usages réels du fichier.
-# Toute nouvelle valeur doit être l'un de ces 4 paliers (ou une combinaison
-# explicite SPACE_X/SPACE_Y) plutôt qu'un nombre choisi au hasard.
-SPACE_XS = 2   # éléments très liés : label + son champ, icône + texte
-SPACE_S  = 4   # lignes à l'intérieur d'une même carte
-SPACE_M  = 8   # entre cartes / sous-sections, entre graphiques empilés
-SPACE_L  = 12  # entre blocs majeurs, séparateurs horizontaux, top-level
 
 class ECGApp(ctk.CTk):
 
@@ -231,6 +211,11 @@ class ECGApp(ctk.CTk):
         # Widget registries (populated in _build)
         self._slots:       dict[str, CanvasSlot]   = {}
         self._kpi:         dict[str, ctk.CTkLabel] = {}
+        # Compact top-bar mirrors of a few _kpi values (hr_mean/n_beats/dur) --
+        # a SEPARATE dict since these are distinct widgets living in the top
+        # bar, updated alongside (not instead of) the stat-panel tiles by the
+        # same update_kpis() call.
+        self._topbar_vals: dict[str, ctk.CTkLabel] = {}
 
         # ── Forward declarations for widgets created in _build ────────────────
         # Declared here so that methods called before the UI is fully constructed
@@ -238,6 +223,11 @@ class ECGApp(ctk.CTk):
         # predictable None rather than raising AttributeError, and so that
         # hasattr(self, ...) guards can be replaced with "is not None" checks.
         #
+        # Top bar (built in _build_top_bar)
+        self.ent_project_name:  "Optional[ctk.CTkEntry]"   = None
+        self.lbl_topbar_project:"Optional[ctk.CTkLabel]"   = None
+        self.lbl_topbar_file:   "Optional[ctk.CTkLabel]"   = None
+        self.quality_gauge:     "Optional[ctk.CTkFrame]"   = None
         # Sidebar / session controls
         self.btn_save_session:  "Optional[ctk.CTkButton]"  = None
         self.lbl_session_info:  "Optional[ctk.CTkLabel]"   = None
@@ -271,6 +261,8 @@ class ECGApp(ctk.CTk):
         self.sw_permissive:     "Optional[ctk.CTkSwitch]"  = None
         self.btn_annotations:   "Optional[ctk.CTkButton]"  = None
         self.lbl_ann_count:     "Optional[ctk.CTkLabel]"   = None
+        self.btn_pacing:        "Optional[ctk.CTkButton]"  = None
+        self.lbl_pacing_count:  "Optional[ctk.CTkLabel]"   = None
         self.btn_copy_rr:       "Optional[ctk.CTkButton]"  = None
         self.btn_copy_ivl:      "Optional[ctk.CTkButton]"  = None
         self.btn_copy_epochs:   "Optional[ctk.CTkButton]"  = None
@@ -283,6 +275,7 @@ class ECGApp(ctk.CTk):
         self.lbl_ml_status:     "Optional[ctk.CTkLabel]"     = None
         self.sw_verified_training: "Optional[ctk.CTkSwitch]" = None
         self.btn_train_ml:      "Optional[ctk.CTkButton]"    = None
+        self.btn_save_for_training: "Optional[ctk.CTkButton]" = None
         # Sidebar / detection tab widgets (forward-declared)
         self.lbl_npeaks:           "Optional[ctk.CTkLabel]"              = None
         self.btn_review_art:       "Optional[ctk.CTkButton]"             = None
@@ -292,7 +285,7 @@ class ECGApp(ctk.CTk):
         self.lbl_roll_status:      "Optional[ctk.CTkLabel]"              = None
         self.lbl_arr_event_title:  "Optional[ctk.CTkLabel]"              = None
         self._arr_card_widgets:    "list[ctk.CTkBaseClass]"              = []
-        self._adv_filters_frame:   "Optional[ctk.CTkFrame]"              = None
+        self._adv_filters_group:   "Optional[ctk.CTkFrame]"              = None
         self._interp_scroll:       "Optional[ctk.CTkScrollableFrame]"    = None
         # Navigation bar widgets (forward-declared so _reset_for_new_file can update them)
         self.ent_nav_pos:       "Optional[ctk.CTkEntry]"    = None
@@ -594,6 +587,13 @@ class ECGApp(ctk.CTk):
         self.analysis.artifact_report = value
 
     @property
+    def _artifact_candidates(self) -> "list[dict]":
+        return self.analysis.artifact_candidates
+    @_artifact_candidates.setter
+    def _artifact_candidates(self, value: "list[dict]") -> None:
+        self.analysis.artifact_candidates = value
+
+    @property
     def _exp_context(self) -> str:
         return self.analysis.exp_context
     @_exp_context.setter
@@ -620,6 +620,13 @@ class ECGApp(ctk.CTk):
     @_annotations.setter
     def _annotations(self, value: "list[dict]") -> None:
         self.analysis.annotations = value
+
+    @property
+    def _pacing_periods(self) -> "list[dict]":
+        return self.analysis.pacing_periods
+    @_pacing_periods.setter
+    def _pacing_periods(self, value: "list[dict]") -> None:
+        self.analysis.pacing_periods = value
 
     @property
     def _wave_template(self) -> "Optional[WaveTemplate]":
@@ -835,6 +842,11 @@ class ECGApp(ctk.CTk):
 
     def _build(self) -> None:
         self.update_idletasks()
+        # Packed on self, side="top", BEFORE the sidebar -- this is what makes
+        # it span the full window width rather than being confined to main's
+        # width the way the old KPI bar was (sidebar's own side="left" would
+        # otherwise claim the left edge first).
+        self._build_top_bar()
         w = self.winfo_width() or 1480
         _sidebar_w = max(220, min(340, int(w * 0.20)))
         self.sidebar = ctk.CTkFrame(self, width=_sidebar_w, fg_color=PANEL, corner_radius=0)
@@ -851,7 +863,7 @@ class ECGApp(ctk.CTk):
 
         main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
         main.pack(side="left", fill="both", expand=True)
-        self._build_kpi_bar(main)
+        self._build_stat_panel(main)
         self._build_tabs(main)
         # Global keyboard shortcuts
         self.bind("<Control-z>", self._undo_edit)
@@ -1051,6 +1063,14 @@ class ECGApp(ctk.CTk):
         # ── SIGNAL ────────────────────────────────────────────
         sec_sig = _SidebarSection(s, "SIGNAL", initially_open=False)
         f = sec_sig.frame
+        # Project name: a label spanning the whole working session (many
+        # recordings), not per-recording metadata like Subject ID below --
+        # like every other sidebar entry, reset_for_new_file() never touches
+        # it, so it naturally survives opening a different recording in the
+        # same session with no special-case logic needed.
+        self._sidebar_entry(f, "Project name", "project_name", "", fpx)
+        self.ent_project_name.bind("<FocusOut>", self._on_project_name_change)  # type: ignore[union-attr]
+        self.ent_project_name.bind("<Return>", self._on_project_name_change)  # type: ignore[union-attr]
         self._sidebar_entry_row(f, fpx, [
             ("Channel", "channel", "ECG"),
             ("Subject ID", "subject", "subject_01"),
@@ -1061,10 +1081,6 @@ class ECGApp(ctk.CTk):
             f, text="", font=FONT_KPI_LABEL, text_color=MUTED,
             anchor="w", wraplength=230)
         self.lbl_fs_source.pack(**fpx, fill="x", pady=(0, SPACE_XS))
-        self._sidebar_entry_row(f, fpx, [
-            ("Crop start (s)", "t_start", "0"),
-            ("Crop end (s)",   "t_end",   "0"),
-        ])
         self.sw_show_raw = self._switch(
             f, "Show raw signal (vs filtered)", fpx, default_on=True)
         self.sw_show_raw.configure(command=self._on_show_raw_toggle)
@@ -1096,46 +1112,9 @@ class ECGApp(ctk.CTk):
         fw = self._filter_widgets_frame
         self.sw_notch = self._switch(fw, "Notch 50 Hz", dict(padx=0), default_on=False)
         self.sw_notch.configure(command=self._refresh_filter_preview)
-        self._adv_filters_open = False
-        self._adv_wrapper      = ctk.CTkFrame(fw, fg_color="transparent")
-        self._adv_wrapper.pack(fill="x", pady=(SPACE_XS, 0))
-        self._adv_filters_frame = ctk.CTkFrame(self._adv_wrapper, fg_color="transparent")
-        adv_hdr = ctk.CTkFrame(self._adv_wrapper, fg_color="transparent")
-        adv_hdr.pack(fill="x")
-        def _toggle_adv():
-            self._adv_filters_open = not self._adv_filters_open
-            arrow = "▼" if self._adv_filters_open else "▶"
-            self._btn_adv_flt.configure(text=f"{arrow}  Advanced filters")
-            if self._adv_filters_open:
-                self._adv_filters_frame.pack(fill="x", pady=(SPACE_XS, 0))  # type: ignore
-            else:
-                self._adv_filters_frame.pack_forget()  # type: ignore
-        self._btn_adv_flt = ctk.CTkButton(
-            adv_hdr, text="▶  Advanced filters",
-            font=FONT_HINT, text_color=MUTED,
-            fg_color="transparent", hover_color=BORDER,
-            anchor="w", height=22, corner_radius=4,
-            command=_toggle_adv)
-        self._btn_adv_flt.pack(fill="x")
-        af = self._adv_filters_frame
-        self._sidebar_entry_row(af, dict(padx=0), [
-            ("HP cut (Hz)", "lp", str(MouseECG.BP_LO_HZ)),
-            ("LP cut (Hz)", "hp", str(int(MouseECG.BP_HI_HZ))),
-        ])
-        for _ent in (self.ent_lp, self.ent_hp):
-            if _ent is not None:
-                _ent.bind("<Return>",   lambda _e: self._refresh_filter_preview())
-                _ent.bind("<FocusOut>", lambda _e: self._refresh_filter_preview())
-        ctk.CTkLabel(af, text="Clean method:", font=FONT_SMALL,
-                     text_color=MUTED, anchor="w").pack(anchor="w", pady=(SPACE_XS, 0))
-        self.cb_clean = ctk.CTkComboBox(
-            af, font=FONT_LABEL, height=28, fg_color=BG, border_color=BORDER2,
-            button_color=BORDER2, text_color=TEXT, dropdown_fg_color=BG,
-            dropdown_text_color=TEXT,
-            values=["neurokit", "pantompkins1985", "elgendi2010", "hamilton2002", "biosppy"],
-            command=lambda _v: self._refresh_filter_preview())
-        self.cb_clean.set("neurokit")
-        self.cb_clean.pack(fill="x", pady=(SPACE_XS, SPACE_S))
+        # HP/LP cut + Clean method live in the ADVANCED section now (built
+        # later in this method, into self._adv_filters_group) -- no nested
+        # toggle needed here anymore since Advanced is a top-level section.
         self._filter_control_widgets: "list" = []
         def _collect_fw(frame) -> None:
             for w in frame.winfo_children():
@@ -1144,8 +1123,8 @@ class ECGApp(ctk.CTk):
         self.after(100, lambda: (
             self._filter_control_widgets.clear() or
             _collect_fw(self._filter_widgets_frame) or
-            (self._adv_filters_frame is not None and
-             _collect_fw(self._adv_filters_frame))
+            (self._adv_filters_group is not None and
+             _collect_fw(self._adv_filters_group))
         ))
 
         # ── DETECTION ─────────────────────────────────────────
@@ -1153,11 +1132,10 @@ class ECGApp(ctk.CTk):
         f = sec_det.frame
         self._sidebar_entry(f, "Min R-R physio (ms)", "minrr",
                             str(int(MouseECG.MIN_RR_MS)), fpx)
-        self._sg_frame = ctk.CTkFrame(f, fg_color="transparent")
-        self._sidebar_entry_row(self._sg_frame, fpx, [
-            ("Target fs (Hz)", "sg_target_fs", "10000"),
-            ("SG window (ms)", "sg_window_ms",  "20"),
-        ])
+        # SG target-fs/window entries live in the ADVANCED section now (built
+        # later in this method) -- _sg_frame's own pack/pack_forget show/hide
+        # logic (on_det_method_change()) is parent-agnostic, unaffected by
+        # which section frame it's built into.
         ctk.CTkLabel(f, text="SG+Deriv: downsample → Savitzky-Golay derivative\n"
                              "Wavelet: CWT bruit/QRS/J-wave séparés (pywt requis)\n"
                              "Envelope Max: maximum local — idéal signaux saturés (clipping ADC)",
@@ -1198,6 +1176,18 @@ class ECGApp(ctk.CTk):
                     "training data. Takes effect on Save Session.",
             font=FONT_KPI_LABEL, text_color=LIGHT,
             anchor="w", wraplength=230, justify="left").pack(**fpx, fill="x", pady=(0, SPACE_S))
+        self.btn_save_for_training = ctk.CTkButton(
+            f, text="📥  Save for Training  (no session save)",
+            command=self._save_for_training_only,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+            font=FONT_BTN_SEC, height=max(28, int(30 * THEME.font_scale)),
+            corner_radius=8)
+        self.btn_save_for_training.pack(**fpx, fill="x", pady=(0, SPACE_S))
+        ctk.CTkLabel(
+            f, text="Caches this recording's peaks as training data right "
+                    "away, without writing a .ecgsession file or export stats.",
+            font=FONT_KPI_LABEL, text_color=LIGHT,
+            anchor="w", wraplength=230, justify="left").pack(**fpx, fill="x", pady=(0, SPACE_S))
         self.btn_train_ml = ctk.CTkButton(
             f, text="🤖  Train / Retrain Model…",
             command=self._open_ml_training_dialog,
@@ -1220,25 +1210,85 @@ class ECGApp(ctk.CTk):
             f, text="No session saved for this file", font=FONT_HINT,
             text_color=MUTED, anchor="w", wraplength=230, justify="left")
         self.lbl_session_info.pack(**fpx, pady=(0, SPACE_S), fill="x")
-        self._btn(f, "🗑  Clear Session Cache", self._delete_session, fpx, fg=BORDER, h=26)
+        self._btn(f, "🗑  Clear Session Cache", self._delete_session, fpx, variant="secondary", h=26)
+        # Export-format buttons + Notes/Annotations live in the ADVANCED
+        # section now (built later in this method) -- none of their return
+        # values were captured as named attributes, so relocating their
+        # construction call site carries no downstream reference risk.
+
+        # ── ADVANCED ──────────────────────────────────────────
+        # Standalone 7th top-level section consolidating rarely-touched
+        # settings from Signal/Filters/Detection/Session & Export -- a peer
+        # to the other 6 sections (not nested inside them), so opening one
+        # place shows everything advanced at once. Internally organised with
+        # plain (non-collapsible) group labels, not a second accordion level.
+        sec_adv = _SidebarSection(s, "ADVANCED", initially_open=False)
+        f = sec_adv.frame
+
+        def _adv_group(text: str, first: bool = False) -> None:
+            if not first:
+                ctk.CTkFrame(f, height=1, fg_color=BORDER).pack(
+                    fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
+            ctk.CTkLabel(f, text=text, font=FONT_SUBSECTION, text_color=MUTED,
+                         anchor="w").pack(**fpx, fill="x", pady=(0 if first else 0, SPACE_XS))
+
+        # -- Signal --------------------------------------------------------
+        _adv_group("Signal", first=True)
+        self._sidebar_entry_row(f, fpx, [
+            ("Crop start (s)", "t_start", "0"),
+            ("Crop end (s)",   "t_end",   "0"),
+        ])
+
+        # -- Filters ---------------------------------------------------------
+        _adv_group("Filters")
+        self._adv_filters_group = ctk.CTkFrame(f, fg_color="transparent")
+        self._adv_filters_group.pack(**fpx, fill="x")
+        self._sidebar_entry_row(self._adv_filters_group, dict(padx=0), [
+            ("HP cut (Hz)", "lp", str(MouseECG.BP_LO_HZ)),
+            ("LP cut (Hz)", "hp", str(int(MouseECG.BP_HI_HZ))),
+        ])
+        for _ent in (self.ent_lp, self.ent_hp):
+            if _ent is not None:
+                _ent.bind("<Return>",   lambda _e: self._refresh_filter_preview())
+                _ent.bind("<FocusOut>", lambda _e: self._refresh_filter_preview())
+        ctk.CTkLabel(self._adv_filters_group, text="Clean method:", font=FONT_SMALL,
+                     text_color=MUTED, anchor="w").pack(anchor="w", pady=(SPACE_XS, 0))
+        self.cb_clean = ctk.CTkComboBox(
+            self._adv_filters_group, font=FONT_LABEL, height=28, fg_color=BG,
+            border_color=BORDER2, button_color=BORDER2, text_color=TEXT,
+            dropdown_fg_color=BG, dropdown_text_color=TEXT,
+            values=["neurokit", "pantompkins1985", "elgendi2010", "hamilton2002", "biosppy"],
+            command=lambda _v: self._refresh_filter_preview())
+        self.cb_clean.set("neurokit")
+        self.cb_clean.pack(fill="x", pady=(SPACE_XS, SPACE_S))
+
+        # -- Detection -------------------------------------------------------
+        _adv_group("Detection")
+        self._sg_frame = ctk.CTkFrame(f, fg_color="transparent")
+        self._sidebar_entry_row(self._sg_frame, fpx, [
+            ("Target fs (Hz)", "sg_target_fs", "10000"),
+            ("SG window (ms)", "sg_window_ms",  "20"),
+        ])
+
+        # -- Export & Notes --------------------------------------------------
+        _adv_group("Export & Notes")
+        self._btn(f, "📊  Export Excel",              self._export_excel,      fpx, variant="secondary", h=28)
+        self._btn(f, "📄  Export RR CSV  (Ctrl+W)",   self._export_rr_csv,     fpx, variant="secondary", h=28)
+        self._btn(f, "🖼  Export Figures  (PNG)",      self._export_figures,    fpx, variant="secondary", h=28)
+        self._btn(f, "📦  Export ZIP  (Excel+Figs)",  self._export_zip,        fpx, variant="secondary", h=28)
+        self._btn(f, "📄  PDF Report  (1 page)",      self._export_pdf_report, fpx, variant="secondary", h=28)
+        self._btn(f, "🔬  Export Arrhythmia PDF",     self._export_arrhythmia_pdf, fpx, variant="secondary", h=28)
+        self._btn(f, "🔬  Export GraphPad Prism",     self._export_prism,      fpx, variant="secondary", h=28)
         ctk.CTkFrame(f, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_S))
-        self._btn(f, "📊  Export Excel",              self._export_excel,      fpx, fg=BORDER, h=28)
-        self._btn(f, "📄  Export RR CSV  (Ctrl+W)",   self._export_rr_csv,     fpx, fg=BORDER, h=28)
-        self._btn(f, "🖼  Export Figures  (PNG)",      self._export_figures,    fpx, fg=BLUE_DARK, h=28)
-        self._btn(f, "📦  Export ZIP  (Excel+Figs)",  self._export_zip,        fpx, fg=BORDER, h=28)
-        self._btn(f, "📄  PDF Report  (1 page)",      self._export_pdf_report, fpx, fg=BORDER, h=28)
-        self._btn(f, "🔬  Export Arrhythmia PDF",     self._export_arrhythmia_pdf, fpx, fg=BORDER, h=28)
-        self._btn(f, "🔬  Export GraphPad Prism",     self._export_prism,      fpx, fg=BORDER, h=28)
-        ctk.CTkFrame(f, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_S))
-        self._btn(f, "📝  Notes (this recording)",    self._open_notes_dialog, fpx, fg=BORDER, h=28)
-        self._btn(f, "⏱  Event annotations",          self._open_annotation_dialog, fpx, fg=BORDER, h=28)
+        self._btn(f, "📝  Notes (this recording)",    self._open_notes_dialog, fpx, variant="secondary", h=28)
+        self._btn(f, "⏱  Event annotations",          self._open_annotation_dialog, fpx, variant="secondary", h=28)
 
         # ── BOTTOM BUTTONS ────────────────────────────────────
         ctk.CTkFrame(s, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
         ctk.CTkButton(
             s, text="⚖  Compare Segments",
             command=self._open_compare_segments,
-            fg_color=TEAL, hover_color="#00695C", text_color="white",
+            fg_color=TEAL, hover_color=TEAL_DARK, text_color="white",
             font=FONT_SIDEBAR_HDR, height=28, corner_radius=8,
         ).pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
         ctk.CTkButton(
@@ -1370,7 +1420,7 @@ class ECGApp(ctk.CTk):
         progress_bar.pack_forget()
 
         run_btn = ctk.CTkButton(ctrl, text="▶  Compare",
-                                fg_color=TEAL, hover_color="#00695C",
+                                fg_color=TEAL, hover_color=TEAL_DARK,
                                 text_color="white",
                                 font=FONT_BTN_PRIMARY, height=34, corner_radius=8)
         run_btn.pack(side="left")
@@ -1730,10 +1780,18 @@ class ECGApp(ctk.CTk):
             try:
                 export_fig = Figure(
                     figsize=(10, 4), dpi=200,
-                    facecolor=PLOT.get("bg", "#1A1A2E"))
+                    facecolor=PLOT.get("bg", "#1A1A2E"), layout="constrained")
                 if hasattr(export_fig, "set_constrained_layout_pads"):
+                    # Was previously called with left=/right=/top=/bottom= --
+                    # not real parameters of this method (only w_pad, h_pad,
+                    # wspace, hspace are), so this raised TypeError on every
+                    # single call, silently caught by the except block below
+                    # at DEBUG level: this companion PNG has never actually
+                    # been written. Reuse CanvasSlot's own pad constants
+                    # instead of a third hardcoded copy of the numbers.
                     getattr(export_fig, "set_constrained_layout_pads")(
-                        left=0.11, right=0.98, top=0.96, bottom=0.08)
+                        w_pad=CanvasSlot._CL_PAD, h_pad=CanvasSlot._CL_PAD,
+                        wspace=CanvasSlot._CL_SPACE, hspace=CanvasSlot._CL_SPACE)
                 if plot_slot._draw_fn is not None:
                     plot_slot._draw_fn(export_fig)
                     export_fig.savefig(
@@ -1767,71 +1825,153 @@ class ECGApp(ctk.CTk):
 
     # ─── KPI bar ──────────────────────────────────────────────
 
-    def _build_kpi_bar(self, parent) -> None:
-        bar = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=0)
-        bar.pack(fill="x")
+    def _build_top_bar(self) -> None:
+        """Compact strip spanning the FULL window width.
+
+        Packed on self (not inside main -- see _build()), before the
+        sidebar/main split, so it isn't confined to main's width. Holds only
+        the essentials per the redesign brief: project name, file, duration,
+        beat count, mean HR, a quality gauge, the correlation badge, theme
+        controls, and analysis progress. Detailed metrics moved to
+        _build_stat_panel()'s categorized cards.
+        """
+        bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
+        bar.pack(side="top", fill="x")
         ctk.CTkFrame(bar, height=1, fg_color=BORDER).pack(side="bottom", fill="x")
 
-        # ── Progress bar row (shown only during analysis) ──────────────────
+        # Progress row -- child of `bar` itself (not the inline row below) so
+        # that _start_async's existing self._prog_row.pack(side="bottom",
+        # fill="x", ...) call spans the full top-bar width, exactly as it did
+        # in the old KPI bar. Not packed here -- _start_async/_stop_progress
+        # show/hide it dynamically, unchanged.
         self._prog_row = ctk.CTkFrame(bar, fg_color="transparent", height=20)
         self.progress = ctk.CTkProgressBar(
             self._prog_row, height=4, mode="determinate",
-            progress_color=BLUE, fg_color=BORDER, corner_radius=2,
+            progress_color=COLOR_PRIMARY, fg_color=BORDER, corner_radius=2,
         )
         self.progress.set(0)
-        self.progress.pack(side="left", fill="x", expand=True, padx=(0, SPACE_M))
+        self.progress.pack(side="left", fill="x", expand=True, padx=(SPACE_M, SPACE_S))
         self.lbl_progress = ctk.CTkLabel(
             self._prog_row, text="", font=FONT_HINT,
             text_color=MUTED, width=260, anchor="w",
         )
-        self.lbl_progress.pack(side="left")
+        self.lbl_progress.pack(side="left", padx=(0, SPACE_M))
 
-        # ── KPI grid: 2 rows × 4 columns — adapts to any window width ─────
-        kpi_grid = ctk.CTkFrame(bar, fg_color="transparent")
-        kpi_grid.pack(side="left", fill="both", expand=True, padx=SPACE_S, pady=SPACE_S)
-        for col in range(4):
-            kpi_grid.columnconfigure(col, weight=1, uniform="kpi")
+        row = ctk.CTkFrame(bar, fg_color="transparent")
+        row.pack(fill="x", padx=SPACE_M, pady=SPACE_XS)
 
-        kpi_defs = [
-            ("HR Mean",  "hr_mean"),  ("HR Range", "hr_range"),
-            ("Mean RR",  "rr_mean"),  ("N Beats",  "n_beats"),
-            ("SDNN",     "sdnn"),     ("RMSSD",    "rmssd"),
-            ("pNN6",     "pnn50"),    ("Duration", "dur"),
-        ]
-        for i, (label, key) in enumerate(kpi_defs):
-            r, c = divmod(i, 4)
-            cell = ctk.CTkFrame(kpi_grid, fg_color="transparent")
-            cell.grid(row=r, column=c, sticky="ew", padx=SPACE_M, pady=(SPACE_S, SPACE_XS) if r == 0 else (0, 4))
-            ctk.CTkLabel(cell, text=label, font=FONT_KPI_LABEL,
-                         text_color=MUTED).pack(anchor="w")
-            value_lbl = ctk.CTkLabel(cell, text="—",
-                                     font=FONT_KPI_VALUE, text_color=TEXT)
-            value_lbl.pack(anchor="w")
-            self._kpi[key] = value_lbl
+        # ── Left: project name + file ──────────────────────────
+        left = ctk.CTkFrame(row, fg_color="transparent")
+        left.pack(side="left")
+        self.lbl_topbar_project = ctk.CTkLabel(
+            left, text="—", font=FONT_SIDEBAR_HDR, text_color=TEXT, anchor="w")
+        self.lbl_topbar_project.pack(side="left")
+        ctk.CTkLabel(left, text="   ", font=FONT_HINT, text_color=LIGHT).pack(side="left")
+        self.lbl_topbar_file = ctk.CTkLabel(
+            left, text="No file loaded", font=FONT_HINT, text_color=MUTED, anchor="w")
+        self.lbl_topbar_file.pack(side="left")
 
-        # ── Right: quality indicator + Theme button + Language toggle ─────────
-        right = ctk.CTkFrame(bar, fg_color="transparent")
-        right.pack(side="right", padx=SPACE_L)
-        self.lbl_quality = ctk.CTkLabel(right, text="", font=FONT_BTN_SEC,
-                                         text_color=MUTED)
-        self.lbl_quality.pack(anchor="e", pady=(SPACE_S, SPACE_XS))
-        btn_row_right = ctk.CTkFrame(right, fg_color="transparent")
-        btn_row_right.pack(anchor="e")
-        ctk.CTkButton(btn_row_right, text="Theme", width=76, height=28,
+        # ── Middle: compact metric mirrors (full tiles live in the stat panel) ──
+        mid = ctk.CTkFrame(row, fg_color="transparent")
+        mid.pack(side="left", padx=SPACE_L)
+        for label, key in (("Duration", "dur"), ("Beats", "n_beats"), ("Mean HR", "hr_mean")):
+            cell = ctk.CTkFrame(mid, fg_color="transparent")
+            cell.pack(side="left", padx=(0, SPACE_L))
+            ctk.CTkLabel(cell, text=label, font=FONT_MICRO, text_color=LIGHT,
+                         anchor="w").pack(anchor="w")
+            val = ctk.CTkLabel(cell, text="—", font=FONT_SIDEBAR_HDR,
+                                text_color=TEXT, anchor="w")
+            val.pack(anchor="w")
+            self._topbar_vals[key] = val
+
+        # ── Right: quality gauge + correlation badge + theme controls ──
+        right = ctk.CTkFrame(row, fg_color="transparent")
+        right.pack(side="right")
+
+        self.quality_gauge = make_quality_gauge(right, score=None, compact=True)
+        self.quality_gauge.pack(side="left", padx=(0, SPACE_M))
+        # lbl_quality now IS the gauge's own caption label -- update_signal_
+        # quality()'s existing lbl_quality.configure(...) call needs no
+        # changes; its output is immediately superseded by the more
+        # descriptive Excellent/Good/Medium/Poor caption update_quality_
+        # gauge() sets right after it (see detection_controller.py).
+        self.lbl_quality = self.quality_gauge.score_label
+
+        # Quality badge — updated by _update_quality_badge() after analysis
+        self._lbl_quality_badge = ctk.CTkLabel(
+            right, text="", font=FONT_BADGE,
+            text_color="white", fg_color="transparent",
+            corner_radius=6, width=120, height=22, anchor="center")
+        self._lbl_quality_badge.pack(side="left", padx=(0, SPACE_M))
+
+        ctk.CTkButton(right, text="Theme", width=76, height=28,
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
                       font=FONT_BTN_SEC, command=self._open_theme_dialog,
                       corner_radius=8).pack(side="left", padx=(0, SPACE_S))
-        ctk.CTkButton(btn_row_right, text="☀/☾", width=52, height=28,
+        ctk.CTkButton(right, text="☀/☾", width=52, height=28,
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
                       font=FONT_BTN_SEC, corner_radius=8,
                       command=self._toggle_dark_live,
-                      ).pack(side="left", padx=(0, SPACE_S))
-        # Quality badge — updated by _update_quality_badge() after analysis
-        self._lbl_quality_badge = ctk.CTkLabel(
-            btn_row_right, text="", font=FONT_BADGE,
-            text_color="white", fg_color="transparent",
-            corner_radius=6, width=120, height=22, anchor="center")
-        self._lbl_quality_badge.pack(side="left")
+                      ).pack(side="left")
+
+    def _build_stat_panel(self, parent) -> None:
+        """Categorized statistics panel: Heart Rate / RR Intervals / HRV /
+        Signal / Quality. Replaces the old flat 8-cell KPI grid, occupying
+        the same structural slot (full main-content width, above the tabs).
+        All values are still driven by update_kpis() (plot_controller.py),
+        just fanned out to more, better-organised tiles via make_stat_tile()
+        (ecg/ui/widgets.py) instead of the old bare label/value pairs.
+        """
+        panel = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=0)
+        panel.pack(fill="x")
+        ctk.CTkFrame(panel, height=1, fg_color=BORDER).pack(side="bottom", fill="x")
+
+        grid = ctk.CTkFrame(panel, fg_color="transparent")
+        grid.pack(fill="x", padx=SPACE_M, pady=SPACE_S)
+        for col in range(5):
+            grid.columnconfigure(col, weight=1, uniform="cat")
+
+        # (key, label, unit, hero) -- unit is baked into the tile once at
+        # construction (static), hero=True gets the one FONT_KPI_HERO use.
+        categories = [
+            ("Heart Rate", ORANGE_DARK, [
+                ("hr_mean",  "HR Mean",  "bpm", True),
+                ("hr_range", "HR Range", "",    False),
+            ]),
+            ("RR Intervals", BLUE_MID, [
+                ("rr_mean", "Mean RR", "ms", False),
+                ("n_beats", "N Beats", "",   False),
+            ]),
+            ("HRV", TEAL, [
+                ("sdnn",  "SDNN",  "ms", False),
+                ("rmssd", "RMSSD", "ms", False),
+                ("pnn50", "pNN6",  "%",  False),
+            ]),
+            ("Signal", BLUE_DEEP, [
+                ("dur",     "Duration",         "s", False),
+                ("sq_corr", "Mean correlation", "",  False),
+            ]),
+            ("Quality", GREEN_DARK, [
+                ("sq_score",    "Overall score",       "%", False),
+                ("sq_badbeats", "Beats < 0.90 corr.",  "",  False),
+                ("sq_artifact", "Auto-corrected",       "", False),
+            ]),
+        ]
+
+        for col, (cat_name, accent, tiles) in enumerate(categories):
+            box = ctk.CTkFrame(grid, fg_color=CARD, corner_radius=8,
+                                border_width=1, border_color=BORDER)
+            box.grid(row=0, column=col, sticky="nsew",
+                      padx=(0 if col == 0 else SPACE_S, 0))
+            ctk.CTkFrame(box, fg_color=accent, height=3, corner_radius=2).pack(
+                fill="x", padx=SPACE_S, pady=(SPACE_XS, 0))
+            ctk.CTkLabel(box, text=cat_name.upper(), font=FONT_MICRO,
+                         text_color=MUTED, anchor="w").pack(
+                fill="x", padx=SPACE_S, pady=(SPACE_XS, SPACE_XS))
+            for key, label, unit, hero in tiles:
+                tile = make_stat_tile(box, label, "—", unit=unit, hero=hero, card=False)
+                tile.pack(fill="x", padx=SPACE_S, pady=(0, SPACE_XS))
+                self._kpi[key] = tile.value_label
 
     # ─── Tabs ─────────────────────────────────────────────────
 
@@ -1867,7 +2007,7 @@ class ECGApp(ctk.CTk):
         #   detail plot    (fill=both, expand=True)
 
         # ── Navigation bar ────────────────────────────────────────────────
-        nav = ctk.CTkFrame(t, fg_color=PANEL, corner_radius=0, height=38)
+        nav = ctk.CTkFrame(t, fg_color=PANEL, corner_radius=0, height=34)
         nav.pack(side="top", fill="x")
         nav.pack_propagate(False)
 
@@ -1875,15 +2015,15 @@ class ECGApp(ctk.CTk):
         ctk.CTkButton(nav, text="⏮", width=36, height=28, font=FONT_LABEL,
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
                       corner_radius=8,
-                      command=self._nav_reset).pack(side="left", padx=(SPACE_M, SPACE_XS), pady=SPACE_S)
+                      command=self._nav_reset).pack(side="left", padx=(SPACE_M, SPACE_XS), pady=SPACE_XS)
         ctk.CTkButton(nav, text="◀◀", width=40, height=28, font=FONT_SMALL,
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
                       corner_radius=8,
-                      command=lambda: self._navigate_big(-1)).pack(side="left", padx=SPACE_XS, pady=SPACE_S)
+                      command=lambda: self._navigate_big(-1)).pack(side="left", padx=SPACE_XS, pady=SPACE_XS)
         ctk.CTkButton(nav, text="◀", width=36, height=28, font=FONT_LABEL,
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
                       corner_radius=8,
-                      command=lambda: self._navigate(-1)).pack(side="left", padx=SPACE_XS, pady=SPACE_S)
+                      command=lambda: self._navigate(-1)).pack(side="left", padx=SPACE_XS, pady=SPACE_XS)
 
         # Current position entry
         ctk.CTkLabel(nav, text="t =", font=FONT_SMALL,
@@ -1906,19 +2046,19 @@ class ECGApp(ctk.CTk):
         ctk.CTkButton(nav, text="▶", width=36, height=28, font=FONT_LABEL,
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
                       corner_radius=8,
-                      command=lambda: self._navigate(+1)).pack(side="left", padx=SPACE_XS, pady=SPACE_S)
+                      command=lambda: self._navigate(+1)).pack(side="left", padx=SPACE_XS, pady=SPACE_XS)
         ctk.CTkButton(nav, text="▶▶", width=40, height=28, font=FONT_SMALL,
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
                       corner_radius=8,
-                      command=lambda: self._navigate_big(+1)).pack(side="left", padx=SPACE_XS, pady=SPACE_S)
+                      command=lambda: self._navigate_big(+1)).pack(side="left", padx=SPACE_XS, pady=SPACE_XS)
         ctk.CTkButton(nav, text="⏭", width=36, height=28, font=FONT_LABEL,
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
                       corner_radius=8,
-                      command=self._nav_end).pack(side="left", padx=(SPACE_XS, SPACE_XS), pady=SPACE_S)
+                      command=self._nav_end).pack(side="left", padx=(SPACE_XS, SPACE_XS), pady=SPACE_XS)
 
         # Separator + window size
         ctk.CTkFrame(nav, width=1, fg_color=BORDER).pack(
-            side="left", fill="y", padx=(SPACE_L, SPACE_S), pady=SPACE_S)
+            side="left", fill="y", padx=(SPACE_L, SPACE_S), pady=SPACE_XS)
         ctk.CTkLabel(nav, text="Window:", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left", padx=(0, SPACE_S))
         self.ent_window = ctk.CTkEntry(nav, width=48, height=28, font=FONT_LABEL,
@@ -1938,7 +2078,7 @@ class ECGApp(ctk.CTk):
         tk.Frame(t, height=1, bg=BORDER).pack(side="top", fill="x", padx=SPACE_M, pady=SPACE_XS)
 
         # Detail toolbar (fixed height)
-        hdr = ctk.CTkFrame(t, fg_color="transparent", height=36)
+        hdr = ctk.CTkFrame(t, fg_color="transparent", height=32)
         hdr.pack(side="top", fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
         hdr.pack_propagate(False)
 
@@ -2011,6 +2151,35 @@ class ECGApp(ctk.CTk):
         self.lbl_ann_count = ctk.CTkLabel(
             hdr, text="", font=FONT_HINT, text_color=MUTED, anchor="w")
         self.lbl_ann_count.pack(side="left", padx=(SPACE_XS, SPACE_S))  # type: ignore[union-attr]
+
+        ctk.CTkFrame(hdr, width=1, fg_color=BORDER).pack(side="left", fill="y", padx=(SPACE_M, SPACE_S), pady=SPACE_XS)
+        self.btn_pacing = ctk.CTkButton(
+            hdr, text="Pacing Periods", width=130, height=28, font=FONT_SMALL,
+            fg_color=TEAL_DARK, hover_color=TEAL, text_color="white",
+            corner_radius=8,
+            command=self._open_pacing_periods,
+        )
+        self.btn_pacing.pack(side="left", padx=SPACE_XS)  # type: ignore[union-attr]
+        self.lbl_pacing_count = ctk.CTkLabel(
+            hdr, text="", font=FONT_HINT, text_color=MUTED, anchor="w")
+        self.lbl_pacing_count.pack(side="left", padx=(SPACE_XS, SPACE_S))  # type: ignore[union-attr]
+
+        # Overview / minimap strip — full-recording navigator, directly above
+        # the detail plot (Audacity/Premiere-style). Fixed height
+        # (pack_propagate(False), mirroring nav/hdr) rather than fill=both —
+        # this reintroduces a small, deliberate slice of the vertical space
+        # Phase 3a reclaimed. The minimap is part of the central ECG-viewing
+        # area, not competing chrome.
+        ov_frame = tk.Frame(t, bg=PLOT["bg"], bd=0, highlightthickness=0, height=60)
+        ov_frame.pack(side="top", fill="x", padx=SPACE_XS, pady=(0, SPACE_XS))
+        ov_frame.pack_propagate(False)
+        self._slots["overview"] = CanvasSlot(ov_frame, 14, 0.8, toolbar=False)
+        self._slots["overview"].canvas.mpl_connect(
+            "button_press_event", self._on_overview_click)
+        self._slots["overview"].canvas.mpl_connect(
+            "motion_notify_event", self._on_overview_motion)
+        self._slots["overview"].canvas.mpl_connect(
+            "button_release_event", self._on_overview_release)
 
         # Detail plot — expands to fill all remaining space
         det_frame = tk.Frame(t, bg=PLOT["bg"], bd=0, highlightthickness=0)
@@ -3018,6 +3187,20 @@ class ECGApp(ctk.CTk):
         """
         self.detection_ctrl.update_signal_quality(accepted)
 
+    def _on_project_name_change(self, event=None) -> None:
+        """Mirror the sidebar 'Project name' entry into the top bar.
+
+        Deliberately independent of update_kpis() (which only repaints once
+        analysis results exist) -- typing a project name should show up in
+        the top bar immediately, not only after running analysis. Also
+        called from _rebuild_ui() after _restore_ui_state() so a typed value
+        survives a theme toggle's destroy/rebuild cycle.
+        """
+        if self.ent_project_name is None or self.lbl_topbar_project is None:
+            return
+        name = self.ent_project_name.get().strip()  # type: ignore[union-attr]
+        self.lbl_topbar_project.configure(text=name if name else "—")  # type: ignore[union-attr]
+
     def _on_det_method_change(self, choice: str) -> None:
         """Show/hide SG options frame based on selected detection method."""
         self.detection_ctrl.on_det_method_change(choice)
@@ -3025,6 +3208,9 @@ class ECGApp(ctk.CTk):
     # ── ML detector: verified-for-training switch ────────────
     def _on_verified_training_toggle(self) -> None:
         self.session_ctrl.on_verified_training_toggle()
+
+    def _save_for_training_only(self) -> None:
+        self.session_ctrl.save_for_training_only()
 
     def _open_ml_training_dialog(self) -> None:
         """Open the Train/Retrain dialog for the ML R-peak detector."""
@@ -3091,6 +3277,14 @@ class ECGApp(ctk.CTk):
     def _on_overview_scroll(self, event) -> None:
         """Stub — overview removed."""
         self.nav_ctrl.on_overview_scroll(event)
+
+    def _on_overview_motion(self, event) -> None:
+        """Drag-to-scrub while the mouse button is held on the minimap strip."""
+        self.nav_ctrl.on_overview_motion(event)
+
+    def _on_overview_release(self, event) -> None:
+        """End minimap drag-to-scrub."""
+        self.nav_ctrl.on_overview_release(event)
 
     # ── Detail scroll-wheel zoom ──────────────────────────────
 
@@ -3387,6 +3581,7 @@ class ECGApp(ctk.CTk):
 
         self._rpeaks_ok       = corrected
         self._artifact_report = report
+        self._artifact_candidates = result
 
         # Clear any manual exclusions that overlapped removed peaks
         if removed > 0:
@@ -3446,6 +3641,18 @@ class ECGApp(ctk.CTk):
                 text=f"{n}" if n else "",
                 text_color=ORANGE if n else MUTED)
 
+    def _open_pacing_periods(self) -> None:
+        """Open the pacing/stimulation period manager dialog."""
+        PacingPeriodManagerDialog(self)
+
+    def _update_pacing_count(self) -> None:
+        """Refresh the pacing-period count badge in the toolbar."""
+        if self.lbl_pacing_count is not None:
+            n = len(self._pacing_periods)
+            self.lbl_pacing_count.configure(  # type: ignore[union-attr]
+                text=f"{n}" if n else "",
+                text_color=ORANGE if n else MUTED)
+
     def _run_intervals(self) -> None:
         """Compute interval delineation in background, then launch verifier."""
         self.analysis_ctrl.run_intervals()
@@ -3497,7 +3704,31 @@ class ECGApp(ctk.CTk):
         """
         frac = max(0.0, min(1.0, pct / 100.0))
         self.progress.set(frac)
-        self.lbl_progress.configure(text=f"{pct}%  {msg}")
+        self._last_prog_pct = pct
+        self._last_prog_msg = msg
+        self._render_progress_label()
+
+    def _render_progress_label(self) -> None:
+        """Render lbl_progress from the last known (pct, msg) + elapsed/ETA.
+
+        Split out from _set_progress so the heartbeat pulse (which fires
+        every 400 ms even when no new progress_cb call has arrived) can
+        keep the elapsed-time counter ticking live, instead of it only
+        updating on the sparse handful of real progress checkpoints a
+        worker happens to report.
+        """
+        pct = getattr(self, "_last_prog_pct", 0)
+        msg = getattr(self, "_last_prog_msg", "")
+        start = getattr(self, "_async_start_time", None)
+        suffix = ""
+        if start is not None:
+            elapsed = time.time() - start
+            if pct >= 1:
+                eta = elapsed * (100 - pct) / pct
+                suffix = f"   ({elapsed:.0f}s elapsed, ~{eta:.0f}s left)"
+            else:
+                suffix = f"   ({elapsed:.0f}s elapsed)"
+        self.lbl_progress.configure(text=f"{pct}%  {msg}{suffix}")
 
     def _start_async(
         self,
@@ -3534,6 +3765,10 @@ class ECGApp(ctk.CTk):
             self._set_status(status_msg, ORANGE)
         self.progress.set(0)
         self._prog_row.pack(side="bottom", fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_S))
+        self._async_start_time = time.time()
+        self._last_prog_pct = 0
+        self._last_prog_msg = ""
+        self._render_progress_label()
 
         # ── Heartbeat animation ───────────────────────────────────────────────
         # Pulses the progress bar between its current value and (value + 3%)
@@ -3562,6 +3797,7 @@ class ECGApp(ctk.CTk):
                 nxt              = _pulse_base
                 _pulse_direction = 1
             self.progress.set(max(0.0, min(0.99, nxt)))
+            self._render_progress_label()   # keep the elapsed-time counter ticking
             _pulse_after_id = self.after(400, _pulse)
 
         _pulse_after_id = self.after(400, _pulse)
@@ -3599,6 +3835,7 @@ class ECGApp(ctk.CTk):
         self.progress.set(1.0)
         self._prog_row.pack_forget()
         self.lbl_progress.configure(text="")
+        self._async_start_time = None
         button.configure(state="normal", text=original_label)
 
     # ════════════════════════════════════════════════════════
@@ -3658,6 +3895,7 @@ class ECGApp(ctk.CTk):
           judge filter settings before committing to Preview Detection.
         """
         self.plot_ctrl.draw_detail(t_start)
+        self.plot_ctrl.draw_overview()
 
     def _kb_navigate(self, direction: int) -> None:
         """Keyboard left/right arrow navigation — only active on Detection tab."""
@@ -4353,6 +4591,11 @@ class ECGApp(ctk.CTk):
             self.after(80, self._draw_all_results)
             pass  # interpretation removed
         self._update_kpis()
+        # Pre-existing gap, not introduced by the Phase 1 top-bar rework:
+        # the correlation badge was never repainted after a theme toggle
+        # before, so it silently went blank on every _rebuild_ui(). Cheap
+        # fix while already touching this exact code path.
+        self._update_quality_badge()
 
     # ════════════════════════════════════════════════════════
     #  DARK MODE (legacy — kept for backward compat)
@@ -4884,14 +5127,30 @@ class ECGApp(ctk.CTk):
         return sw
 
     def _btn(self, parent, text: str, command, pad: dict,
-             fg: str = BORDER, h: int = 28, bold: bool = False) -> ctk.CTkButton:
-        is_dark = fg in (BLUE, RED)
+             variant: str = "secondary", h: int = 28, bold: bool = False) -> ctk.CTkButton:
+        """Build a sidebar-style secondary/action button in one of 5 named
+        variants (primary/success/warning/danger/secondary), matching the
+        rationalised colour system in theme.py (COLOR_* semantic tokens).
+
+        Reads the module-level COLOR_* globals fresh on every call (not a
+        precomputed lookup table) so buttons rebuilt after a theme switch
+        (_rebuild_ui()) always pick up the current theme's colours instead
+        of whatever was active when a cached table would have been built.
+        """
+        if variant == "primary":
+            fg, hover, text_color = COLOR_PRIMARY, COLOR_PRIMARY_HOVER, "white"
+        elif variant == "success":
+            fg, hover, text_color = COLOR_SUCCESS, COLOR_SUCCESS_HOVER, "white"
+        elif variant == "warning":
+            fg, hover, text_color = COLOR_WARNING, COLOR_WARNING_HOVER, "white"
+        elif variant == "danger":
+            fg, hover, text_color = COLOR_DANGER, COLOR_DANGER_HOVER, "white"
+        else:
+            fg, hover, text_color = COLOR_SECONDARY, COLOR_SECONDARY_HOVER, MUTED
         _h = max(24, int(h * THEME.font_scale))
         btn = ctk.CTkButton(
             parent, text=text, command=command,
-            fg_color=fg,
-            hover_color=(BLUE_HOVER if fg == BLUE else RED_DARK if fg == RED else BORDER2),
-            text_color="white" if is_dark else MUTED,
+            fg_color=fg, hover_color=hover, text_color=text_color,
             font=FONT_BTN_PRIMARY if bold else FONT_BTN_SEC, height=_h, corner_radius=8,
         )
         btn.pack(**pad, fill="x", pady=(0, SPACE_S))
@@ -4967,13 +5226,6 @@ class ECGApp(ctk.CTk):
                 self._on_det_method_change("SG + Derivative (10 kHz)")
         except Exception as e:
             log.debug("cb_det_method reset failed: %s", e)
-
-        # Collapse advanced filters on reset
-        try:
-            if getattr(self, "_adv_filters_open", False):
-                self._btn_adv_flt.invoke()
-        except Exception as e:
-            log.debug("_btn_adv_flt invoke failed: %s", e)
 
         self._set_status("Parameters reset to mouse ECG defaults ✓", GREEN)
 

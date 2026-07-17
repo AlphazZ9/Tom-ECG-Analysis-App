@@ -24,6 +24,7 @@ log = logging.getLogger("ecg")
 class NavigationController:
     def __init__(self, app: "ECGApp") -> None:
         self.app = app
+        self._overview_dragging = False   # plain instance attr, mirrors wave_editor.py's _drag_key
 
     def kb_navigate(self, direction: int) -> None:
         """Keyboard left/right arrow navigation — only active on Detection tab."""
@@ -175,11 +176,74 @@ class NavigationController:
         )
 
     def on_overview_click(self, event) -> None:
-        """Stub — overview removed."""
-        pass
+        """Click-to-navigate + arm drag-to-scrub on the minimap strip.
+
+        Centers the window on the clicked time -- matches the existing
+        convention in PlotController._on_rr_click (RR/HR tachogram
+        click-to-navigate), which already does `t_nav - win/2`: a click
+        always brings the point of interest into context rather than
+        pinning it to the window's left edge.
+        """
+        app = self.app
+        if event.button != 1 or event.xdata is None or event.inaxes is None:
+            return
+        if app.signal.time is None or len(app.signal.time) == 0:
+            return
+        self._overview_dragging = True
+        self._set_overview_nav_pos(float(event.xdata))
+        app._draw_detail()
+
+    def on_overview_motion(self, event) -> None:
+        """Drag-to-scrub, debounced ~30ms.
+
+        draw_detail() re-slices the real signal and recomputes peak markers
+        over the visible window on every call (unlike wave_editor's cheap
+        fixed-template redraw, which is intentionally un-throttled) -- at
+        mouse-move fire rates that gap is noticeable on long/high-fs
+        recordings, so PRESS/RELEASE redraw synchronously (single discrete
+        actions) while MOTION is throttled, mirroring the existing
+        thr_debounce_id/hover_after_id after()-based debounce pattern
+        already used elsewhere in this codebase.
+        """
+        app = self.app
+        if not self._overview_dragging or event.xdata is None:
+            return
+        if app.signal.time is None or len(app.signal.time) == 0:
+            return
+        self._set_overview_nav_pos(float(event.xdata))
+        if app.ui.ov_drag_after_id is not None:
+            app.after_cancel(app.ui.ov_drag_after_id)
+        app.ui.ov_drag_after_id = app.after(30, self._flush_overview_drag)
+
+    def on_overview_release(self, event) -> None:
+        """End drag; guarantee one final, un-debounced redraw."""
+        app = self.app
+        self._overview_dragging = False
+        if app.ui.ov_drag_after_id is not None:
+            app.after_cancel(app.ui.ov_drag_after_id)
+            app.ui.ov_drag_after_id = None
+            app._draw_detail()
+
+    def _flush_overview_drag(self) -> None:
+        self.app.ui.ov_drag_after_id = None
+        self.app._draw_detail()
+
+    def _set_overview_nav_pos(self, t_click: float) -> None:
+        """Shared clamp logic for click and drag (mirrors nav_goto's clamp)."""
+        app = self.app
+        try:
+            win = float(app.ent_window.get())
+            if not (0 < win < 1e6):
+                win = 10.0
+        except (ValueError, TypeError):
+            win = 10.0
+        sig_dur   = float(app.signal.time[-1])
+        max_start = max(0.0, sig_dur - win)
+        app.ui.nav_pos = max(0.0, min(max_start, t_click - win / 2.0))
+        self.sync_nav_pos_entry()
 
     def on_overview_scroll(self, event) -> None:
-        """Stub — overview removed."""
+        """Stub — scroll-to-zoom on the minimap is out of scope for Phase 3b."""
         pass
 
     def on_detail_scroll(self, event) -> None:

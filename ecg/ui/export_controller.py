@@ -122,7 +122,7 @@ class ExportController:
             try:
                 export_fig = Figure(
                     figsize=(FIG_W, FIG_H), dpi=DPI,
-                    facecolor=PLOT.get("bg", "#1A1A2E"))
+                    facecolor=PLOT.get("bg", "#1A1A2E"), layout="constrained")
                 if hasattr(export_fig, "set_constrained_layout_pads"):
                     getattr(export_fig, "set_constrained_layout_pads")(
                         w_pad=0.08, h_pad=0.08, hspace=0.05, wspace=0.05)
