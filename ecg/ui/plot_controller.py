@@ -2063,11 +2063,3 @@ class PlotController:
         # for the real-time-computation path (detection_controller.py).
         if self.app.quality_gauge is not None:
             update_quality_gauge(self.app.quality_gauge, score)
-
-    def redraw_annotations(self) -> None:
-        """Re-render the RR tachogram to reflect updated annotations."""
-        if self.app.analysis.results is not None:
-            try:
-                self.plot_rr(self.app.analysis.results)
-            except Exception as exc:
-                log.debug("_redraw_annotations: %s", exc)

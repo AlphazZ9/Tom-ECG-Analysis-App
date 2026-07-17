@@ -2089,17 +2089,19 @@ class ECGApp(ctk.CTk):
     def _build_annotations_section(self, parent) -> None:
         """ANNOTATIONS accordion section: recording notes + event markers.
 
-        Relocates the ADVANCED section's "Notes (this recording)" and
-        "Event annotations" buttons verbatim -- neither return value was
-        captured as a named attribute, so relocating the construction call
-        site carries no downstream reference risk (same rationale as the
-        Export-format buttons in _build_export_section()).
+        Relocates the ADVANCED section's "Notes (this recording)" button
+        verbatim. "Event annotations" now opens AnnotationManagerDialog
+        (the same table-based manager the toolbar's "Annotations" chip
+        uses) instead of the old inline add/list dialog that used to live
+        here -- both edited the same self._annotations list, so the inline
+        version (_open_annotation_dialog) was a redundant, less capable
+        duplicate and has been removed.
         """
         fpx = dict(padx=SPACE_L)
         sec = CollapsibleSection(parent, "ANNOTATIONS", initially_open=False)
         f = sec.frame
-        self._btn(f, "📝  Notes (this recording)",  self._open_notes_dialog,      fpx, variant="secondary", h=28)
-        self._btn(f, "⏱  Event annotations",        self._open_annotation_dialog, fpx, variant="secondary", h=28)
+        self._btn(f, "📝  Notes (this recording)",  self._open_notes_dialog, fpx, variant="secondary", h=28)
+        self._btn(f, "⏱  Event annotations",        self._open_annotations,  fpx, variant="secondary", h=28)
 
     def _build_export_section(self, parent) -> None:
         """EXPORT accordion section: the 7 export-format buttons.
@@ -5098,129 +5100,6 @@ class ECGApp(ctk.CTk):
                       fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
                       font=FONT_BTN_SEC, height=30, corner_radius=6).pack(
             side="left", padx=(SPACE_M, 0))
-
-    # ════════════════════════════════════════════════════════
-    #  8. ANNOTATION TIMELINE (event markers on RR plot)
-    # ════════════════════════════════════════════════════════
-
-    def _open_annotation_dialog(self) -> None:
-        """Add / manage time annotations shown on the tachogram and plots."""
-        win = ctk.CTkToplevel(self)
-        win.title("Annotation Timeline")
-        win.geometry("620x480")
-        win.configure(fg_color=BG)
-        win.grab_set(); win.lift()
-
-        _COLORS = [ORANGE_DARK, BLUE, RED, GREEN_DARK, PURPLE, TEAL]
-        dur = float(len(self._signal_flt)) / self._fs if self._signal_flt is not None and self._fs else 0.0
-
-        ctk.CTkLabel(win, text="⏱  Event annotations",
-                     font=FONT_CARD_TITLE, text_color=TEXT,
-                     anchor="w").pack(padx=SPACE_L, pady=(SPACE_L, SPACE_XS), fill="x")
-        ctk.CTkLabel(win,
-                     text="Markers appear as coloured vertical lines on the RR tachogram and all time-domain plots.",
-                     font=FONT_KPI_LABEL, text_color=MUTED, anchor="w",
-                     wraplength=590).pack(padx=SPACE_L, pady=(0, SPACE_M), fill="x")
-
-        # Existing annotations list
-        list_frame = ctk.CTkScrollableFrame(win, fg_color=BG, height=200)
-        list_frame.pack(fill="both", expand=True, padx=SPACE_M, pady=(0, SPACE_M))
-
-        def _refresh_list() -> None:
-            for w in list_frame.winfo_children():
-                w.destroy()
-            for i, ann in enumerate(self._annotations):
-                row = ctk.CTkFrame(list_frame, fg_color=CARD, corner_radius=5)
-                row.pack(fill="x", pady=(0, SPACE_XS))
-                col = ann.get("color", ORANGE_DARK)
-                ctk.CTkFrame(row, width=6, fg_color=col,
-                             corner_radius=3).pack(side="left", fill="y", padx=(0, SPACE_S))
-                ctk.CTkLabel(row, text=ann.get("label", "Event"),
-                             font=FONT_LABEL, text_color=TEXT, anchor="w").pack(
-                    side="left", padx=(0, SPACE_M))
-                ctk.CTkLabel(row,
-                             text=f"t={ann['t_start']:.1f} – {ann['t_end']:.1f} s",
-                             font=FONT_SMALL, text_color=MUTED).pack(side="left")
-                ctk.CTkButton(row, text="✗", width=24, height=24,
-                              fg_color=BORDER, hover_color=RED, text_color=MUTED,
-                              font=FONT_SMALL,
-                              command=lambda ii=i: (
-                                  self._annotations.pop(ii),
-                                  _refresh_list(),
-                                  self._redraw_annotations()
-                              )).pack(side="right", padx=SPACE_S)
-            if not self._annotations:
-                ctk.CTkLabel(list_frame, text="No annotations yet",
-                             font=FONT_SMALL, text_color=MUTED).pack(pady=SPACE_L)
-
-        _refresh_list()
-
-        # Add new annotation
-        add_card = ctk.CTkFrame(win, fg_color=CARD, corner_radius=8)
-        add_card.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_S))
-        ctk.CTkLabel(add_card, text="Add annotation",
-                     font=FONT_SUBSECTION, text_color=MUTED,
-                     anchor="w").pack(padx=SPACE_M, pady=(SPACE_M, SPACE_S), fill="x")
-        row1 = ctk.CTkFrame(add_card, fg_color="transparent")
-        row1.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_S))
-        ctk.CTkLabel(row1, text="Label:", font=FONT_SMALL,
-                     text_color=MUTED, width=44).pack(side="left")
-        ent_lbl = ctk.CTkEntry(row1, width=140, height=26, font=FONT_LABEL,
-                               fg_color=BG, border_color=BORDER2, text_color=TEXT,
-                               placeholder_text="Drug injection")
-        ent_lbl.pack(side="left", padx=(0, SPACE_M))
-        ctk.CTkLabel(row1, text="Start (s):", font=FONT_SMALL,
-                     text_color=MUTED, width=56).pack(side="left")
-        ent_ts = ctk.CTkEntry(row1, width=68, height=26, font=FONT_LABEL,
-                              fg_color=BG, border_color=BORDER2, text_color=TEXT)
-        ent_ts.pack(side="left", padx=(0, SPACE_M))
-        ctk.CTkLabel(row1, text="End (s):", font=FONT_SMALL,
-                     text_color=MUTED, width=50).pack(side="left")
-        ent_te = ctk.CTkEntry(row1, width=68, height=26, font=FONT_LABEL,
-                              fg_color=BG, border_color=BORDER2, text_color=TEXT)
-        ent_te.insert(0, str(int(dur)))
-        ent_te.pack(side="left")
-
-        # Colour picker
-        _col_var = tk.StringVar(value=_COLORS[0])
-        row2 = ctk.CTkFrame(add_card, fg_color="transparent")
-        row2.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_M))
-        ctk.CTkLabel(row2, text="Colour:", font=FONT_SMALL,
-                     text_color=MUTED, width=44).pack(side="left")
-        for c in _COLORS:
-            b = tk.Button(row2, bg=c, width=2, relief="flat", cursor="hand2",
-                          command=lambda cc=c: _col_var.set(cc))
-            b.pack(side="left", padx=SPACE_XS, pady=SPACE_XS)
-
-        def _add():
-            try:
-                ts = float(ent_ts.get())
-                te = float(ent_te.get())
-            except ValueError:
-                messagebox.showwarning("Invalid", "Enter numeric start/end times.")
-                return
-            if ts > te:
-                ts, te = te, ts
-            self._annotations.append({
-                "label":   ent_lbl.get().strip() or "Event",
-                "t_start": ts, "t_end": te,
-                "color":   _col_var.get(),
-            })
-            _refresh_list()
-            self._redraw_annotations()
-
-        ctk.CTkButton(row2, text="+ Add", height=26, width=70,
-                      fg_color=GREEN, hover_color=GREEN_DARK, text_color="white",
-                      font=FONT_SMALL, corner_radius=5,
-                      command=_add).pack(side="right")
-
-        ctk.CTkButton(win, text="Close", command=win.destroy,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                      font=FONT_BTN_SEC, height=28).pack(pady=(0, SPACE_M))
-
-    def _redraw_annotations(self) -> None:
-        """Re-render the RR tachogram to reflect updated annotations."""
-        self.plot_ctrl.redraw_annotations()
 
     # ════════════════════════════════════════════════════════
     #  9. COMPARE SEGMENTS — statistical test (Wilcoxon)
