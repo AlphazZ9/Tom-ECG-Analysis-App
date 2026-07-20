@@ -20,9 +20,11 @@ VRC et formule de correction du QTc sont toutes calibrées pour la souris
   canal et de la fréquence d'échantillonnage.
 - **Filtrage** — passe-bande, filtre coupe-bande, suppression de la dérive
   de ligne de base.
-- **Détection des pics R** — trois algorithmes interchangeables
-  (Savitzky-Golay + dérivée, transformée en ondelettes continue, enveloppe
-  maximale), avec édition manuelle, undo/redo et curseur de seuil interactif.
+- **Détection des pics R** — cinq méthodes interchangeables (automatique via
+  NeuroKit2, Savitzky-Golay + dérivée, transformée en ondelettes continue,
+  enveloppe maximale, et un détecteur par ML classique entraînable sur vos
+  propres enregistrements validés), avec édition manuelle, undo/redo et
+  curseur de seuil interactif.
 - **Gestion des artefacts RR** — détection des doublons, intervalles
   non-physiologiques et battements ectopiques, avec une liste de candidats
   à valider avant toute suppression.
@@ -86,7 +88,8 @@ ecg-analysis            # après `pip install -e .`
 │   │   ├── filtering.py      # passe-bande, coupe-bande, normalisation
 │   │   ├── detection.py      # détection des pics R, artefacts RR, arythmies
 │   │   ├── analysis.py       # VRC temporel/fréquentiel/non linéaire, intervalles
-│   │   └── wave_template.py  # calibration du template d'onde & délinéation
+│   │   ├── wave_template.py  # calibration du template d'onde & délinéation
+│   │   └── ml_detector.py    # détecteur de pics R par ML classique, entraînable sur des enregistrements validés
 │   ├── io/                # formats de fichiers et persistance
 │   │   ├── loaders.py        # chargement du signal .mat / HDF5
 │   │   ├── session.py        # sauvegarde/chargement de session (JSON)
@@ -99,9 +102,9 @@ ecg-analysis            # après `pip install -e .`
 │       ├── plots.py           # pont matplotlib ↔ canvas Tk
 │       ├── dialogs.py         # fenêtres secondaires (thème, revue d'artefacts...)
 │       ├── sidebar.py         # sections repliables, vérificateur d'intervalles
+│       ├── widgets.py         # fabriques de widgets réutilisables (tuiles stats, jauge de qualité)
 │       ├── wave_editor.py     # mini-éditeur de template d'onde
-│       ├── state.py           # dataclasses d'état côté UI
-│       └── i18n.py            # table de chaînes bilingue (EN/FR)
+│       └── state.py           # dataclasses d'état côté UI
 ├── ecg_app.py             # point d'entrée rétrocompatible léger
 ├── setup.py               # packaging pour `pip install -e .`
 ├── requirements.txt

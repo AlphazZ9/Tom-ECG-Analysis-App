@@ -16,9 +16,10 @@ mice (typical resting HR ~500 bpm, 180–900 bpm range).
 - **Signal loading** — MATLAB `.mat` files, both legacy (v5/v6) and HDF5
   (v7.3, Spike2 exports), with automatic channel and sampling-rate detection.
 - **Filtering** — bandpass, notch, baseline-wander removal.
-- **R-peak detection** — three interchangeable algorithms (Savitzky-Golay +
-  derivative, continuous wavelet transform, envelope-max), with manual
-  edit/undo/redo and an interactive threshold slider.
+- **R-peak detection** — five interchangeable methods (auto via NeuroKit2,
+  Savitzky-Golay + derivative, continuous wavelet transform, envelope-max,
+  and a classical-ML detector trainable from your own reviewed recordings),
+  with manual edit/undo/redo and an interactive threshold slider.
 - **RR artifact handling** — duplicate/non-physiological/ectopic-beat
   detection with a reviewable candidate list before anything is removed.
 - **HRV analysis** — time-domain (SDNN, RMSSD, pNN6...), frequency-domain
@@ -78,7 +79,8 @@ ecg-analysis            # after `pip install -e .`
 │   │   ├── filtering.py      # bandpass, notch, normalize, downsample
 │   │   ├── detection.py      # R-peak detection, RR artifacts, arrhythmias
 │   │   ├── analysis.py       # HRV time/freq/non-linear, interval stats
-│   │   └── wave_template.py  # beat-template calibration & delineation
+│   │   ├── wave_template.py  # beat-template calibration & delineation
+│   │   └── ml_detector.py    # classical-ML R-peak detector, trainable from reviewed recordings
 │   ├── io/                # file formats and persistence
 │   │   ├── loaders.py        # .mat / HDF5 signal loading
 │   │   ├── session.py        # session save/load (JSON)
@@ -91,9 +93,9 @@ ecg-analysis            # after `pip install -e .`
 │       ├── plots.py           # matplotlib ↔ Tk canvas bridge
 │       ├── dialogs.py         # secondary windows (theme, artifact review...)
 │       ├── sidebar.py         # collapsible sections, interval verifier
+│       ├── widgets.py         # reusable widget factories (stat tiles, quality gauge)
 │       ├── wave_editor.py     # wave-template mini editor
-│       ├── state.py           # UI-facing state dataclasses
-│       └── i18n.py            # bilingual (EN/FR) string table
+│       └── state.py           # UI-facing state dataclasses
 ├── ecg_app.py             # thin backward-compatible entry point
 ├── setup.py               # `pip install -e .` packaging
 ├── requirements.txt
