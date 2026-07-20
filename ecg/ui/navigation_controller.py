@@ -228,6 +228,10 @@ class NavigationController:
         self.app.ui.ov_drag_after_id = None
         self.app._draw_detail()
 
+    def _flush_scroll_sync(self) -> None:
+        self.app.ui.scroll_sync_after_id = None
+        self.app._draw_detail(self.app.ui.nav_pos)
+
     def _set_overview_nav_pos(self, t_click: float) -> None:
         """Shared clamp logic for click and drag (mirrors nav_goto's clamp)."""
         app = self.app
@@ -292,3 +296,14 @@ class NavigationController:
 
         ax.set_xlim(new_xmin, new_xmax)
         app._slots["detail"].canvas.draw_idle()
+
+        # The detail plot itself is updated instantly above (cheap axes-only
+        # redraw, since scroll ticks can fire in rapid bursts) -- but that
+        # bypasses app._draw_detail()'s fan-out, so the minimap and RR/HR
+        # strip silently desync on scroll-zoom unless resynced separately.
+        # Debounced (mirrors ov_drag_after_id's minimap-drag debounce) so a
+        # burst of scroll ticks only triggers one full resync once scrolling
+        # settles, not one per tick.
+        if app.ui.scroll_sync_after_id is not None:
+            app.after_cancel(app.ui.scroll_sync_after_id)
+        app.ui.scroll_sync_after_id = app.after(120, self._flush_scroll_sync)

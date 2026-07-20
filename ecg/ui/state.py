@@ -123,6 +123,7 @@ class UIState:
     hover_motion_cid: Optional[int] = None       # mpl event connection id
     hover_after_id: "str | None" = None          # motion debounce handle
     ov_drag_after_id: "str | None" = None        # minimap drag-to-scrub debounce handle
+    scroll_sync_after_id: "str | None" = None    # detail scroll-zoom resync debounce handle
     beat_nav_cid: Optional[int] = None           # mpl event ID for beat navigator
     rr_click_cid: Optional[int] = None           # mpl event connection id for RR click-to-navigate
     ov_ylim: Optional[tuple] = None              # y-axis zoom cache for overview

@@ -263,6 +263,8 @@ class ECGApp(ctk.CTk):
         self.lbl_ann_count:     "Optional[ctk.CTkLabel]"   = None
         self.btn_pacing:        "Optional[ctk.CTkButton]"  = None
         self.lbl_pacing_count:  "Optional[ctk.CTkLabel]"   = None
+        self.lbl_panel_ann_count:    "Optional[ctk.CTkLabel]" = None
+        self.lbl_panel_pacing_count: "Optional[ctk.CTkLabel]" = None
         self.btn_copy_rr:       "Optional[ctk.CTkButton]"  = None
         self.btn_copy_ivl:      "Optional[ctk.CTkButton]"  = None
         self.btn_copy_epochs:   "Optional[ctk.CTkButton]"  = None
@@ -1093,7 +1095,6 @@ class ECGApp(ctk.CTk):
         self._btn(f, "🔬  Export GraphPad Prism",     self._export_prism,      fpx, variant="secondary", h=28)
         ctk.CTkFrame(f, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_S))
         self._btn(f, "📝  Notes (this recording)",    self._open_notes_dialog, fpx, variant="secondary", h=28)
-        self._btn(f, "⏱  Event annotations",          self._open_annotation_dialog, fpx, variant="secondary", h=28)
 
         # ── BOTTOM BUTTONS ────────────────────────────────────
         ctk.CTkFrame(s, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
@@ -1831,6 +1832,7 @@ class ECGApp(ctk.CTk):
 
         self._build_detection_section(scroll)
         self._build_stat_section(scroll)
+        self._build_annotations_section(scroll)
 
     def _build_detection_section(self, parent) -> None:
         """DETECTION / ARTIFACTS / ML DETECTOR accordion sections.
@@ -2093,6 +2095,42 @@ class ECGApp(ctk.CTk):
                 tile.value_label.configure(wraplength=220, justify="left")
                 self._kpi[key] = tile.value_label
 
+    def _build_annotations_section(self, parent) -> None:
+        """Compact ANNOTATIONS section: live counts + buttons that open the
+        existing AnnotationManagerDialog/PacingPeriodManagerDialog popups
+        unchanged. Kept alongside (not instead of) the Detection tab's own
+        toolbar chips -- those are Detection-tab-only, this is visible from
+        every tab.
+        """
+        sec = CollapsibleSection(parent, "ANNOTATIONS", initially_open=False)
+        f = sec.frame
+        fpx = dict(padx=SPACE_L)
+
+        # Initial text set directly from current data (not via
+        # _update_ann_count()/_update_pacing_count()) -- those also touch
+        # self.lbl_ann_count/lbl_pacing_count (the Detection tab's toolbar
+        # badges), which during _rebuild_ui() aren't rebuilt yet at this
+        # point in _build()'s sequence (_build_tabs() runs after
+        # _build_right_panel()) and would still be the just-destroyed
+        # pre-rebuild widgets. _rebuild_ui() refreshes both surfaces itself
+        # once _build() has fully completed.
+        self.lbl_panel_ann_count = ctk.CTkLabel(
+            f, text=f"{len(self._annotations)} annotations",
+            font=FONT_LABEL, text_color=TEXT, anchor="w")
+        self.lbl_panel_ann_count.pack(**fpx, fill="x", pady=(SPACE_S, SPACE_XS))
+        self._btn(f, "📍  Manage Annotations…", self._open_annotations, fpx,
+                  variant="secondary", h=28)
+
+        ctk.CTkFrame(f, height=1, fg_color=BORDER).pack(
+            fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
+
+        self.lbl_panel_pacing_count = ctk.CTkLabel(
+            f, text=f"{len(self._pacing_periods)} pacing periods",
+            font=FONT_LABEL, text_color=TEXT, anchor="w")
+        self.lbl_panel_pacing_count.pack(**fpx, fill="x", pady=(SPACE_S, SPACE_XS))
+        self._btn(f, "⏱  Manage Pacing Periods…", self._open_pacing_periods, fpx,
+                  variant="secondary", h=28)
+
     # ─── Tabs ─────────────────────────────────────────────────
 
     def _build_tabs(self, parent) -> None:
@@ -2334,9 +2372,18 @@ class ECGApp(ctk.CTk):
         self._slots["overview"].canvas.mpl_connect(
             "button_release_event", self._on_overview_release)
 
-        # Detail plot — expands to fill all remaining space
-        det_frame = tk.Frame(t, bg=PLOT["bg"], bd=0, highlightthickness=0)
-        det_frame.pack(side="top", fill="both", expand=True, padx=SPACE_XS, pady=(0, SPACE_XS))
+        # Plot area — detail trace (~70%) + synced RR/HR strip (~30%),
+        # grid-managed so both share the remaining space proportionally
+        # (same grid_rowconfigure(weight=N) idiom already used by
+        # _build_hrv_view_rr's RR-tachogram/stats split).
+        plot_area = ctk.CTkFrame(t, fg_color="transparent")
+        plot_area.pack(side="top", fill="both", expand=True)
+        plot_area.grid_rowconfigure(0, weight=7)
+        plot_area.grid_rowconfigure(1, weight=3)
+        plot_area.grid_columnconfigure(0, weight=1)
+
+        det_frame = tk.Frame(plot_area, bg=PLOT["bg"], bd=0, highlightthickness=0)
+        det_frame.grid(row=0, column=0, sticky="nsew", padx=SPACE_XS, pady=(0, SPACE_XS))
         self._slots["detail"] = CanvasSlot(det_frame, 12, 6.5, toolbar=True)
 
         self._slots["detail"].canvas.mpl_connect(
@@ -2345,6 +2392,12 @@ class ECGApp(ctk.CTk):
             "button_press_event", self._on_detail_click)
         self._hover_motion_cid = self._slots["detail"].canvas.mpl_connect(
             "motion_notify_event", self._on_detail_motion)
+
+        # RR/HR strip — synced to the same nav window as the detail plot,
+        # via ECGApp._draw_detail()'s fan-out (see draw_detail_rrhr()).
+        subplot_frame = tk.Frame(plot_area, bg=PLOT["bg"], bd=0, highlightthickness=0)
+        subplot_frame.grid(row=1, column=0, sticky="nsew", padx=SPACE_XS, pady=(0, SPACE_XS))
+        self._slots["detail_rrhr"] = CanvasSlot(subplot_frame, 12, 2.8, toolbar=False)
 
     def _build_tab_hrv_unified(self) -> None:
         """Unified HRV tab with internal segmented navigation.
@@ -3787,24 +3840,32 @@ class ECGApp(ctk.CTk):
         AnnotationManagerDialog(self)
 
     def _update_ann_count(self) -> None:
-        """Refresh the annotation count badge in the toolbar."""
+        """Refresh the annotation count badge in the toolbar and the
+        right panel's ANNOTATIONS section summary."""
         if self.lbl_ann_count is not None:
             n = len(self._annotations)
             self.lbl_ann_count.configure(  # type: ignore[union-attr]
                 text=f"{n}" if n else "",
                 text_color=ORANGE if n else MUTED)
+        if self.lbl_panel_ann_count is not None:
+            n = len(self._annotations)
+            self.lbl_panel_ann_count.configure(text=f"{n} annotations")  # type: ignore[union-attr]
 
     def _open_pacing_periods(self) -> None:
         """Open the pacing/stimulation period manager dialog."""
         PacingPeriodManagerDialog(self)
 
     def _update_pacing_count(self) -> None:
-        """Refresh the pacing-period count badge in the toolbar."""
+        """Refresh the pacing-period count badge in the toolbar and the
+        right panel's ANNOTATIONS section summary."""
         if self.lbl_pacing_count is not None:
             n = len(self._pacing_periods)
             self.lbl_pacing_count.configure(  # type: ignore[union-attr]
                 text=f"{n}" if n else "",
                 text_color=ORANGE if n else MUTED)
+        if self.lbl_panel_pacing_count is not None:
+            n = len(self._pacing_periods)
+            self.lbl_panel_pacing_count.configure(text=f"{n} pacing periods")  # type: ignore[union-attr]
 
     def _run_intervals(self) -> None:
         """Compute interval delineation in background, then launch verifier."""
@@ -4049,6 +4110,7 @@ class ECGApp(ctk.CTk):
         """
         self.plot_ctrl.draw_detail(t_start)
         self.plot_ctrl.draw_overview()
+        self.plot_ctrl.draw_detail_rrhr(t_start)
 
     def _kb_navigate(self, direction: int) -> None:
         """Keyboard left/right arrow navigation — only active on Detection tab."""
@@ -4749,6 +4811,12 @@ class ECGApp(ctk.CTk):
         # before, so it silently went blank on every _rebuild_ui(). Cheap
         # fix while already touching this exact code path.
         self._update_quality_badge()
+        # Same class of gap: the Detection-tab toolbar badges and the right
+        # panel's ANNOTATIONS summary both need a refresh after a full
+        # rebuild -- both widgets are guaranteed valid here since _build()
+        # (called above) has already fully rebuilt every tab and panel.
+        self._update_ann_count()
+        self._update_pacing_count()
 
     # ════════════════════════════════════════════════════════
     #  DARK MODE (legacy — kept for backward compat)
@@ -5071,129 +5139,6 @@ class ECGApp(ctk.CTk):
                       fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
                       font=FONT_BTN_SEC, height=30, corner_radius=6).pack(
             side="left", padx=(SPACE_M, 0))
-
-    # ════════════════════════════════════════════════════════
-    #  8. ANNOTATION TIMELINE (event markers on RR plot)
-    # ════════════════════════════════════════════════════════
-
-    def _open_annotation_dialog(self) -> None:
-        """Add / manage time annotations shown on the tachogram and plots."""
-        win = ctk.CTkToplevel(self)
-        win.title("Annotation Timeline")
-        win.geometry("620x480")
-        win.configure(fg_color=BG)
-        win.grab_set(); win.lift()
-
-        _COLORS = [ORANGE_DARK, BLUE, RED, GREEN_DARK, PURPLE, TEAL]
-        dur = float(len(self._signal_flt)) / self._fs if self._signal_flt is not None and self._fs else 0.0
-
-        ctk.CTkLabel(win, text="⏱  Event annotations",
-                     font=FONT_CARD_TITLE, text_color=TEXT,
-                     anchor="w").pack(padx=SPACE_L, pady=(SPACE_L, SPACE_XS), fill="x")
-        ctk.CTkLabel(win,
-                     text="Markers appear as coloured vertical lines on the RR tachogram and all time-domain plots.",
-                     font=FONT_KPI_LABEL, text_color=MUTED, anchor="w",
-                     wraplength=590).pack(padx=SPACE_L, pady=(0, SPACE_M), fill="x")
-
-        # Existing annotations list
-        list_frame = ctk.CTkScrollableFrame(win, fg_color=BG, height=200)
-        list_frame.pack(fill="both", expand=True, padx=SPACE_M, pady=(0, SPACE_M))
-
-        def _refresh_list() -> None:
-            for w in list_frame.winfo_children():
-                w.destroy()
-            for i, ann in enumerate(self._annotations):
-                row = ctk.CTkFrame(list_frame, fg_color=CARD, corner_radius=5)
-                row.pack(fill="x", pady=(0, SPACE_XS))
-                col = ann.get("color", ORANGE_DARK)
-                ctk.CTkFrame(row, width=6, fg_color=col,
-                             corner_radius=3).pack(side="left", fill="y", padx=(0, SPACE_S))
-                ctk.CTkLabel(row, text=ann.get("label", "Event"),
-                             font=FONT_LABEL, text_color=TEXT, anchor="w").pack(
-                    side="left", padx=(0, SPACE_M))
-                ctk.CTkLabel(row,
-                             text=f"t={ann['t_start']:.1f} – {ann['t_end']:.1f} s",
-                             font=FONT_SMALL, text_color=MUTED).pack(side="left")
-                ctk.CTkButton(row, text="✗", width=24, height=24,
-                              fg_color=BORDER, hover_color=RED, text_color=MUTED,
-                              font=FONT_SMALL,
-                              command=lambda ii=i: (
-                                  self._annotations.pop(ii),
-                                  _refresh_list(),
-                                  self._redraw_annotations()
-                              )).pack(side="right", padx=SPACE_S)
-            if not self._annotations:
-                ctk.CTkLabel(list_frame, text="No annotations yet",
-                             font=FONT_SMALL, text_color=MUTED).pack(pady=SPACE_L)
-
-        _refresh_list()
-
-        # Add new annotation
-        add_card = ctk.CTkFrame(win, fg_color=CARD, corner_radius=8)
-        add_card.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_S))
-        ctk.CTkLabel(add_card, text="Add annotation",
-                     font=FONT_SUBSECTION, text_color=MUTED,
-                     anchor="w").pack(padx=SPACE_M, pady=(SPACE_M, SPACE_S), fill="x")
-        row1 = ctk.CTkFrame(add_card, fg_color="transparent")
-        row1.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_S))
-        ctk.CTkLabel(row1, text="Label:", font=FONT_SMALL,
-                     text_color=MUTED, width=44).pack(side="left")
-        ent_lbl = ctk.CTkEntry(row1, width=140, height=26, font=FONT_LABEL,
-                               fg_color=BG, border_color=BORDER2, text_color=TEXT,
-                               placeholder_text="Drug injection")
-        ent_lbl.pack(side="left", padx=(0, SPACE_M))
-        ctk.CTkLabel(row1, text="Start (s):", font=FONT_SMALL,
-                     text_color=MUTED, width=56).pack(side="left")
-        ent_ts = ctk.CTkEntry(row1, width=68, height=26, font=FONT_LABEL,
-                              fg_color=BG, border_color=BORDER2, text_color=TEXT)
-        ent_ts.pack(side="left", padx=(0, SPACE_M))
-        ctk.CTkLabel(row1, text="End (s):", font=FONT_SMALL,
-                     text_color=MUTED, width=50).pack(side="left")
-        ent_te = ctk.CTkEntry(row1, width=68, height=26, font=FONT_LABEL,
-                              fg_color=BG, border_color=BORDER2, text_color=TEXT)
-        ent_te.insert(0, str(int(dur)))
-        ent_te.pack(side="left")
-
-        # Colour picker
-        _col_var = tk.StringVar(value=_COLORS[0])
-        row2 = ctk.CTkFrame(add_card, fg_color="transparent")
-        row2.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_M))
-        ctk.CTkLabel(row2, text="Colour:", font=FONT_SMALL,
-                     text_color=MUTED, width=44).pack(side="left")
-        for c in _COLORS:
-            b = tk.Button(row2, bg=c, width=2, relief="flat", cursor="hand2",
-                          command=lambda cc=c: _col_var.set(cc))
-            b.pack(side="left", padx=SPACE_XS, pady=SPACE_XS)
-
-        def _add():
-            try:
-                ts = float(ent_ts.get())
-                te = float(ent_te.get())
-            except ValueError:
-                messagebox.showwarning("Invalid", "Enter numeric start/end times.")
-                return
-            if ts > te:
-                ts, te = te, ts
-            self._annotations.append({
-                "label":   ent_lbl.get().strip() or "Event",
-                "t_start": ts, "t_end": te,
-                "color":   _col_var.get(),
-            })
-            _refresh_list()
-            self._redraw_annotations()
-
-        ctk.CTkButton(row2, text="+ Add", height=26, width=70,
-                      fg_color=GREEN, hover_color=GREEN_DARK, text_color="white",
-                      font=FONT_SMALL, corner_radius=5,
-                      command=_add).pack(side="right")
-
-        ctk.CTkButton(win, text="Close", command=win.destroy,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                      font=FONT_BTN_SEC, height=28).pack(pady=(0, SPACE_M))
-
-    def _redraw_annotations(self) -> None:
-        """Re-render the RR tachogram to reflect updated annotations."""
-        self.plot_ctrl.redraw_annotations()
 
     # ════════════════════════════════════════════════════════
     #  9. COMPARE SEGMENTS — statistical test (Wilcoxon)

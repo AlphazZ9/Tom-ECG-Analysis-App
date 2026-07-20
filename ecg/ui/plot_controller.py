@@ -544,6 +544,58 @@ class PlotController:
 
         self.app._slots["detail"].update(draw)
 
+    def draw_detail_rrhr(self, t_start: float | None = None) -> None:
+        """RR interval + instantaneous HR, stacked, windowed to the current
+        Detection-view range. Computed straight from rpeaks_ok/fs -- no
+        Core Analysis dependency, mirrors draw_detail()'s own data source,
+        so it's live the moment Detect Peaks/Preview has run.
+        """
+        if "detail_rrhr" not in self.app._slots:
+            return
+        fs = self.app.signal.fs
+        rp = self.app.detection.rpeaks_ok
+        if fs is None or rp is None or len(rp) < 2:
+            self.app._slots["detail_rrhr"].update(lambda fig: None)
+            return
+
+        try:
+            win = float(self.app.ent_window.get())
+            if not (0 < win < 1e6):
+                win = 10.0
+        except Exception:
+            win = 10.0
+        t0 = self.app.ui.nav_pos if t_start is None else t_start
+        t1 = t0 + win
+
+        # Full-array RR/HR (cheap -- rp is beat-count sized, not
+        # sample-count), associated with the SECOND peak of each pair so a
+        # beat whose interval started just before the window edge still
+        # shows correctly.
+        rr_ms = np.diff(rp) / fs * 1000.0
+        rr_t = rp[1:] / fs
+        hr_bpm = 60000.0 / rr_ms
+        in_view = (rr_t >= t0) & (rr_t <= t1)
+
+        def draw(fig):
+            gs = fig.add_gridspec(2, 1, hspace=0.15)
+            ax_rr = fig.add_subplot(gs[0])
+            ax_hr = fig.add_subplot(gs[1], sharex=ax_rr)
+            style_axes(ax_rr)
+            style_axes(ax_hr)
+            ax_rr.plot(rr_t[in_view], rr_ms[in_view], color=PLOT["signal"],
+                       lw=1.2, marker=".")
+            ax_hr.plot(rr_t[in_view], hr_bpm[in_view], color=BLUE,
+                       lw=1.2, marker=".")
+            ax_rr.set_ylabel("RR (ms)", fontsize=7, color=PLOT["muted"])
+            ax_hr.set_ylabel("HR (bpm)", fontsize=7, color=PLOT["muted"])
+            ax_hr.set_xlabel("Time (s)", fontsize=7, color=PLOT["muted"])
+            ax_rr.tick_params(labelbottom=False, labelsize=7)
+            ax_hr.tick_params(labelsize=7)
+            ax_rr.set_xlim(t0, t1)
+            ax_hr.set_xlim(t0, t1)
+
+        self.app._slots["detail_rrhr"].update(draw)
+
     def run_plot_chain(
         self,
         tasks: list,
@@ -2063,11 +2115,3 @@ class PlotController:
         # for the real-time-computation path (detection_controller.py).
         if self.app.quality_gauge is not None:
             update_quality_gauge(self.app.quality_gauge, score)
-
-    def redraw_annotations(self) -> None:
-        """Re-render the RR tachogram to reflect updated annotations."""
-        if self.app.analysis.results is not None:
-            try:
-                self.plot_rr(self.app.analysis.results)
-            except Exception as exc:
-                log.debug("_redraw_annotations: %s", exc)
