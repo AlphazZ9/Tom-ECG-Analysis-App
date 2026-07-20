@@ -55,6 +55,17 @@ class DetectionState:
     thresh_amp: float = 0.0
     sig_quality: Optional[int] = None
 
+    # Live per-beat correlation cache for the Detection tab's Quality
+    # mini-plot (plot_controller.py's _ensure_beat_corr_cache()) -- computed
+    # once per distinct rpeaks_ok via compute_beat_correlation(), not on
+    # every redraw. _beat_corr_for holds the exact rpeaks_ok array reference
+    # the cache was built from; since rpeaks_ok is always reassigned (never
+    # mutated in place) whenever peaks change, an `is` check against it is a
+    # correct, self-invalidating cache-validity test.
+    beat_corr: Optional[np.ndarray] = None
+    beat_corr_peaks: Optional[np.ndarray] = None
+    _beat_corr_for: Optional[np.ndarray] = None
+
     # Manual peak exclusion
     manual_excluded: set[int] = field(default_factory=set)   # sample indices excluded by user
     rpeaks_manual_excl: Optional[np.ndarray] = None           # view-ready array of excl. peaks

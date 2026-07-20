@@ -52,6 +52,107 @@ def _require_nk() -> None:
         raise RuntimeError("neurokit2 is required — pip install neurokit2")
 
 
+def compute_beat_correlation(cleaned: np.ndarray, rpeaks: np.ndarray, fs: float) -> dict:
+    """Per-beat correlation against a beat template (two-pass: rough mean →
+    quality-filtered refined template → final beat_corr). Caller guarantees
+    len(rpeaks) >= 3. Returns beat_template, beat_time, beat_matrix (shrunk
+    to <=60 ghost rows), beat_sd, beat_corr, peak_amps, and valid_rp (the
+    rpeaks subset beat_corr/peak_amps correspond to -- peaks too close to
+    the signal edges for a full beat window are excluded).
+
+    Pure NumPy, no NeuroKit2 dependency -- vectorised, fast even for 10 000
+    beats, safe to call outside analyse_core()'s Full Analysis pipeline
+    (e.g. live from the Detection tab right after peaks are detected).
+    """
+    beat_template = beat_time = beat_matrix = beat_sd = beat_corr = peak_amps = None
+    valid_rp = np.array([], dtype=int)
+    try:
+        # ── Cap half_win so the window never overlaps adjacent beats ─────────
+        # BEAT_HALF_WIN_S = ±100 ms is safe at resting HR (~500 bpm, RR=120 ms)
+        # but at 700 bpm (RR=86 ms) a ±100 ms window contains the neighbouring
+        # beats, biasing the mean template and P-wave auto-calibration.
+        # Cap at 45 % of the shortest observed RR to guarantee no overlap.
+        fixed_half_win  = int(MouseECG.BEAT_HALF_WIN_S * fs)
+        rr_samples_arr  = np.diff(rpeaks) if len(rpeaks) > 1 else np.array([fixed_half_win * 2])
+        rr_min_samples  = int(np.min(rr_samples_arr[rr_samples_arr > 0])) if len(rr_samples_arr) else fixed_half_win * 2
+        half_win        = max(20, min(fixed_half_win, int(rr_min_samples * 0.45)))
+        if half_win < fixed_half_win:
+            log.debug(
+                "Beat window capped: ±%d ms (min RR=%.0f ms, was ±%d ms)",
+                round(half_win / fs * 1000),
+                rr_min_samples / fs * 1000,
+                round(fixed_half_win / fs * 1000),
+            )
+        valid_rp = rpeaks[(rpeaks - half_win >= 0) & (rpeaks + half_win < len(cleaned))]
+        if len(valid_rp):
+            # Build full matrix in one allocation — no Python loop
+            idx         = valid_rp[:, None] + np.arange(-half_win, half_win)
+            beat_matrix = cleaned[idx]                      # (n_beats, 2*half_win)
+            beat_time     = np.arange(-half_win, half_win) / fs * 1000
+            peak_amps     = beat_matrix[:, half_win].copy() # copy before shrinking matrix
+
+            # ── Pass 1: rough mean beat from all beats ───────────────────────
+            rough_mean    = beat_matrix.mean(axis=0)
+
+            # ── Correlation via dot-product — 50× faster than corrcoef loop ──
+            # Beat quality: Pearson r with rough template. Beats with r < 0.75
+            # (ectopics, artefacts, transitions) are excluded from the refined
+            # template, giving a much cleaner P/Q/R/S/T reference.
+            tmpl_c = rough_mean - rough_mean.mean()
+            tmpl_n = np.linalg.norm(tmpl_c)
+            if tmpl_n > 1e-9:
+                beats_c   = beat_matrix - beat_matrix.mean(axis=1, keepdims=True)
+                norms     = np.linalg.norm(beats_c, axis=1, keepdims=True)
+                norms     = np.where(norms < 1e-9, 1.0, norms)
+                beat_corr = (beats_c @ tmpl_c) / (norms.ravel() * tmpl_n)
+            else:
+                beat_corr = np.ones(len(beat_matrix))
+
+            # ── Pass 2: refined mean beat from high-quality beats only ───────
+            good_mask     = beat_corr >= 0.75
+            n_good        = int(good_mask.sum())
+            if n_good >= max(5, len(beat_matrix) // 10):
+                # Use high-quality beats for the template
+                refined_matrix = beat_matrix[good_mask]
+                beat_template  = refined_matrix.mean(axis=0)
+                beat_sd        = refined_matrix.std(axis=0)
+                log.debug("Beat template: %d/%d high-quality beats (corr≥0.75)",
+                          n_good, len(beat_matrix))
+            else:
+                # Fall back to all beats if too few pass quality filter
+                beat_template = rough_mean
+                beat_sd       = beat_matrix.std(axis=0)
+                log.debug("Beat template: quality filter yielded only %d/%d — using all",
+                          n_good, len(beat_matrix))
+
+            # Re-compute beat_corr against the refined template
+            tmpl_c = beat_template - beat_template.mean()
+            tmpl_n = np.linalg.norm(tmpl_c)
+            if tmpl_n > 1e-9:
+                beats_c   = beat_matrix - beat_matrix.mean(axis=1, keepdims=True)
+                norms     = np.linalg.norm(beats_c, axis=1, keepdims=True)
+                norms     = np.where(norms < 1e-9, 1.0, norms)
+                beat_corr = (beats_c @ tmpl_c) / (norms.ravel() * tmpl_n)
+
+            # ── Free the full beat_matrix immediately after statistics are done.
+            # On a long recording (10k beats, fs=20kHz, 0.1s window) it can reach
+            # 320 MB.  Only a small ghost-trace sub-sample (~60 rows) is kept for
+            # the overlay in draw_template — negligible memory, same visual result.
+            n_ghost   = min(60, len(valid_rp))
+            rng       = np.random.default_rng(seed=0)
+            ghost_idx = np.sort(rng.choice(len(valid_rp), size=n_ghost, replace=False))
+            beat_matrix = beat_matrix[ghost_idx]   # ≤60 rows kept
+            log.debug("Beat template: %d beats, matrix shrunk to %d ghost rows (%.1f kB)",
+                      len(valid_rp), n_ghost, beat_matrix.nbytes / 1e3)
+    except Exception as exc:
+        log.warning("Beat template failed: %s", exc)
+
+    return dict(
+        beat_template=beat_template, beat_time=beat_time, beat_matrix=beat_matrix,
+        beat_sd=beat_sd, beat_corr=beat_corr, peak_amps=peak_amps, valid_rp=valid_rp,
+    )
+
+
 def analyse_core(
     cleaned:     np.ndarray,
     rpeaks:      np.ndarray,
@@ -140,87 +241,13 @@ def analyse_core(
 
     # Beat template — vectorised, fast even for 10 000 beats
     _prog(65, "Beat template…")
-    beat_template = beat_time = beat_matrix = beat_sd = beat_corr = peak_amps = None
-    try:
-        # ── Cap half_win so the window never overlaps adjacent beats ─────────
-        # BEAT_HALF_WIN_S = ±100 ms is safe at resting HR (~500 bpm, RR=120 ms)
-        # but at 700 bpm (RR=86 ms) a ±100 ms window contains the neighbouring
-        # beats, biasing the mean template and P-wave auto-calibration.
-        # Cap at 45 % of the shortest observed RR to guarantee no overlap.
-        fixed_half_win  = int(MouseECG.BEAT_HALF_WIN_S * fs)
-        rr_samples_arr  = np.diff(rpeaks) if len(rpeaks) > 1 else np.array([fixed_half_win * 2])
-        rr_min_samples  = int(np.min(rr_samples_arr[rr_samples_arr > 0])) if len(rr_samples_arr) else fixed_half_win * 2
-        half_win        = max(20, min(fixed_half_win, int(rr_min_samples * 0.45)))
-        if half_win < fixed_half_win:
-            log.debug(
-                "Beat window capped: ±%d ms (min RR=%.0f ms, was ±%d ms)",
-                round(half_win / fs * 1000),
-                rr_min_samples / fs * 1000,
-                round(fixed_half_win / fs * 1000),
-            )
-        valid_rp = rpeaks[(rpeaks - half_win >= 0) & (rpeaks + half_win < len(cleaned))]
-        if len(valid_rp):
-            # Build full matrix in one allocation — no Python loop
-            idx         = valid_rp[:, None] + np.arange(-half_win, half_win)
-            beat_matrix = cleaned[idx]                      # (n_beats, 2*half_win)
-            beat_time     = np.arange(-half_win, half_win) / fs * 1000
-            peak_amps     = beat_matrix[:, half_win].copy() # copy before shrinking matrix
-
-            # ── Pass 1: rough mean beat from all beats ───────────────────────
-            rough_mean    = beat_matrix.mean(axis=0)
-
-            # ── Correlation via dot-product — 50× faster than corrcoef loop ──
-            # Beat quality: Pearson r with rough template. Beats with r < 0.75
-            # (ectopics, artefacts, transitions) are excluded from the refined
-            # template, giving a much cleaner P/Q/R/S/T reference.
-            tmpl_c = rough_mean - rough_mean.mean()
-            tmpl_n = np.linalg.norm(tmpl_c)
-            if tmpl_n > 1e-9:
-                beats_c   = beat_matrix - beat_matrix.mean(axis=1, keepdims=True)
-                norms     = np.linalg.norm(beats_c, axis=1, keepdims=True)
-                norms     = np.where(norms < 1e-9, 1.0, norms)
-                beat_corr = (beats_c @ tmpl_c) / (norms.ravel() * tmpl_n)
-            else:
-                beat_corr = np.ones(len(beat_matrix))
-
-            # ── Pass 2: refined mean beat from high-quality beats only ───────
-            good_mask     = beat_corr >= 0.75
-            n_good        = int(good_mask.sum())
-            if n_good >= max(5, len(beat_matrix) // 10):
-                # Use high-quality beats for the template
-                refined_matrix = beat_matrix[good_mask]
-                beat_template  = refined_matrix.mean(axis=0)
-                beat_sd        = refined_matrix.std(axis=0)
-                log.debug("Beat template: %d/%d high-quality beats (corr≥0.75)",
-                          n_good, len(beat_matrix))
-            else:
-                # Fall back to all beats if too few pass quality filter
-                beat_template = rough_mean
-                beat_sd       = beat_matrix.std(axis=0)
-                log.debug("Beat template: quality filter yielded only %d/%d — using all",
-                          n_good, len(beat_matrix))
-
-            # Re-compute beat_corr against the refined template
-            tmpl_c = beat_template - beat_template.mean()
-            tmpl_n = np.linalg.norm(tmpl_c)
-            if tmpl_n > 1e-9:
-                beats_c   = beat_matrix - beat_matrix.mean(axis=1, keepdims=True)
-                norms     = np.linalg.norm(beats_c, axis=1, keepdims=True)
-                norms     = np.where(norms < 1e-9, 1.0, norms)
-                beat_corr = (beats_c @ tmpl_c) / (norms.ravel() * tmpl_n)
-
-            # ── Free the full beat_matrix immediately after statistics are done.
-            # On a long recording (10k beats, fs=20kHz, 0.1s window) it can reach
-            # 320 MB.  Only a small ghost-trace sub-sample (~60 rows) is kept for
-            # the overlay in draw_template — negligible memory, same visual result.
-            n_ghost   = min(60, len(valid_rp))
-            rng       = np.random.default_rng(seed=0)
-            ghost_idx = np.sort(rng.choice(len(valid_rp), size=n_ghost, replace=False))
-            beat_matrix = beat_matrix[ghost_idx]   # ≤60 rows kept
-            log.debug("Beat template: %d beats, matrix shrunk to %d ghost rows (%.1f kB)",
-                      len(valid_rp), n_ghost, beat_matrix.nbytes / 1e3)
-    except Exception as exc:
-        log.warning("Beat template failed: %s", exc)
+    _bc = compute_beat_correlation(cleaned, rpeaks, fs)
+    beat_template = _bc["beat_template"]
+    beat_time     = _bc["beat_time"]
+    beat_matrix   = _bc["beat_matrix"]
+    beat_sd       = _bc["beat_sd"]
+    beat_corr     = _bc["beat_corr"]
+    peak_amps     = _bc["peak_amps"]
 
     _prog(100, "Core analysis done")
     return cast(AnalysisResults, dict(

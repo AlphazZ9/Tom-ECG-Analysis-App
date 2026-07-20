@@ -34,6 +34,7 @@ _trapz = getattr(np, "trapz", None) or getattr(np, "trapezoid", None)
 
 from ecg.core.models import MouseECG
 from ecg.core.filtering import downsample_for_display, downsample_envelope
+from ecg.core.analysis import compute_beat_correlation
 from ecg.ui.plots import style_axes
 from ecg.ui.wave_editor import WaveTemplateEditor
 from ecg.ui.theme import (
@@ -544,11 +545,43 @@ class PlotController:
 
         self.app._slots["detail"].update(draw)
 
+    def _ensure_beat_corr_cache(self) -> bool:
+        """Lazily compute+cache per-beat template correlation for the
+        Detection tab's Quality mini-plot.
+
+        Identity-checked against rpeaks_ok, not recomputed on every redraw:
+        rpeaks_ok is always reassigned (never mutated in place) at its one
+        recompute point (detection_controller.py's run_detection(), which
+        every Edit Peaks/Undo/Redo/Free Placement/threshold change funnels
+        through), so an `is` check here is a correct, self-invalidating
+        cache-validity test. Returns False if there's no data to compute
+        from yet (mirrors _ensure_overview_cache()'s convention).
+        """
+        d = self.app.detection
+        if d.rpeaks_ok is d._beat_corr_for:
+            return d.beat_corr is not None
+        sig_flt = self.app.signal.filtered
+        fs = self.app.signal.fs
+        if sig_flt is None or fs is None or d.rpeaks_ok is None or len(d.rpeaks_ok) < 3:
+            d.beat_corr = d.beat_corr_peaks = None
+            d._beat_corr_for = d.rpeaks_ok
+            return False
+        r = compute_beat_correlation(sig_flt, d.rpeaks_ok, fs)
+        d.beat_corr = r["beat_corr"]
+        d.beat_corr_peaks = r["valid_rp"]
+        d._beat_corr_for = d.rpeaks_ok
+        return d.beat_corr is not None
+
     def draw_detail_rrhr(self, t_start: float | None = None) -> None:
-        """RR interval + instantaneous HR, stacked, windowed to the current
-        Detection-view range. Computed straight from rpeaks_ok/fs -- no
-        Core Analysis dependency, mirrors draw_detail()'s own data source,
-        so it's live the moment Detect Peaks/Preview has run.
+        """RR interval + instantaneous HR + beat-template Quality, stacked,
+        windowed to the current Detection-view range.
+
+        RR/HR are computed straight from rpeaks_ok/fs -- no Core Analysis
+        dependency, mirrors draw_detail()'s own data source, so they're live
+        the moment Detect Peaks/Preview has run. Quality comes from
+        _ensure_beat_corr_cache() -- same live timing, but cached (see that
+        method's docstring) since it's real per-beat linear algebra, not
+        free arithmetic like RR/HR.
         """
         if "detail_rrhr" not in self.app._slots:
             return
@@ -576,23 +609,41 @@ class PlotController:
         hr_bpm = 60000.0 / rr_ms
         in_view = (rr_t >= t0) & (rr_t <= t1)
 
+        self._ensure_beat_corr_cache()
+        d = self.app.detection
+        has_quality = d.beat_corr is not None and d.beat_corr_peaks is not None
+        if has_quality:
+            q_t = d.beat_corr_peaks / fs
+            in_view_q = (q_t >= t0) & (q_t <= t1)
+
         def draw(fig):
-            gs = fig.add_gridspec(2, 1, hspace=0.15)
+            gs = fig.add_gridspec(3, 1, hspace=0.15)
             ax_rr = fig.add_subplot(gs[0])
             ax_hr = fig.add_subplot(gs[1], sharex=ax_rr)
+            ax_q  = fig.add_subplot(gs[2], sharex=ax_rr)
             style_axes(ax_rr)
             style_axes(ax_hr)
+            style_axes(ax_q)
             ax_rr.plot(rr_t[in_view], rr_ms[in_view], color=PLOT["signal"],
                        lw=1.2, marker=".")
             ax_hr.plot(rr_t[in_view], hr_bpm[in_view], color=BLUE,
                        lw=1.2, marker=".")
+            if has_quality:
+                ax_q.plot(q_t[in_view_q], d.beat_corr[in_view_q], color=GREEN,
+                          lw=1.2, marker=".")
+                # 0.90 matches the "Beats < 0.90 corr." threshold already
+                # used by the Statistics panel and Summary tab.
+                ax_q.axhline(0.90, color=PLOT["muted"], lw=0.6, ls="--")
             ax_rr.set_ylabel("RR (ms)", fontsize=7, color=PLOT["muted"])
             ax_hr.set_ylabel("HR (bpm)", fontsize=7, color=PLOT["muted"])
-            ax_hr.set_xlabel("Time (s)", fontsize=7, color=PLOT["muted"])
+            ax_q.set_ylabel("Quality", fontsize=7, color=PLOT["muted"])
+            ax_q.set_xlabel("Time (s)", fontsize=7, color=PLOT["muted"])
             ax_rr.tick_params(labelbottom=False, labelsize=7)
-            ax_hr.tick_params(labelsize=7)
+            ax_hr.tick_params(labelbottom=False, labelsize=7)
+            ax_q.tick_params(labelsize=7)
             ax_rr.set_xlim(t0, t1)
             ax_hr.set_xlim(t0, t1)
+            ax_q.set_xlim(t0, t1)
 
         self.app._slots["detail_rrhr"].update(draw)
 
