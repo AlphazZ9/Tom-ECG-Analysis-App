@@ -13,10 +13,12 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+import customtkinter as ctk  # type: ignore[import-untyped]
+
 from ecg.core.models import MouseECG
 from ecg.core.detection import apply_threshold
 from ecg.ui.theme import (
-    BLUE, BORDER, BORDER2, GREEN, MUTED, ORANGE, ORANGE_DEEP, RED,
+    BLUE, BORDER, BORDER2, GREEN, LIGHT, MUTED, ORANGE, ORANGE_DEEP, RED,
 )
 from ecg.ui.widgets import update_quality_gauge
 
@@ -167,38 +169,48 @@ class DetectionController:
         else:
             self.app._sg_frame.pack_forget()
 
-    def on_no_filter_toggle(self) -> None:
-        """Enable/disable the no-filter mode and dim the filter controls.
+    def on_filtering_toggle(self) -> None:
+        """Grey out (not hide) FILTER SETTINGS -- notch/band-pass/cleaning
+        -- when Filtering is off, and refresh the "Processing" summary.
 
-        Utilise une liste plate pré-calculée (_filter_control_widgets) au lieu
-        d'une traversée récursive winfo_children() — évite de configurer 50+
-        widgets imbriqués à chaque toggle.
+        Visible either way, so the user can see/set values in advance;
+        only interaction is blocked. Distinct from the always-interactive
+        DISPLAY & PREVIEW group above it (sw_show_raw/sw_invert_signal/
+        sw_filter_preview), which apply regardless of this switch.
         """
-        no_filter = bool(self.app.sw_no_filter.get())
-        new_state = "disabled" if no_filter else "normal"
+        filtering_on = bool(self.app.sw_filtering.get())
+        g = self.app._filter_advanced_group
+        if g is not None:
+            self._set_group_availability(g, filtering_on)
+        self.app._update_filter_summary()
 
-        # Chemin rapide : liste plate construite lors du démarrage
-        if self.app._filter_control_widgets:
-            for widget in self.app._filter_control_widgets:
-                try:
+    def _set_group_availability(self, frame, available: bool) -> None:
+        """Recursively enable/disable every widget under `frame`.
+
+        CTkEntry/CTkComboBox dim automatically via state="disabled". CTkSwitch
+        does NOT -- its _draw() only fades the text label, the track/button
+        colours stay identical to the enabled look -- so its colours are
+        explicitly swapped too: BLUE=enabled+on, BORDER2=enabled+off (the
+        _switch() construction defaults), BORDER/LIGHT=unavailable, a third,
+        visually distinct "can't touch this" state regardless of the
+        switch's underlying on/off value. CTkLabel/CTkFrame don't support
+        state= at all -- configure() failures on those are expected no-ops.
+        """
+        new_state = "normal" if available else "disabled"
+        for widget in frame.winfo_children():
+            try:
+                if isinstance(widget, ctk.CTkSwitch):
+                    if available:
+                        widget.configure(state=new_state, progress_color=BLUE,
+                                          button_color=BORDER2, text_color=MUTED)
+                    else:
+                        widget.configure(state=new_state, progress_color=BORDER,
+                                          button_color=BORDER, text_color=LIGHT)
+                else:
                     widget.configure(state=new_state)
-                except Exception as e:
-                    log.debug("widget.configure(state) failed: %s", e)
-        else:
-            # Fallback : traversée récursive si la liste n'est pas encore prête
-            def _set_state_recursive(frame) -> None:
-                for widget in frame.winfo_children():
-                    try:
-                        widget.configure(state=new_state)
-                    except Exception as e:
-                        log.debug("widget.configure(state) failed: %s", e)
-                    try:
-                        _set_state_recursive(widget)
-                    except Exception as e:
-                        log.debug("_set_state_recursive failed: %s", e)
-            _set_state_recursive(self.app._filter_widgets_frame)
-            if self.app._adv_filters_group is not None:
-                _set_state_recursive(self.app._adv_filters_group)
+            except Exception as e:
+                log.debug("widget.configure(state) failed: %s", e)
+            self._set_group_availability(widget, available)
 
     def on_show_raw_toggle(self) -> None:
         """Switch the overview and detail plots between raw and filtered signals.
@@ -210,14 +222,6 @@ class DetectionController:
         """
         self.app.ui.show_raw = bool(self.app.sw_show_raw.get())
         if self.app.signal.filtered is not None:
-            # Invalidate the relevant downsampled cache so it is rebuilt next draw.
-            # _ds_time is rebuilt alongside _ds_sig (via _downsample_pair),
-            # so only reset it when the primary filtered signal cache is dropped.
-            if self.app.ui.show_raw:
-                self.app.ui.ds_raw_sig = None
-            else:
-                self.app.ui.ds_sig  = None
-                self.app.ui.ds_time = None
             self.app._draw_detail(self.app.ui.nav_pos)
 
     def push_edit_undo(self) -> None:

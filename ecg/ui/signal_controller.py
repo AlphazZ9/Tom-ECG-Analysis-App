@@ -110,6 +110,15 @@ class SignalController:
             # fix_polarity AVANT la détection : le détecteur wavelet (comme SG)
             # travaille sur la dérivée positive → il faut que les R-peaks soient
             # positifs dans le signal, sinon seuls les artefacts positifs sont détectés.
+            #
+            # NOTE: unlike the SG-derivative/Envelope-Max/ML branches below,
+            # this call is NOT guarded by `if not params.get("invert_signal")`
+            # -- it always runs, even if the user already inverted manually.
+            # That asymmetry is intentional-or-unconfirmed (not verified
+            # against real double-inverted recordings) -- don't "fix" it by
+            # assuming it should match the other three methods without
+            # testing what Wavelet detection actually does on a
+            # user-already-inverted signal first.
             _prog(48, "Polarity correction…")
             sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"])
             _prog(50, "CWT — séparation bruit / QRS / J-wave…")
@@ -413,14 +422,6 @@ class SignalController:
         self.app.signal.inverted  = False
         self.app.signal.raw_only_loaded  = True
         self.app.ui.nav_pos          = 0.0
-        self.app.ui.ds_time          = None
-        self.app.ui.ds_sig           = None
-        self.app.ui.ds_sig_max       = None
-        self.app.ui.ds_sig_mid       = None
-        self.app.ui.ds_raw_sig       = None
-        self.app.ui.ds_raw_sig_max   = None
-        self.app.ui.ds_raw_sig_mid   = None
-        self.app.ui.ov_ylim          = None
         self.app.detection.rpeaks_ok            = None
         self.app.detection.rpeaks_rej           = None
         self.app.detection.thresh_amp           = 0.0
@@ -613,14 +614,6 @@ class SignalController:
         self.app.signal.raw_only_loaded = False
         # recommended_min_rr_ms supprimé — ent_minrr non modifié automatiquement.
         self.app.ui.nav_pos         = 0.0
-        self.app.ui.ds_time         = None
-        self.app.ui.ds_sig          = None
-        self.app.ui.ds_sig_max      = None
-        self.app.ui.ds_sig_mid      = None
-        self.app.ui.ds_raw_sig      = None
-        self.app.ui.ds_raw_sig_max  = None
-        self.app.ui.ds_raw_sig_mid  = None
-        self.app.ui.ov_ylim         = None   # clear y-zoom on new signal
         # Peak detection results (computed in worker from pure candidates)
         self.app.detection.rpeaks_ok           = bundle["rpeaks_ok"]
         self.app.detection.rpeaks_rej          = bundle["rpeaks_rej"]
@@ -887,6 +880,14 @@ class SignalController:
         changes — the preview segment isn't auto-reactive to keystrokes,
         only re-evaluated on these discrete commit events, matching how
         the rest of the sidebar (Preview Detection button) already works.
+
+        Deliberately a no-op when `filter_preview_on` is False -- editing
+        lp/hp/notch/clean-method has no visible effect until the user
+        enables "Preview filter effect" or clicks "Preview Detection". This
+        is the existing convention, not a bug: any new filter widget should
+        call this same method on change (see ent_lp/ent_hp/sw_notch/cb_clean
+        bindings in app.py's FILTERS section) rather than forcing the
+        overlay on, to keep behaviour consistent across the panel.
         """
         if self.app.ui.filter_preview_on:
             self.app._draw_detail()
@@ -964,13 +965,6 @@ class SignalController:
         self.app.detection.sig_quality          = None
         self.app.analysis.artifact_report      = None
         self.app.analysis.artifact_candidates  = []
-        self.app.ui.ds_time              = None
-        self.app.ui.ds_sig               = None
-        self.app.ui.ds_sig_max           = None
-        self.app.ui.ds_sig_mid           = None
-        self.app.ui.ds_raw_sig           = None
-        self.app.ui.ds_raw_sig_max       = None
-        self.app.ui.ds_raw_sig_mid       = None
         self.app.detection.manual_excluded      = set()
         self.app.detection.rpeaks_manual_excl   = None
         self.app.detection.manual_added         = set()

@@ -42,9 +42,7 @@ VRC et formule de correction du QTc sont toutes calibrées pour la souris
   enregistrements récemment analysés.
 - **Export** — classeurs Excel formatés, GraphPad Prism `.pzfx`, rapports
   PDF, CSV.
-- **Traitement par lots** — analyse de plusieurs fichiers en parallèle, un
-  classeur de sortie par fichier plus une feuille de synthèse combinée.
-- **Thèmes** — 7 préréglages clair/sombre, propagés en direct dans toute
+- **Thèmes** — préréglages clair/sombre, propagés en direct dans toute
   l'interface.
 
 ## Prérequis
@@ -82,7 +80,6 @@ ecg-analysis            # après `pip install -e .`
 ├── ecg/
 │   ├── __init__.py       # version du package, aperçu de l'architecture
 │   ├── __main__.py       # point d'entrée `python -m ecg`
-│   ├── batch.py          # pipeline de traitement par lots en parallèle
 │   ├── core/             # pur NumPy/SciPy/pandas — sans UI, sans I/O fichier
 │   │   ├── models.py         # constantes de physiologie, dataclasses partagées
 │   │   ├── filtering.py      # passe-bande, coupe-bande, normalisation
@@ -113,8 +110,7 @@ ecg-analysis            # après `pip install -e .`
 
 `ecg.core` ne dépend ni de `ecg.ui` ni de `ecg.io` — les algorithmes de
 détection et de VRC sont des fonctions pures, testables, scriptables ou
-réutilisables (par exemple depuis `ecg.batch`) sans lancer l'interface
-graphique.
+réutilisables sans lancer l'interface graphique.
 
 ## Notes pour les contributeurs
 

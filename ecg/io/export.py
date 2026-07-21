@@ -543,9 +543,9 @@ class ExcelExporter:
 # used to be imported from theme.py (coincidentally matching its palette at
 # the time), which pulled a customtkinter import (and its module-level
 # ctk.set_appearance_mode()/set_default_color_theme() calls) into every
-# process that imports export.py -- including batch.py's subprocess workers,
-# which are documented as having no Tkinter/CTk dependency. Hardcoded here
-# to match the previous values exactly and keep that contract true.
+# process that imports export.py, even ones with no Tkinter/CTk dependency
+# otherwise. Hardcoded here to match the previous values exactly and keep
+# that contract true.
 ANNOTATION_COLORS: list[tuple[str, str]] = [
     ("#E65100", "Orange"),
     ("#1A56DB", "Blue"),

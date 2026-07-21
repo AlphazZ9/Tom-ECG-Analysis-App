@@ -69,7 +69,13 @@ class ThemeConfig:
     PRESETS: "dict[str, dict]" = {
         "Light": dict(
             is_dark=False,
-            BG="#F4F5F7", PANEL="#ECEEF1", CARD="#FFFFFF",
+            # PANEL == CARD deliberately (both pure white): the app's one
+            # unified "neutral surface" token (chrome, workspace, plots,
+            # dialogs -- see app.py's self.main/self.tabs and theme.py's
+            # _make_plot_theme()) should read as white, not grey. Matching
+            # CARD's exact value rather than a "close but different" off-white
+            # avoids reintroducing the seam that BG-vs-PANEL used to cause.
+            BG="#F4F5F7", PANEL="#FFFFFF", CARD="#FFFFFF",
             BORDER="#DCE0E5", BORDER2="#C7CDD4",
             TEXT="#1B222C", MUTED="#5B6472", LIGHT="#939DA8",
             RED="#D64545",  BLUE="#2D6CDF", GREEN="#2E9E5B", ORANGE="#E08A2A",
@@ -391,8 +397,15 @@ SPACE_L  = 12
 def _make_plot_theme(tc: "ThemeConfig") -> "dict[str, str]":
     if tc.is_dark:
         return dict(
-            bg=tc._colors.get("BG",     "#2E3440"),
-            axes=tc._colors.get("CARD", "#434C5E"),
+            # bg == axes deliberately: BG and PANEL are two subtly different
+            # greys (workspace vs chrome), which read as an unwanted seam
+            # between a plot's figure margin and its own axes rectangle, and
+            # between the plot and the panel around it. Using PANEL for both
+            # makes every plot one flat, consistent grey that matches its
+            # surroundings -- see also self.main/self.tabs in app.py, which
+            # apply the same fix to the workspace area itself.
+            bg=tc._colors.get("PANEL",  "#1B1F26"),
+            axes=tc._colors.get("PANEL", "#1B1F26"),
             grid=tc._colors.get("BORDER","#4C566A"),
             text=tc._colors.get("TEXT",  "#ECEFF4"),
             muted=tc._colors.get("MUTED","#BEC7D8"),
@@ -405,8 +418,8 @@ def _make_plot_theme(tc: "ThemeConfig") -> "dict[str, str]":
         )
     else:
         return dict(
-            bg=tc._colors.get("BG",     "#F8F9FB"),
-            axes=tc._colors.get("CARD", "#FFFFFF"),
+            bg=tc._colors.get("PANEL",  "#ECEEF1"),
+            axes=tc._colors.get("PANEL", "#ECEEF1"),
             grid=tc._colors.get("BORDER","#DDE1EA"),
             text=tc._colors.get("TEXT",  "#0F172A"),
             muted=tc._colors.get("MUTED","#64748B"),

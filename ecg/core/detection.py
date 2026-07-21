@@ -46,6 +46,18 @@ log = logging.getLogger("ecg")
 
 # ─── helper partagé ────────────────────────────────────────────────────────────
 
+def _prominence_wlen_samples(fs: float) -> int:
+    """`wlen` (samples) bounding every prominence/width search below.
+
+    Without it, find_peaks(..., prominence=X)/peak_prominences/peak_widths
+    search the entire array outward from each peak for a taller point --
+    see MouseECG.PROMINENCE_WLEN_MS for why this is a real, observed
+    catastrophic-slowdown risk on raw (unfiltered) signal, not just a
+    theoretical one.
+    """
+    return max(3, int(round(MouseECG.PROMINENCE_WLEN_MS / 1000.0 * fs)))
+
+
 def _detect_baseline_wander(signal: np.ndarray, fs: float) -> bool:
     """Détecte une dérive de ligne de base significative (respiration, mouvement).
 
@@ -129,7 +141,7 @@ def _upstroke_slope_at(pk: int, signal: np.ndarray, fs: float,
     return float(d.max()) if len(d) else 0.0
 
 
-def _topographic_prominences(signal: np.ndarray, peaks: np.ndarray) -> np.ndarray:
+def _topographic_prominences(signal: np.ndarray, peaks: np.ndarray, fs: float) -> np.ndarray:
     """Genuine topographic prominence at each peak (height above the higher
     of its two neighbouring valleys), via ``scipy.signal.peak_prominences``.
 
@@ -140,14 +152,15 @@ def _topographic_prominences(signal: np.ndarray, peaks: np.ndarray) -> np.ndarra
     amplitude at the peak (``signal[peaks]``) for prominence — a much
     weaker discriminator against T-waves and baseline drift, and one that
     silently changed what the same slider value meant depending on which
-    detector was active. Cheap: O(n) in practice, no new dependency
-    (scipy.signal is already used throughout this module).
+    detector was active. Cheap: O(n) in practice given a bounded `wlen` --
+    see MouseECG.PROMINENCE_WLEN_MS; unbounded, this is a real catastrophic-
+    slowdown risk on raw (unfiltered) signal, not just a theoretical one.
     """
     if len(peaks) == 0:
         return np.array([])
     peaks_sorted = np.sort(np.asarray(peaks, dtype=int))
     try:
-        proms, _, _ = peak_prominences(signal, peaks_sorted)
+        proms, _, _ = peak_prominences(signal, peaks_sorted, wlen=_prominence_wlen_samples(fs))
     except Exception as exc:
         log.debug("_topographic_prominences: peak_prominences failed (%s) "
                    "— falling back to raw amplitude", exc)
@@ -553,6 +566,11 @@ def fix_polarity(
                       de l'utilisateur sans modifier le reste du pipeline.
     """
     min_dist = max(1, int(min_dist_ms / 1000 * fs))
+    # Bounds every find_peaks(..., prominence=...) call below -- without it,
+    # prominence search on a raw/unfiltered signal (real baseline wander,
+    # no bandpass to remove it) is catastrophically slow. See
+    # MouseECG.PROMINENCE_WLEN_MS.
+    wlen = _prominence_wlen_samples(fs)
 
     if progress_cb:
         progress_cb(10, "Polarity detection…")
@@ -573,6 +591,7 @@ def fix_polarity(
             distance=min_dist,
             height=height_thresh,
             prominence=0,
+            wlen=wlen,
         )
         proms = props.get("prominences", np.array([]))
         if progress_cb:
@@ -613,8 +632,8 @@ def fix_polarity(
     # une queue droite lourde (kurtosis élevée sur le signal positif).
     if votes_pos == votes_neg:
         min_dist_kurt = max(1, int(min_dist_ms / 1000 * fs))
-        cands_p, _   = find_peaks(cleaned,  distance=min_dist_kurt, prominence=0)
-        cands_n, _   = find_peaks(-cleaned, distance=min_dist_kurt, prominence=0)
+        cands_p, _   = find_peaks(cleaned,  distance=min_dist_kurt, prominence=0, wlen=wlen)
+        cands_n, _   = find_peaks(-cleaned, distance=min_dist_kurt, prominence=0, wlen=wlen)
         # Kurtosis des amplitudes des candidats (excess kurtosis)
         kurt_p = float(np.mean((cleaned[cands_p]  - cleaned[cands_p].mean())  ** 4) /
                        (cleaned[cands_p].std()  ** 4 + 1e-12) - 3) if len(cands_p) > 3 else 0.0
@@ -646,6 +665,7 @@ def fix_polarity(
         distance=min_dist,
         height=height_thresh,
         prominence=0,
+        wlen=wlen,
     )
     proms = props.get("prominences", np.array([]))
 
@@ -1207,9 +1227,10 @@ def _extended_morphology_descriptors(
         return out
 
     try:
-        w25, *_ = peak_widths(signal, peaks, rel_height=0.25)
-        w50, *_ = peak_widths(signal, peaks, rel_height=0.50)
-        w75, *_ = peak_widths(signal, peaks, rel_height=0.75)
+        _wlen = _prominence_wlen_samples(fs)
+        w25, *_ = peak_widths(signal, peaks, rel_height=0.25, wlen=_wlen)
+        w50, *_ = peak_widths(signal, peaks, rel_height=0.50, wlen=_wlen)
+        w75, *_ = peak_widths(signal, peaks, rel_height=0.75, wlen=_wlen)
     except Exception as exc:
         log.debug("_extended_morphology_descriptors: peak_widths failed (%s)", exc)
         w25 = w50 = w75 = np.zeros(n)
@@ -1273,7 +1294,7 @@ def _composite_qrs_score(
     if n == 0:
         return np.array([]), {}
 
-    prominences = _topographic_prominences(signal, peaks)
+    prominences = _topographic_prominences(signal, peaks, fs)
     # energy/persistence sont des propriétés du domaine CWT, dont le maximum
     # local se situe près de l'inflexion de montée du QRS -- PAS à
     # l'amplitude maximale où `peaks` a été replacé par le snap. Les lire
@@ -1608,7 +1629,7 @@ def detect_peaks_wavelet(
     # ── 9. Disambiguation R-vs-J (partagée) ────────────────────────────────
     peaks_out = resolve_r_vs_j_peaks(peaks_out, signal, fs, min_rr_ms=min_rr_ms)
 
-    prominences = _topographic_prominences(signal, peaks_out)
+    prominences = _topographic_prominences(signal, peaks_out, fs)
     thresh_amp  = float(np.percentile(prominences, 10)) if len(prominences) else 0.0
 
     log.info(
@@ -1906,7 +1927,7 @@ def detect_peaks_sg_derivative(
             window_beats=10,
             deriv=deriv_arr if downsample_scale == 1.0 else None,
         )
-        prominences = _topographic_prominences(signal_orig, r_peaks)
+        prominences = _topographic_prominences(signal_orig, r_peaks, orig_fs)
     else:
         prominences = np.array([])
     thresh_amp  = float(np.percentile(prominences, 10)) if len(prominences) else 0.0
@@ -2027,7 +2048,8 @@ def detect_peaks_envelope_max(
     min_dist  = max(1, int(min_rr_ms        / 1000.0 * fs))
 
     # ── 1. Candidats bruts (tous maxima locaux séparés d'au moins peak_distance_ms)
-    raw_peaks, _ = find_peaks(signal, distance=dist_samp, prominence=0)
+    raw_peaks, _ = find_peaks(signal, distance=dist_samp, prominence=0,
+                               wlen=_prominence_wlen_samples(fs))
     if len(raw_peaks) < 3:
         log.warning(
             "detect_peaks_envelope_max: trop peu de candidats bruts (%d) "
@@ -2111,7 +2133,7 @@ def detect_peaks_envelope_max(
     # ── 5. R vs J disambiguation ──────────────────────────────────────────
     r_peaks = resolve_r_vs_j_peaks(snapped, signal, fs, min_rr_ms=min_rr_ms)
 
-    prominences = _topographic_prominences(signal, r_peaks) if len(r_peaks) else np.array([])
+    prominences = _topographic_prominences(signal, r_peaks, fs) if len(r_peaks) else np.array([])
     thresh_amp  = float(np.percentile(prominences, 10)) if len(prominences) else 0.0
 
     log.info(
@@ -2394,8 +2416,13 @@ def classify_arrhythmias(
     baseline_s:      float = 30.0,
     brady_pct:       float = 20.0,
     min_brady_beats: int   = 10,
+    progress_cb:     Optional[Callable[[int, str], None]] = None,
 ) -> list[ArrhythmiaEvent]:
     """Rule-based arrhythmia classification for mouse ECG."""
+    def _prog(pct: int, msg: str) -> None:
+        if progress_cb:
+            progress_cb(pct, msg)
+
     if len(rpeaks) < 5:
         return []
 
@@ -2425,6 +2452,8 @@ def classify_arrhythmias(
         for i in range(n)
     ])
     rolling_hr = 60_000.0 / np.maximum(rolling_rr, 1.0)
+
+    _prog(10, "Baseline HR computed…")
 
     brady_hr_thresh = baseline_hr * (1.0 - brady_pct / 100.0)
     tachy_hr_thresh = baseline_hr * (1.0 + brady_pct / 100.0)
@@ -2460,6 +2489,8 @@ def classify_arrhythmias(
 
     _find_runs_ind(brady_ind, "bradycardia", "warning")
     _find_runs_ind(tachy_ind, "tachycardia", "warning")
+
+    _prog(30, "Bradycardia/tachycardia runs found…")
 
     WIN = 11; half = WIN // 2
 
@@ -2519,6 +2550,8 @@ def classify_arrhythmias(
     _find_runs_generic(esv_mask, "esv_run",
                        "Salve ESV potentielle — {n} batt. ({hr:.0f} bpm)", "alert")
 
+    _prog(70, "Pauses/ESV runs found…")
+
     WIN_CV = 7; i = 0
     while i <= n - WIN_CV:
         seg = rr_ms[i:i + WIN_CV]
@@ -2542,6 +2575,8 @@ def classify_arrhythmias(
             i += WIN_CV
         else:
             i += 1
+
+    _prog(90, "Irregular-RR runs found…")
 
     events.sort(key=lambda e: e.t_start)
 
@@ -2568,4 +2603,5 @@ def classify_arrhythmias(
         sum(1 for e in merged if e.kind == "irregular_run"),
         baseline_hr, context_key,
     )
+    _prog(100, "Arrhythmia classification done")
     return merged

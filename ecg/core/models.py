@@ -78,6 +78,18 @@ class MouseECG:
     PEAK_DISTANCE_MS: float = 40.0       # ms — distance find_peaks uniquement
     MIN_RR_MS:        float = RR_MIN_MS  # ≈ 67 ms — seuil physiologique
 
+    # ── Prominence-search window bound (performance) ────────────────────────
+    # scipy.signal.find_peaks(..., prominence=X)/peak_prominences/peak_widths
+    # search the ENTIRE array outward from each peak for a taller point when
+    # `wlen` isn't given — cheap on a bandpassed signal (no long-range trend),
+    # but catastrophic on a raw one with real baseline wander: observed
+    # ~130s -> ~0.1s (identical peak set) on a 95-min raw mouse ECG recording
+    # once `wlen` was added. 10x RR_MAX_MS is generous — any genuine peak has
+    # a comparably-tall neighbour within a couple of beats, let alone ten —
+    # while still bounding the worst case to a tiny fraction of a
+    # multi-million-sample recording instead of the whole array.
+    PROMINENCE_WLEN_MS: float = round(10 * RR_MAX_MS, 0)  # ≈ 3330 ms
+
     # ── Beat template window ────────────────────────────────
     # Full mouse P-QRS-T spans ~60–120 ms → ±100 ms window captures it safely
     BEAT_HALF_WIN_S: float = 0.10    # seconds  (±100 ms)
@@ -357,7 +369,10 @@ class FilterParams:
     @classmethod
     def from_widgets(cls, app: "ECGApp") -> "FilterParams":
         """Read all values from main-thread widgets.  Call only from main thread."""
-        no_filter = bool(app.sw_no_filter.get())
+        # sw_filtering ON means DSP filtering IS applied -- the inverse of
+        # this dataclass's no_filter field (kept as-is for session-JSON
+        # backward compatibility; only the UI-facing widget was renamed).
+        no_filter = not bool(app.sw_filtering.get())
         return cls(
             channel      = app.ent_channel.get().strip() or "ECG",  # type: ignore[union-attr]
             fs           = int(app._safe_float(app.ent_fs, MouseECG.FS_DEFAULT)),

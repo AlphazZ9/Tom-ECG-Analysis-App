@@ -171,6 +171,7 @@ class SessionController:
             "n_samples":        n_samples,
             "signal_raw":       sig_raw,
             "signal_bundle":    signal_bundle,
+            "filter_params":    fp,
             "thresh_amp":       float(state.get("threshold", float(state.get("thresh_amp", 0.5)))),
             "manual_excluded":  set(int(x) for x in state.get("manual_excluded", [])),
             "manual_added":     set(int(x) for x in state.get("manual_added",    [])),
@@ -211,13 +212,6 @@ class SessionController:
         self.app.signal.raw = bundle["signal_raw"]
         self.app.signal.time       = np.arange(n_samples) / fs
         self.app.ui.nav_pos    = 0.0
-        self.app.ui.ds_time         = None
-        self.app.ui.ds_sig          = None
-        self.app.ui.ds_sig_max      = None
-        self.app.ui.ds_sig_mid      = None
-        self.app.ui.ds_raw_sig      = None
-        self.app.ui.ds_raw_sig_max  = None
-        self.app.ui.ds_raw_sig_mid  = None
 
         sb = bundle["signal_bundle"]
         self.app.signal.raw_norm = sb["signal_raw_norm"]
@@ -289,6 +283,60 @@ class SessionController:
                 self.app.ent_thr.insert(0, f"{float(thr):.3f}")  # type: ignore[union-attr]
             except Exception as _exc:
                 log.debug("restore threshold slider/entry failed: %s", _exc, exc_info=True)
+
+        # ── Resync FILTERS sidebar widgets from the restored FilterParams ──
+        # signal.no_filter_mode/.inverted (state) are already set above, and
+        # signal_bundle was computed from these same saved params -- but
+        # nothing previously wrote ent_lp/ent_hp/sw_notch/sw_filtering/
+        # sw_invert_signal/cb_clean back onto the actual widgets, so they'd
+        # keep showing whatever was on screen before the restore even though
+        # it no longer matches what produced the restored plot.
+        fp = bundle.get("filter_params")
+        if fp is not None:
+            # ent_lp/ent_hp/sw_notch/cb_clean may currently be disabled --
+            # sw_filtering defaults OFF at build time and a startup
+            # self.after(50, ...) call (app.py:798) dims them before this
+            # ever runs. Writing to a disabled CTkEntry/CTkComboBox is a
+            # silent no-op, and CTkSwitch.select()/.deselect() explicitly
+            # no-op when self._state is DISABLED -- so force them enabled
+            # here; _on_filtering_toggle() below then sets the *correct*
+            # final enabled/disabled state from the restored fp.no_filter,
+            # same as it would after any manual toggle.
+            try:
+                self.app.ent_lp.configure(state="normal")  # type: ignore[union-attr]
+                self.app.ent_lp.delete(0, "end")  # type: ignore[union-attr]
+                self.app.ent_lp.insert(0, str(fp.lp))  # type: ignore[union-attr]
+                self.app.ent_hp.configure(state="normal")  # type: ignore[union-attr]
+                self.app.ent_hp.delete(0, "end")  # type: ignore[union-attr]
+                self.app.ent_hp.insert(0, str(fp.hp))  # type: ignore[union-attr]
+            except Exception as _exc:
+                log.debug("restore filter cutoff entries failed: %s", _exc, exc_info=True)
+            for w, val in (
+                (self.app.sw_notch, fp.notch_filter),
+                (self.app.sw_filtering, not fp.no_filter),
+                (self.app.sw_invert_signal, fp.invert_signal),
+            ):
+                try:
+                    if w is None:
+                        continue
+                    w.configure(state="normal")  # sw_notch may be dimmed; see note above
+                    w.select() if val else w.deselect()
+                except Exception as _exc:
+                    log.debug("restore filter switch failed: %s", _exc, exc_info=True)
+            try:
+                self.app.cb_clean.configure(state="normal")  # type: ignore[union-attr]
+                self.app.cb_clean.set(fp.clean_method)  # type: ignore[union-attr]
+            except Exception as _exc:
+                log.debug("restore cb_clean failed: %s", _exc, exc_info=True)
+            # sw_filtering's value just changed above -- resync the greying
+            # of the dependent cutoff/notch/clean-method widgets (and the
+            # "Processing" summary) to match, same as the Parameters
+            # dialog's Apply path already does. Must run LAST so it's the
+            # one setting the final enabled/disabled state.
+            try:
+                self.app._on_filtering_toggle()
+            except Exception as _exc:
+                log.debug("restore on_filtering_toggle failed: %s", _exc, exc_info=True)
 
         self.app._run_detection(thr)
 
@@ -626,7 +674,7 @@ class SessionController:
                 s[attr] = getattr(self.app, attr).get()
             except Exception:
                 s[attr] = ""
-        for attr in ("sw_show_raw", "sw_no_filter", "sw_notch",
+        for attr in ("sw_show_raw", "sw_filtering", "sw_notch",
                      "sw_artifact", "sw_epoch"):
             try:
                 s[attr] = bool(getattr(self.app, attr).get())
@@ -651,6 +699,9 @@ class SessionController:
             s["current_tab"] = "📈 Detection"
         s["edit_mode"] = self.app.detection.edit_mode
         s["nav_pos"]   = self.app.ui.nav_pos
+        s["rrhr_strip_visible"] = self.app.ui.rrhr_strip_visible
+        s["left_panel_collapsed"]  = self.app.ui.left_panel_collapsed
+        s["right_panel_collapsed"] = self.app.ui.right_panel_collapsed
         return s
 
     def restore_ui_state(self, s: dict) -> None:
@@ -677,7 +728,7 @@ class SessionController:
 
         sw_map = {
             "sw_show_raw": "sw_show_raw",
-            "sw_no_filter": "sw_no_filter",
+            "sw_filtering": "sw_filtering",
             "sw_notch": "sw_notch",
             "sw_artifact": "sw_artifact",
             "sw_epoch": "sw_epoch",
@@ -700,6 +751,12 @@ class SessionController:
             self.app.cb_clean.set(s.get("cb_clean", "neurokit"))  # type: ignore[union-attr]
         except Exception as _exc:
             log.debug("restore cb_clean failed: %s", _exc, exc_info=True)
+        # Resync FILTER SETTINGS greying + the "Processing" summary now that
+        # sw_filtering/sw_notch/cb_clean are all back to their saved values.
+        try:
+            self.app._on_filtering_toggle()
+        except Exception as _exc:
+            log.debug("restore _on_filtering_toggle failed: %s", _exc, exc_info=True)
         try:
             if self.app.cb_det_method is not None:
                 dm = s.get("cb_det_method", "SG + Derivative (10 kHz)")
@@ -713,6 +770,15 @@ class SessionController:
             log.debug("restore current_tab failed: %s", _exc, exc_info=True)
         # Re-apply non-widget state
         self.app.ui.nav_pos  = float(s.get("nav_pos",  0.0))
+        saved_rrhr_visible = bool(s.get("rrhr_strip_visible", True))
+        if saved_rrhr_visible != self.app.ui.rrhr_strip_visible:
+            self.app._toggle_rrhr_strip()
+        saved_left_collapsed = bool(s.get("left_panel_collapsed", False))
+        if saved_left_collapsed != self.app.ui.left_panel_collapsed:
+            self.app._toggle_left_panel()
+        saved_right_collapsed = bool(s.get("right_panel_collapsed", False))
+        if saved_right_collapsed != self.app.ui.right_panel_collapsed:
+            self.app._toggle_right_panel()
 
         # Restore experimental context
         ctx = s.get("exp_context", "telemetry_awake")

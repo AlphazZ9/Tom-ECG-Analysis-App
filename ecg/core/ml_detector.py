@@ -42,7 +42,9 @@ import numpy as np
 from scipy.signal import find_peaks
 
 from ecg.core.models import MouseECG, SESSION_DIR
-from ecg.core.detection import _topographic_prominences, _extended_morphology_descriptors
+from ecg.core.detection import (
+    _topographic_prominences, _extended_morphology_descriptors, _prominence_wlen_samples,
+)
 
 log = logging.getLogger("ecg")
 
@@ -107,7 +109,12 @@ def _generate_candidates(signal: np.ndarray, fs: float) -> np.ndarray:
     distance = max(1, int(round(MouseECG.PEAK_DISTANCE_MS / 1000.0 * fs)))
     sig_range = float(np.ptp(signal))
     prominence_floor = max(1e-9, 0.03 * sig_range)
-    peaks, _ = find_peaks(signal, distance=distance, prominence=prominence_floor)
+    # wlen bounds the prominence search -- without it, this call is a real
+    # catastrophic-slowdown risk on raw (unfiltered) signal with baseline
+    # wander: observed ~130s -> ~0.1s (identical peak set) on a 95-min
+    # recording. See MouseECG.PROMINENCE_WLEN_MS.
+    peaks, _ = find_peaks(signal, distance=distance, prominence=prominence_floor,
+                           wlen=_prominence_wlen_samples(fs))
     peaks = peaks.astype(int)
     if len(peaks) > MAX_CANDIDATES:
         raise RuntimeError(
@@ -127,7 +134,7 @@ def extract_features(signal: np.ndarray, candidates: np.ndarray, fs: float) -> n
     if n == 0:
         return np.zeros((0, len(FEATURE_NAMES)))
 
-    prominences = _topographic_prominences(signal, candidates)
+    prominences = _topographic_prominences(signal, candidates, fs)
     morpho = _extended_morphology_descriptors(candidates, signal, fs, prominences)
     amplitude = signal[candidates].astype(float)
 
@@ -282,7 +289,7 @@ def detect_peaks_ml(
     peaks = np.sort(candidates[proba >= 0.5])
 
     _prog(95, "Finalising…")
-    prominences = _topographic_prominences(signal, peaks) if len(peaks) else np.array([])
+    prominences = _topographic_prominences(signal, peaks, fs) if len(peaks) else np.array([])
     thresh_amp = float(np.percentile(prominences, 10)) if len(prominences) else 0.0
     return peaks, prominences, thresh_amp
 

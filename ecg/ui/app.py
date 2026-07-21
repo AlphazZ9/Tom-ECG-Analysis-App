@@ -13,7 +13,6 @@ import threading
 import time
 import traceback
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 import customtkinter as ctk  # type: ignore[import-untyped]
@@ -121,7 +120,7 @@ class ECGApp(ctk.CTk):
         self.minsize(1200, 750)
         # Open in fullscreen/maximized state
         self.after(100, lambda: self.state("zoomed"))  # Windows fullscreen
-        self.configure(fg_color=BG)
+        self.configure(fg_color=PANEL)
 
         # Forward declarations for widgets built during _build() — lets Pylance
         # know these attributes exist even though they're assigned later.
@@ -204,10 +203,6 @@ class ECGApp(ctk.CTk):
         self.signal_ctrl = SignalController(self)
         self.analysis_ctrl = AnalysisController(self)
 
-        self._batch_bc_outdir: ctk.CTkEntry
-        self._batch_bc_channel: ctk.CTkEntry
-        self._batch_bc_workers: ctk.CTkEntry
-
         # Widget registries (populated in _build)
         self._slots:       dict[str, CanvasSlot]   = {}
         self._kpi:         dict[str, ctk.CTkLabel] = {}
@@ -261,8 +256,9 @@ class ECGApp(ctk.CTk):
         self.sw_permissive:     "Optional[ctk.CTkSwitch]"  = None
         self.btn_annotations:   "Optional[ctk.CTkButton]"  = None
         self.lbl_ann_count:     "Optional[ctk.CTkLabel]"   = None
-        self.btn_pacing:        "Optional[ctk.CTkButton]"  = None
-        self.lbl_pacing_count:  "Optional[ctk.CTkLabel]"   = None
+        self.btn_toggle_rrhr:   "Optional[ctk.CTkButton]"  = None
+        self.btn_toggle_left_panel:  "Optional[ctk.CTkButton]" = None
+        self.btn_toggle_right_panel: "Optional[ctk.CTkButton]" = None
         self.lbl_panel_ann_count:    "Optional[ctk.CTkLabel]" = None
         self.lbl_panel_pacing_count: "Optional[ctk.CTkLabel]" = None
         self.btn_copy_rr:       "Optional[ctk.CTkButton]"  = None
@@ -287,7 +283,8 @@ class ECGApp(ctk.CTk):
         self.lbl_roll_status:      "Optional[ctk.CTkLabel]"              = None
         self.lbl_arr_event_title:  "Optional[ctk.CTkLabel]"              = None
         self._arr_card_widgets:    "list[ctk.CTkBaseClass]"              = []
-        self._adv_filters_group:   "Optional[ctk.CTkFrame]"              = None
+        self._filter_advanced_group: "Optional[ctk.CTkFrame]"            = None
+        self.lbl_filter_summary:  "Optional[ctk.CTkLabel]"              = None
         self._interp_scroll:       "Optional[ctk.CTkScrollableFrame]"    = None
         # Navigation bar widgets (forward-declared so _reset_for_new_file can update them)
         self.ent_nav_pos:       "Optional[ctk.CTkEntry]"    = None
@@ -695,13 +692,6 @@ class ECGApp(ctk.CTk):
         self.ui.rr_click_cid = value
 
     @property
-    def _ov_ylim(self) -> "Optional[tuple]":
-        return self.ui.ov_ylim
-    @_ov_ylim.setter
-    def _ov_ylim(self, value: "Optional[tuple]") -> None:
-        self.ui.ov_ylim = value
-
-    @property
     def _hrv_current_view(self) -> str:
         return self.ui.hrv_current_view
     @_hrv_current_view.setter
@@ -742,55 +732,6 @@ class ECGApp(ctk.CTk):
     @_tsv_store.setter
     def _tsv_store(self, value: "dict[int, str]") -> None:
         self.ui.tsv_store = value
-
-    @property
-    def _ds_time(self) -> "Optional[np.ndarray]":
-        return self.ui.ds_time
-    @_ds_time.setter
-    def _ds_time(self, value: "Optional[np.ndarray]") -> None:
-        self.ui.ds_time = value
-
-    @property
-    def _ds_sig(self) -> "Optional[np.ndarray]":
-        return self.ui.ds_sig
-    @_ds_sig.setter
-    def _ds_sig(self, value: "Optional[np.ndarray]") -> None:
-        self.ui.ds_sig = value
-
-    @property
-    def _ds_sig_max(self) -> "Optional[np.ndarray]":
-        return self.ui.ds_sig_max
-    @_ds_sig_max.setter
-    def _ds_sig_max(self, value: "Optional[np.ndarray]") -> None:
-        self.ui.ds_sig_max = value
-
-    @property
-    def _ds_sig_mid(self) -> "Optional[np.ndarray]":
-        return self.ui.ds_sig_mid
-    @_ds_sig_mid.setter
-    def _ds_sig_mid(self, value: "Optional[np.ndarray]") -> None:
-        self.ui.ds_sig_mid = value
-
-    @property
-    def _ds_raw_sig(self) -> "Optional[np.ndarray]":
-        return self.ui.ds_raw_sig
-    @_ds_raw_sig.setter
-    def _ds_raw_sig(self, value: "Optional[np.ndarray]") -> None:
-        self.ui.ds_raw_sig = value
-
-    @property
-    def _ds_raw_sig_max(self) -> "Optional[np.ndarray]":
-        return self.ui.ds_raw_sig_max
-    @_ds_raw_sig_max.setter
-    def _ds_raw_sig_max(self, value: "Optional[np.ndarray]") -> None:
-        self.ui.ds_raw_sig_max = value
-
-    @property
-    def _ds_raw_sig_mid(self) -> "Optional[np.ndarray]":
-        return self.ui.ds_raw_sig_mid
-    @_ds_raw_sig_mid.setter
-    def _ds_raw_sig_mid(self, value: "Optional[np.ndarray]") -> None:
-        self.ui.ds_raw_sig_mid = value
 
     # -- SessionState --
     @property
@@ -852,23 +793,42 @@ class ECGApp(ctk.CTk):
         self.bind("<Left>",  lambda e: self._kb_navigate(-1))
         self.bind("<Right>", lambda e: self._kb_navigate(+1))
         self._build_sidebar()
-        # Apply the default no-filter state immediately so filter widgets are
-        # greyed out at startup (no_filter is ON by default).
-        self.after(50, self._on_no_filter_toggle)
+        # Apply the default state immediately so FILTER SETTINGS widgets are
+        # greyed out at startup (Filtering is OFF by default).
+        self.after(50, self._on_filtering_toggle)
 
         # Packed side="right" BEFORE main, for the same reason the sidebar is
         # packed before main -- main's expand=True must not claim the space
         # first.
         self._build_right_panel()
 
-        main = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
-        main.pack(side="left", fill="both", expand=True)
-        self._build_tabs(main)
+        # Stored as self.main (not a local var) so _toggle_left_panel()/
+        # _toggle_right_panel() can re-pack a collapsed panel with
+        # before=self.main -- see those methods for why that's required.
+        # fg_color=PANEL (not BG) so the workspace reads as the same grey as
+        # the sidebar/right_panel it sits between, instead of a subtly
+        # different shade that shows as a seam down both edges.
+        self.main = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
+        self.main.pack(side="left", fill="both", expand=True)
+        self._build_tabs(self.main)
         # Global keyboard shortcuts
         self.bind("<Control-z>", self._undo_edit)
         self.bind("<Control-Z>", self._undo_edit)
         self.bind("<Control-y>", self._redo_edit)
         self.bind("<Control-Y>", self._redo_edit)
+
+        # Apply persisted collapse state (defaults False -- both expanded,
+        # matching how the toggle buttons were just constructed). Route
+        # through the toggle methods themselves rather than duplicating
+        # their pack_forget()/button-text logic here -- each toggle flips
+        # the UIState bool from its current (just-initialized "expanded")
+        # value, so only fire it when the persisted value says "collapsed".
+        if self.ui.left_panel_collapsed:
+            self.ui.left_panel_collapsed = False
+            self._toggle_left_panel()
+        if self.ui.right_panel_collapsed:
+            self.ui.right_panel_collapsed = False
+            self._toggle_right_panel()
 
     # ─── Sidebar ──────────────────────────────────────────────
 
@@ -960,113 +920,84 @@ class ECGApp(ctk.CTk):
             f, text="", font=FONT_KPI_LABEL, text_color=MUTED,
             anchor="w", wraplength=230)
         self.lbl_fs_source.pack(**fpx, fill="x", pady=(0, SPACE_XS))
-        self.sw_show_raw = self._switch(
-            f, "Show raw signal (vs filtered)", fpx, default_on=True)
-        self.sw_show_raw.configure(command=self._on_show_raw_toggle)
-
-        # ── FILTERS ───────────────────────────────────────────
-        sec_flt = CollapsibleSection(s, "FILTERS", initially_open=False)
-        f = sec_flt.frame
-        self.sw_no_filter = self._switch(
-            f, "Raw signal — no DSP filters", fpx, default_on=True)
-        self.sw_no_filter.configure(command=self._on_no_filter_toggle)
-        ctk.CTkLabel(f, text="Enable filters below for advanced processing",
-                     font=FONT_KPI_LABEL, text_color=LIGHT,
-                     anchor="w", wraplength=230).pack(**fpx, fill="x", pady=(0, SPACE_S))
-        self.sw_invert_signal = self._switch(
-            f, "⟳  Invert signal (polarity)", fpx, default_on=False)
-        self.sw_invert_signal.configure(command=lambda: self._preview())
-        ctk.CTkLabel(f, text="Useful if R peaks appear negative",
-                     font=FONT_KPI_LABEL, text_color=LIGHT,
-                     anchor="w", wraplength=230).pack(**fpx, fill="x", pady=(0, SPACE_S))
-        self.sw_filter_preview = self._switch(
-            f, "👁  Preview filter effect (before/after)", fpx, default_on=False)
-        self.sw_filter_preview.configure(command=self._on_filter_preview_toggle)
-        ctk.CTkLabel(f, text="Overlays the filtered signal on the visible window,\n"
-                             "using the settings below — no need to run Preview Detection.",
-                     font=FONT_KPI_LABEL, text_color=LIGHT,
-                     anchor="w", justify="left", wraplength=230).pack(**fpx, fill="x", pady=(0, SPACE_S))
-        self._filter_widgets_frame = ctk.CTkFrame(f, fg_color="transparent")
-        self._filter_widgets_frame.pack(**fpx, fill="x")
-        fw = self._filter_widgets_frame
-        self.sw_notch = self._switch(fw, "Notch 50 Hz", dict(padx=0), default_on=False)
-        self.sw_notch.configure(command=self._refresh_filter_preview)
-        # HP/LP cut + Clean method live in the ADVANCED section now (built
-        # later in this method, into self._adv_filters_group) -- no nested
-        # toggle needed here anymore since Advanced is a top-level section.
-        self._filter_control_widgets: "list" = []
-        def _collect_fw(frame) -> None:
-            for w in frame.winfo_children():
-                self._filter_control_widgets.append(w)
-                _collect_fw(w)
-        self.after(100, lambda: (
-            self._filter_control_widgets.clear() or
-            _collect_fw(self._filter_widgets_frame) or
-            (self._adv_filters_group is not None and
-             _collect_fw(self._adv_filters_group))
-        ))
-
-        # DETECTION / ARTIFACTS / ML DETECTOR relocated to the right panel's
-        # accordion (_build_detection_section()).
-
-        # ── SESSION & EXPORT ──────────────────────────────────
-        # Save Session itself is relocated to the top toolbar's File ops
-        # chip (self.btn_save_session, built in _build_toolbar()) --
-        # session_controller.py/signal_controller.py/analysis_controller.py
-        # reference it by attribute name for busy-state text swaps, so it's
-        # relocated rather than duplicated. This section keeps the session
-        # info label and cache-clearing action.
-        sec_ses = CollapsibleSection(s, "SESSION & EXPORT", initially_open=False)
-        f = sec_ses.frame
-        self.lbl_session_info = ctk.CTkLabel(
-            f, text="No session saved for this file", font=FONT_HINT,
-            text_color=MUTED, anchor="w", wraplength=230, justify="left")
-        self.lbl_session_info.pack(**fpx, pady=(SPACE_S, SPACE_S), fill="x")
-        self._btn(f, "🗑  Clear Session Cache", self._delete_session, fpx, variant="secondary", h=26)
-        # Export-format buttons + Notes/Annotations live in the ADVANCED
-        # section now (built later in this method) -- none of their return
-        # values were captured as named attributes, so relocating their
-        # construction call site carries no downstream reference risk.
-
-        # ── ADVANCED ──────────────────────────────────────────
-        # Standalone 7th top-level section consolidating rarely-touched
-        # settings from Signal/Filters/Detection/Session & Export -- a peer
-        # to the other 6 sections (not nested inside them), so opening one
-        # place shows everything advanced at once. Internally organised with
-        # plain (non-collapsible) group labels, not a second accordion level.
-        sec_adv = CollapsibleSection(s, "ADVANCED", initially_open=False)
-        f = sec_adv.frame
-
-        def _adv_group(text: str, first: bool = False) -> None:
-            if not first:
-                ctk.CTkFrame(f, height=1, fg_color=BORDER).pack(
-                    fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
-            ctk.CTkLabel(f, text=text, font=FONT_SUBSECTION, text_color=MUTED,
-                         anchor="w").pack(**fpx, fill="x", pady=(0 if first else 0, SPACE_XS))
-
-        # -- Signal --------------------------------------------------------
-        _adv_group("Signal", first=True)
         self._sidebar_entry_row(f, fpx, [
             ("Crop start (s)", "t_start", "0"),
             ("Crop end (s)",   "t_end",   "0"),
         ])
 
-        # -- Filters ---------------------------------------------------------
-        _adv_group("Filters")
-        self._adv_filters_group = ctk.CTkFrame(f, fg_color="transparent")
-        self._adv_filters_group.pack(**fpx, fill="x")
-        self._sidebar_entry_row(self._adv_filters_group, dict(padx=0), [
-            ("HP cut (Hz)", "lp", str(MouseECG.BP_LO_HZ)),
-            ("LP cut (Hz)", "hp", str(int(MouseECG.BP_HI_HZ))),
+        # ── DETECTION ─────────────────────────────────────────
+        self._build_detection_section(s)
+
+        # ── FILTERS ───────────────────────────────────────────
+        # sw_filtering ON = DSP filtering is applied (band-pass/notch/
+        # cleaning); OFF (default) = raw signal, matching the app's
+        # raw-by-default behaviour on file load. DISPLAY & PREVIEW controls
+        # (show raw, invert, live preview) always stay interactive -- pure
+        # display toggles, or apply regardless of sw_filtering. FILTER
+        # SETTINGS (notch/band-pass/cleaning) stay visible but greyed out
+        # when filtering is off, so the user can see/set them in advance --
+        # see on_filtering_toggle in detection_controller.py.
+        sec_flt = CollapsibleSection(s, "FILTERS", initially_open=False)
+        f = sec_flt.frame
+        self.sw_filtering = self._switch(f, "Filtering", fpx, default_on=False)
+        self.sw_filtering.configure(command=self._on_filtering_toggle)
+        ctk.CTkLabel(f, text="Off analyzes the raw signal. On applies the settings below.",
+                     font=FONT_HINT, text_color=MUTED,
+                     anchor="w", wraplength=230).pack(**fpx, fill="x", pady=(0, SPACE_XS))
+        self.lbl_filter_summary = ctk.CTkLabel(
+            f, text="Processing\n•  Raw signal", font=FONT_HINT, text_color=MUTED,
+            anchor="w", justify="left", wraplength=230)
+        self.lbl_filter_summary.pack(**fpx, fill="x", pady=(0, SPACE_S))
+
+        ctk.CTkLabel(f, text="DISPLAY & PREVIEW", font=FONT_SUBSECTION,
+                     text_color=MUTED, anchor="w").pack(**fpx, fill="x", pady=(0, SPACE_XS))
+        self.sw_show_raw = self._switch(
+            f, "Show raw signal (vs filtered)", fpx, default_on=True)
+        self.sw_show_raw.configure(command=self._on_show_raw_toggle)
+        self.sw_invert_signal = self._switch(
+            f, "⟳  Invert signal (polarity)", fpx, default_on=False)
+        # A plain parameter -- doesn't auto-run the full pipeline on toggle.
+        # Picked up on the next "Preview Detection" click, or immediately in
+        # the before/after overlay if "Preview filtering" is on, exactly
+        # like every other control in this section.
+        self.sw_invert_signal.configure(command=self._refresh_filter_preview)
+        ctk.CTkLabel(f, text="Useful if R peaks appear negative",
+                     font=FONT_HINT, text_color=MUTED,
+                     anchor="w", wraplength=230).pack(**fpx, fill="x", pady=(0, SPACE_S))
+        self.sw_filter_preview = self._switch(f, "👁  Preview filtering", fpx, default_on=False)
+        self.sw_filter_preview.configure(command=self._on_filter_preview_toggle)
+        ctk.CTkLabel(f, text="Overlays the filtered signal on the visible window,\n"
+                             "using the settings below — no need to run Preview Detection.",
+                     font=FONT_HINT, text_color=MUTED,
+                     anchor="w", justify="left", wraplength=230).pack(**fpx, fill="x", pady=(0, SPACE_S))
+
+        ctk.CTkFrame(f, height=1, fg_color=BORDER).pack(
+            fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
+        ctk.CTkLabel(f, text="FILTER SETTINGS", font=FONT_SUBSECTION,
+                     text_color=MUTED, anchor="w").pack(**fpx, fill="x", pady=(0, SPACE_XS))
+        self._filter_advanced_group = ctk.CTkFrame(f, fg_color="transparent")
+        self._filter_advanced_group.pack(**fpx, fill="x")
+        g = self._filter_advanced_group
+        self.sw_notch = self._switch(g, "Notch 50 Hz", dict(padx=0), default_on=False)
+        self.sw_notch.configure(command=self._refresh_filter_preview)
+        ctk.CTkLabel(g, text="Band-pass filter", font=FONT_SMALL,
+                     text_color=MUTED, anchor="w").pack(anchor="w", pady=(SPACE_S, 0))
+        # Labelled by frequency position (Low/High), matching filtering.py's
+        # own bandpass(lo, hi) naming -- not by filter-type jargon (HP/LP),
+        # which technically read correctly (HP corner = the low edge, LP
+        # corner = the high edge) but was confusing at a glance.
+        self._sidebar_entry_row(g, dict(padx=0), [
+            ("Low cutoff (Hz)",  "lp", str(MouseECG.BP_LO_HZ)),
+            ("High cutoff (Hz)", "hp", str(int(MouseECG.BP_HI_HZ))),
         ])
         for _ent in (self.ent_lp, self.ent_hp):
             if _ent is not None:
                 _ent.bind("<Return>",   lambda _e: self._refresh_filter_preview())
                 _ent.bind("<FocusOut>", lambda _e: self._refresh_filter_preview())
-        ctk.CTkLabel(self._adv_filters_group, text="Clean method:", font=FONT_SMALL,
+        ctk.CTkLabel(g, text="Signal cleaning:", font=FONT_SMALL,
                      text_color=MUTED, anchor="w").pack(anchor="w", pady=(SPACE_XS, 0))
         self.cb_clean = ctk.CTkComboBox(
-            self._adv_filters_group, font=FONT_LABEL, height=28, fg_color=BG,
+            g, font=FONT_LABEL, height=28, fg_color=BG,
             border_color=BORDER2, button_color=BORDER2, text_color=TEXT,
             dropdown_fg_color=BG, dropdown_text_color=TEXT,
             values=["neurokit", "pantompkins1985", "elgendi2010", "hamilton2002", "biosppy"],
@@ -1074,33 +1005,31 @@ class ECGApp(ctk.CTk):
         self.cb_clean.set("neurokit")
         self.cb_clean.pack(fill="x", pady=(SPACE_XS, SPACE_S))
 
-        # Detection sub-group (SG target-fs/window) relocated to the right
-        # panel's DETECTION accordion section (_build_detection_section()).
+        # ── ARTIFACTS ─────────────────────────────────────────
+        self._build_artifacts_section(s)
 
-        # -- Export & Notes --------------------------------------------------
-        _adv_group("Export & Notes")
-        self._btn(f, "📊  Export Excel",              self._export_excel,      fpx, variant="secondary", h=28)
-        self._btn(f, "📄  Export RR CSV  (Ctrl+W)",   self._export_rr_csv,     fpx, variant="secondary", h=28)
-        self._btn(f, "🖼  Export Figures  (PNG)",      self._export_figures,    fpx, variant="secondary", h=28)
-        self._btn(f, "📦  Export ZIP  (Excel+Figs)",  self._export_zip,        fpx, variant="secondary", h=28)
-        self._btn(f, "📄  PDF Report  (1 page)",      self._export_pdf_report, fpx, variant="secondary", h=28)
-        self._btn(f, "🔬  Export Arrhythmia PDF",     self._export_arrhythmia_pdf, fpx, variant="secondary", h=28)
-        self._btn(f, "🔬  Export GraphPad Prism",     self._export_prism,      fpx, variant="secondary", h=28)
-        ctk.CTkFrame(f, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_S))
-        self._btn(f, "📝  Notes (this recording)",    self._open_notes_dialog, fpx, variant="secondary", h=28)
+        # ── ANNOTATIONS ───────────────────────────────────────
+        self._build_annotations_section(s)
 
         # ── BOTTOM BUTTONS ────────────────────────────────────
+        # Session info + cache-clearing sit here (not in a named accordion
+        # section) since neither the left panel's spec (Signal/Detection/
+        # Filters/Artifacts/Annotations) nor the right panel's (Statistics/
+        # Exports/ML Detector Saving) has room for them -- this area is
+        # already the app's catch-all for cross-cutting maintenance actions.
+        # Save Session itself lives in the top toolbar's File ops chip
+        # (self.btn_save_session, built in _build_toolbar()).
+        ctk.CTkFrame(s, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
+        self.lbl_session_info = ctk.CTkLabel(
+            s, text="No session saved for this file", font=FONT_HINT,
+            text_color=MUTED, anchor="w", wraplength=230, justify="left")
+        self.lbl_session_info.pack(padx=SPACE_M, pady=(0, SPACE_S), fill="x")
+        self._btn(s, "🗑  Clear Session Cache", self._delete_session, dict(padx=SPACE_M), variant="secondary", h=26)
         ctk.CTkFrame(s, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
         ctk.CTkButton(
             s, text="⚖  Compare Segments",
             command=self._open_compare_segments,
             fg_color=TEAL, hover_color=TEAL_DARK, text_color="white",
-            font=FONT_SIDEBAR_HDR, height=28, corner_radius=8,
-        ).pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
-        ctk.CTkButton(
-            s, text="⚡  Batch Processing",
-            command=self._open_batch_dialog,
-            fg_color=PURPLE, hover_color=PURPLE_DARK, text_color="white",
             font=FONT_SIDEBAR_HDR, height=28, corner_radius=8,
         ).pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
         ctk.CTkButton(
@@ -1165,7 +1094,7 @@ class ECGApp(ctk.CTk):
         win = ctk.CTkToplevel(self)
         win.title("Compare Segments")
         win.geometry("1060x720")
-        win.configure(fg_color=BG)
+        win.configure(fg_color=PANEL)
         win.resizable(True, True)
 
         hdr = ctk.CTkFrame(win, fg_color=PANEL, corner_radius=0)
@@ -1234,7 +1163,7 @@ class ECGApp(ctk.CTk):
         results_frame = ctk.CTkFrame(win, fg_color="transparent")
         results_frame.pack(fill="both", expand=True, padx=SPACE_L, pady=(0, SPACE_M))
 
-        table_card = ctk.CTkFrame(results_frame, fg_color=CARD, corner_radius=8)
+        table_card = ctk.CTkFrame(results_frame, fg_color=PANEL, corner_radius=8)
         table_card.pack(side="left", fill="both", expand=True, padx=(0, SPACE_M))
         ctk.CTkLabel(table_card, text="Metric comparison",
                      font=FONT_SUBSECTION, text_color=MUTED,
@@ -1245,7 +1174,7 @@ class ECGApp(ctk.CTk):
         for ci in range(4):
             tbl.grid_columnconfigure(ci, weight=1)
 
-        plot_card = ctk.CTkFrame(results_frame, fg_color=CARD, corner_radius=8)
+        plot_card = ctk.CTkFrame(results_frame, fg_color=PANEL, corner_radius=8)
         plot_card.pack(side="right", fill="both", expand=True)
         ctk.CTkLabel(plot_card, text="RR tachograms (superimposed)",
                      font=FONT_SUBSECTION, text_color=MUTED,
@@ -1673,7 +1602,19 @@ class ECGApp(ctk.CTk):
         row.pack(fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
         row.pack_propagate(False)
 
-        # ── File ops chip: Open / Save / Export ──────────────────────────
+        # ── Left panel toggle ──────────────────────────────────────────────
+        self.btn_toggle_left_panel = ctk.CTkButton(
+            row, text="⟨", width=32, height=34,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+            font=FONT_BTN_SEC, corner_radius=8,
+            command=self._toggle_left_panel,
+        )
+        self.btn_toggle_left_panel.pack(side="left", padx=(0, SPACE_S))
+        self._bind_hover_tip(self.btn_toggle_left_panel, "Hide/show the left panel")
+
+        # ── File ops chip: Open / Save ────────────────────────────────────
+        # Export is reached solely from the right panel's EXPORTS section now
+        # (was previously duplicated here too via a toolbar dropdown).
         file_chip = self._toolbar_chip(row)
         file_chip.pack(side="left", padx=(0, SPACE_M))
 
@@ -1689,15 +1630,7 @@ class ECGApp(ctk.CTk):
             fg_color=GREEN, hover_color=GREEN_DARK, text_color="white",
             font=FONT_CARD_TITLE, height=34, corner_radius=8,
             state="disabled")
-        self.btn_save_session.pack(side="left", padx=(0, SPACE_XS))
-
-        self.btn_export = ctk.CTkButton(
-            file_chip, text="Export ▾", width=96, height=34,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            font=FONT_BTN_SEC, corner_radius=8,
-            command=self._open_export_menu,
-        )
-        self.btn_export.pack(side="left", padx=(0, SPACE_S))
+        self.btn_save_session.pack(side="left", padx=(0, SPACE_S))
 
         # ── Analysis actions chip: Detect Peaks / Analyze ─────────────────
         analysis_chip = self._toolbar_chip(row)
@@ -1766,10 +1699,8 @@ class ECGApp(ctk.CTk):
             corner_radius=6, width=120, height=22, anchor="center")
         self._lbl_quality_badge.pack(side="left", padx=(0, SPACE_M))
 
-        ctk.CTkButton(right, text="⚙ Settings", width=100, height=34,
-                      fg_color=BLUE_DARK, hover_color=BLUE, text_color="white",
-                      font=FONT_BTN_SEC, command=self._open_params_dialog,
-                      corner_radius=8).pack(side="left", padx=(0, SPACE_S))
+        # Settings is reached solely from the left sidebar's "⚙ Parameters"
+        # bottom button now (was previously duplicated here too).
         ctk.CTkButton(right, text="Theme", width=76, height=34,
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
                       font=FONT_BTN_SEC, command=self._open_theme_dialog,
@@ -1778,31 +1709,17 @@ class ECGApp(ctk.CTk):
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
                       font=FONT_BTN_SEC, corner_radius=8,
                       command=self._toggle_dark_live,
-                      ).pack(side="left")
+                      ).pack(side="left", padx=(0, SPACE_S))
 
-    def _open_export_menu(self) -> None:
-        """Post the Export dropdown under the toolbar's Export button.
-
-        Lists the same 7 export commands previously reachable only from the
-        sidebar's ADVANCED section -- no new export logic, just consolidated
-        access, per the toolbar brief's single "Export" button.
-        """
-        menu = tk.Menu(self, tearoff=0, bg=CARD, fg=TEXT,
-                        activebackground=BLUE, activeforeground="white",
-                        relief="flat", bd=1)
-        menu.add_command(label="📊  Export Excel", command=self._export_excel)
-        menu.add_command(label="📄  Export RR CSV  (Ctrl+W)", command=self._export_rr_csv)
-        menu.add_command(label="🖼  Export Figures  (PNG)", command=self._export_figures)
-        menu.add_command(label="📦  Export ZIP  (Excel+Figs)", command=self._export_zip)
-        menu.add_command(label="📄  PDF Report  (1 page)", command=self._export_pdf_report)
-        menu.add_command(label="🔬  Export Arrhythmia PDF", command=self._export_arrhythmia_pdf)
-        menu.add_command(label="🔬  Export GraphPad Prism", command=self._export_prism)
-        try:
-            x = self.btn_export.winfo_rootx()
-            y = self.btn_export.winfo_rooty() + self.btn_export.winfo_height()
-            menu.tk_popup(x, y)
-        finally:
-            menu.grab_release()
+        # ── Right panel toggle ─────────────────────────────────────────────
+        self.btn_toggle_right_panel = ctk.CTkButton(
+            right, text="⟩", width=32, height=34,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+            font=FONT_BTN_SEC, corner_radius=8,
+            command=self._toggle_right_panel,
+        )
+        self.btn_toggle_right_panel.pack(side="left")
+        self._bind_hover_tip(self.btn_toggle_right_panel, "Hide/show the right panel")
 
     # ─── Right accordion panel ───────────────────────────────────
 
@@ -1813,7 +1730,10 @@ class ECGApp(ctk.CTk):
         before `main` is created so main's fill="both", expand=True doesn't
         claim the space first, mirroring how the sidebar itself is packed
         before main. Wrapped in a scrollable frame from the start since later
-        sub-phases add more sections (Detection/Annotations/Export) here.
+        sub-phases add more sections here.
+
+        Order: STATISTICS / EXPORTS / ML DETECTOR SAVING. Detection/Artifacts/
+        Annotations moved to the left sidebar (see _build_sidebar()).
         """
         self.right_panel = ctk.CTkFrame(self, width=280, fg_color=PANEL, corner_radius=0)
         self.right_panel.pack(side="right", fill="y")
@@ -1823,20 +1743,17 @@ class ECGApp(ctk.CTk):
         scroll = ctk.CTkScrollableFrame(self.right_panel, fg_color="transparent")
         scroll.pack(fill="both", expand=True)
 
-        self._build_detection_section(scroll)
         self._build_stat_section(scroll)
-        self._build_annotations_section(scroll)
+        self._build_exports_section(scroll)
+        self._build_ml_detector_section(scroll)
 
     def _build_detection_section(self, parent) -> None:
-        """DETECTION / ARTIFACTS / ML DETECTOR accordion sections.
+        """DETECTION accordion section (left sidebar).
 
-        DETECTION consolidates content that had no independent collapse
-        state before (the sidebar's always-visible Method/Analysis-window/
-        Status/Threshold block, plus its own Min R-R entry and ADVANCED's SG
-        Options sub-group) into one open-by-default section. ARTIFACTS and
-        ML DETECTOR are relocated verbatim -- they already had independent
-        collapse behaviour in the sidebar, so that's preserved unchanged
-        rather than merged in.
+        Consolidates content that had no independent collapse state before
+        (the sidebar's always-visible Method/Analysis-window/Status/Threshold
+        block, plus its own Min R-R entry and ADVANCED's SG Options
+        sub-group) into one open-by-default section.
         """
         fpx = dict(padx=SPACE_L)
 
@@ -1972,9 +1889,10 @@ class ECGApp(ctk.CTk):
         # defaults to "SG + Derivative (10 kHz)".
         self._on_det_method_change(self.cb_det_method.get())
 
-        # ══════════════════════════════════════════════════════
-        #  ARTIFACTS
-        # ══════════════════════════════════════════════════════
+    def _build_artifacts_section(self, parent) -> None:
+        """ARTIFACTS accordion section (left sidebar), relocated verbatim
+        from the old combined Detection/Artifacts/ML-Detector builder."""
+        fpx = dict(padx=SPACE_L)
         sec_art = CollapsibleSection(parent, "ARTIFACTS", initially_open=False)
         f = sec_art.frame
         self.btn_review_art = ctk.CTkButton(
@@ -1993,10 +1911,13 @@ class ECGApp(ctk.CTk):
                      font=FONT_KPI_LABEL, text_color=LIGHT,
                      anchor="w", wraplength=230).pack(**fpx, fill="x", pady=(0, SPACE_S))
 
-        # ══════════════════════════════════════════════════════
-        #  ML DETECTOR
-        # ══════════════════════════════════════════════════════
-        sec_ml = CollapsibleSection(parent, "ML DETECTOR", initially_open=False)
+    def _build_ml_detector_section(self, parent) -> None:
+        """ML DETECTOR SAVING accordion section (right panel), relocated
+        verbatim from the old combined Detection/Artifacts/ML-Detector
+        builder -- same content/bindings, header relabeled per the user's
+        request."""
+        fpx = dict(padx=SPACE_L)
+        sec_ml = CollapsibleSection(parent, "ML DETECTOR SAVING", initially_open=False)
         f = sec_ml.frame
         self.lbl_ml_status = ctk.CTkLabel(
             f, text="No trained model yet", font=FONT_HINT,
@@ -2031,14 +1952,34 @@ class ECGApp(ctk.CTk):
         self.btn_train_ml.pack(**fpx, fill="x", pady=(0, SPACE_S))
         self.after(0, self.refresh_ml_status)
 
+    def _build_exports_section(self, parent) -> None:
+        """EXPORTS accordion section (right panel): the export-format
+        buttons + Notes, moved verbatim from the old ADVANCED section's
+        "Export & Notes" group. This is now the sole entry point for
+        exports -- the toolbar's old "Export ▾" dropdown duplicated the
+        same 7 commands and was removed."""
+        fpx = dict(padx=SPACE_L)
+        sec = CollapsibleSection(parent, "EXPORTS", initially_open=False)
+        f = sec.frame
+        self._btn(f, "📊  Export Excel",              self._export_excel,      fpx, variant="secondary", h=28)
+        self._btn(f, "📄  Export RR CSV  (Ctrl+W)",   self._export_rr_csv,     fpx, variant="secondary", h=28)
+        self._btn(f, "🖼  Export Figures  (PNG)",      self._export_figures,    fpx, variant="secondary", h=28)
+        self._btn(f, "📦  Export ZIP  (Excel+Figs)",  self._export_zip,        fpx, variant="secondary", h=28)
+        self._btn(f, "📄  PDF Report  (1 page)",      self._export_pdf_report, fpx, variant="secondary", h=28)
+        self._btn(f, "🔬  Export Arrhythmia PDF",     self._export_arrhythmia_pdf, fpx, variant="secondary", h=28)
+        self._btn(f, "🔬  Export GraphPad Prism",     self._export_prism,      fpx, variant="secondary", h=28)
+        ctk.CTkFrame(f, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_S))
+        self._btn(f, "📝  Notes (this recording)",    self._open_notes_dialog, fpx, variant="secondary", h=28)
+
     def _build_stat_section(self, parent) -> None:
         """Categorized statistics: Heart Rate / RR Intervals / HRV / Signal /
         Quality, as a vertically-stacked accordion section in the right
         panel. All values are still driven by update_kpis()
         (plot_controller.py), fanned out to tiles via make_stat_tile()
-        (ecg/ui/widgets.py) exactly as before -- only the layout (vertical
-        stack instead of a 5-column grid, to fit the narrow right panel) and
-        location changed.
+        (ecg/ui/widgets.py) exactly as before. Tiles are arranged 2-per-row
+        within each category box (rather than one full-width column) to keep
+        this section compact now that EXPORTS and ML DETECTOR SAVING also
+        need to fit below it in the same panel.
         """
         sec = CollapsibleSection(parent, "STATISTICS", initially_open=True)
 
@@ -2078,15 +2019,20 @@ class ECGApp(ctk.CTk):
             ctk.CTkLabel(box, text=cat_name.upper(), font=FONT_MICRO,
                          text_color=MUTED, anchor="w").pack(
                 fill="x", padx=SPACE_S, pady=(SPACE_XS, SPACE_XS))
-            for key, label, unit, hero in tiles:
-                tile = make_stat_tile(box, label, "—", unit=unit, hero=hero, card=False)
-                tile.pack(fill="x", padx=SPACE_S, pady=(0, SPACE_XS))
-                # The right panel is much narrower than the old full-width
-                # strip -- long values (e.g. sq_artifact's "N (a dup · b
-                # non-physio · c ectopic)" breakdown) need to wrap instead of
-                # clipping against the panel edge.
-                tile.value_label.configure(wraplength=220, justify="left")
-                self._kpi[key] = tile.value_label
+            # 2-per-row: chunk tiles into pairs, each pair sharing a row frame.
+            # An odd tile out (HRV/Quality have 3) ends up alone on its row.
+            for i in range(0, len(tiles), 2):
+                row = ctk.CTkFrame(box, fg_color="transparent")
+                row.pack(fill="x", padx=SPACE_S, pady=(0, SPACE_XS))
+                for key, label, unit, hero in tiles[i:i + 2]:
+                    tile = make_stat_tile(row, label, "—", unit=unit, hero=hero, card=False)
+                    tile.pack(side="left", fill="both", expand=True, padx=(0, SPACE_XS))
+                    # The right panel is much narrower than the old full-width
+                    # strip -- long values (e.g. sq_artifact's "N (a dup · b
+                    # non-physio · c ectopic)" breakdown) need to wrap instead
+                    # of clipping against the tile's now-halved width.
+                    tile.value_label.configure(wraplength=95, justify="left")
+                    self._kpi[key] = tile.value_label
 
     def _build_annotations_section(self, parent) -> None:
         """Compact ANNOTATIONS section: live counts + buttons that open the
@@ -2101,12 +2047,11 @@ class ECGApp(ctk.CTk):
 
         # Initial text set directly from current data (not via
         # _update_ann_count()/_update_pacing_count()) -- those also touch
-        # self.lbl_ann_count/lbl_pacing_count (the Detection tab's toolbar
-        # badges), which during _rebuild_ui() aren't rebuilt yet at this
-        # point in _build()'s sequence (_build_tabs() runs after
-        # _build_right_panel()) and would still be the just-destroyed
-        # pre-rebuild widgets. _rebuild_ui() refreshes both surfaces itself
-        # once _build() has fully completed.
+        # self.lbl_ann_count (the Detection tab's toolbar badge), which
+        # during _rebuild_ui() isn't rebuilt yet at this point in _build()'s
+        # sequence (_build_tabs() runs after _build_right_panel()) and would
+        # still be the just-destroyed pre-rebuild widget. _rebuild_ui()
+        # refreshes both surfaces itself once _build() has fully completed.
         self.lbl_panel_ann_count = ctk.CTkLabel(
             f, text=f"{len(self._annotations)} annotations",
             font=FONT_LABEL, text_color=TEXT, anchor="w")
@@ -2128,7 +2073,7 @@ class ECGApp(ctk.CTk):
 
     def _build_tabs(self, parent) -> None:
         self.tabs = ctk.CTkTabview(
-            parent, fg_color=BG,
+            parent, fg_color=PANEL,
             segmented_button_fg_color=PANEL,
             segmented_button_selected_color=BLUE,
             segmented_button_selected_hover_color=BLUE_HOVER,
@@ -2214,16 +2159,20 @@ class ECGApp(ctk.CTk):
         pos_chip = self._toolbar_chip(nav)
         pos_chip.pack(side="left", padx=(0, SPACE_S))
 
-        ctk.CTkLabel(pos_chip, text="t =", font=FONT_SMALL,
-                     text_color=MUTED).pack(side="left", padx=(SPACE_S, SPACE_XS))
+        lbl_nav_pos = ctk.CTkLabel(pos_chip, text="t =", font=FONT_SMALL,
+                     text_color=MUTED)
+        lbl_nav_pos.pack(side="left", padx=(SPACE_S, SPACE_XS))
         self.ent_nav_pos = ctk.CTkEntry(
             pos_chip, width=72, height=28, font=FONT_LABEL,
-            fg_color=BG, border_color=BORDER2, text_color=TEXT,
+            fg_color=CARD, border_color=BORDER2, text_color=TEXT,
             corner_radius=6,
             placeholder_text="0.000")
         self.ent_nav_pos.pack(side="left", padx=(0, SPACE_XS))  # type: ignore[union-attr]
         ctk.CTkLabel(pos_chip, text="s", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left")
+        _pos_tip = "Visible window start time — type a value and press Go (or Enter) to jump there"
+        self._bind_hover_tip(lbl_nav_pos, _pos_tip)
+        self._bind_hover_tip(self.ent_nav_pos, _pos_tip)
         ctk.CTkButton(pos_chip, text="Go", width=48, height=28, font=FONT_SMALL,
                       fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
                       corner_radius=8,
@@ -2234,7 +2183,7 @@ class ECGApp(ctk.CTk):
         ctk.CTkLabel(pos_chip, text="Window:", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left", padx=(0, SPACE_S))
         self.ent_window = ctk.CTkEntry(pos_chip, width=48, height=28, font=FONT_LABEL,
-                                       fg_color=BG, border_color=BORDER2, text_color=TEXT,
+                                       fg_color=CARD, border_color=BORDER2, text_color=TEXT,
                                        corner_radius=6)
         self.ent_window.insert(0, "2")
         self.ent_window.pack(side="left", padx=(0, SPACE_XS))
@@ -2334,30 +2283,33 @@ class ECGApp(ctk.CTk):
             ann_chip, text="", font=FONT_HINT, text_color=MUTED, anchor="w")
         self.lbl_ann_count.pack(side="left", padx=(0, SPACE_S))  # type: ignore[union-attr]
 
-        # ── Pacing Periods chip ────────────────────────────────────────────
-        pace_chip = self._toolbar_chip(hdr)
-        pace_chip.pack(side="left")
-        self.btn_pacing = ctk.CTkButton(
-            pace_chip, text="Pacing Periods", width=130, height=28, font=FONT_SMALL,
-            fg_color=TEAL_DARK, hover_color=TEAL, text_color="white",
+        # ── RR/HR/Quality strip toggle ───────────────────────────────────────
+        # "Pacing Periods" chip removed here (redundant with the ANNOTATIONS
+        # panel section's "Manage Pacing Periods…" button, the sole remaining
+        # entry point) -- this slot now hosts the show/hide toggle for the
+        # RR/HR/Quality sub-plot strip below the detail plot.
+        rrhr_chip = self._toolbar_chip(hdr)
+        rrhr_chip.pack(side="left")
+        _rrhr_on = self.ui.rrhr_strip_visible
+        self.btn_toggle_rrhr = ctk.CTkButton(
+            rrhr_chip, text="RR/HR/Quality", width=118, height=28, font=FONT_SMALL,
+            fg_color=BLUE if _rrhr_on else BORDER,
+            hover_color=BLUE_HOVER if _rrhr_on else BORDER2,
+            text_color="white" if _rrhr_on else MUTED,
             corner_radius=8,
-            command=self._open_pacing_periods,
+            command=self._toggle_rrhr_strip,
         )
-        self.btn_pacing.pack(side="left", padx=(SPACE_S, SPACE_XS))  # type: ignore[union-attr]
-        self.lbl_pacing_count = ctk.CTkLabel(
-            pace_chip, text="", font=FONT_HINT, text_color=MUTED, anchor="w")
-        self.lbl_pacing_count.pack(side="left", padx=(0, SPACE_S))  # type: ignore[union-attr]
+        self.btn_toggle_rrhr.pack(side="left", padx=(SPACE_S, SPACE_S))  # type: ignore[union-attr]
 
-        # Overview / minimap strip — full-recording navigator, directly above
-        # the detail plot (Audacity/Premiere-style). Fixed height
-        # (pack_propagate(False), mirroring nav/hdr) rather than fill=both —
-        # this reintroduces a small, deliberate slice of the vertical space
-        # Phase 3a reclaimed. The minimap is part of the central ECG-viewing
-        # area, not competing chrome.
-        ov_frame = tk.Frame(t, bg=PLOT["bg"], bd=0, highlightthickness=0, height=60)
+        # Full-recording scrubber strip, directly above the detail plot
+        # (Audacity/Premiere-style position indicator). Fixed height
+        # (pack_propagate(False), mirroring nav/hdr) rather than fill=both.
+        # A simple flat line + draggable viewport cursor (see draw_overview())
+        # needs much less vertical space than the old envelope-plot minimap did.
+        ov_frame = tk.Frame(t, bg=PLOT["bg"], bd=0, highlightthickness=0, height=28)
         ov_frame.pack(side="top", fill="x", padx=SPACE_XS, pady=(0, SPACE_XS))
         ov_frame.pack_propagate(False)
-        self._slots["overview"] = CanvasSlot(ov_frame, 14, 0.8, toolbar=False)
+        self._slots["overview"] = CanvasSlot(ov_frame, 14, 0.35, toolbar=False)
         self._slots["overview"].canvas.mpl_connect(
             "button_press_event", self._on_overview_click)
         self._slots["overview"].canvas.mpl_connect(
@@ -2369,13 +2321,13 @@ class ECGApp(ctk.CTk):
         # grid-managed so both share the remaining space proportionally
         # (same grid_rowconfigure(weight=N) idiom already used by
         # _build_hrv_view_rr's RR-tachogram/stats split).
-        plot_area = ctk.CTkFrame(t, fg_color="transparent")
-        plot_area.pack(side="top", fill="both", expand=True)
-        plot_area.grid_rowconfigure(0, weight=7)
-        plot_area.grid_rowconfigure(1, weight=3)
-        plot_area.grid_columnconfigure(0, weight=1)
+        self.plot_area = ctk.CTkFrame(t, fg_color="transparent")
+        self.plot_area.pack(side="top", fill="both", expand=True)
+        self.plot_area.grid_rowconfigure(0, weight=7)
+        self.plot_area.grid_rowconfigure(1, weight=3 if self.ui.rrhr_strip_visible else 0)
+        self.plot_area.grid_columnconfigure(0, weight=1)
 
-        det_frame = tk.Frame(plot_area, bg=PLOT["bg"], bd=0, highlightthickness=0)
+        det_frame = tk.Frame(self.plot_area, bg=PLOT["bg"], bd=0, highlightthickness=0)
         det_frame.grid(row=0, column=0, sticky="nsew", padx=SPACE_XS, pady=(0, SPACE_XS))
         self._slots["detail"] = CanvasSlot(det_frame, 12, 6.5, toolbar=True)
 
@@ -2388,9 +2340,12 @@ class ECGApp(ctk.CTk):
 
         # RR/HR strip — synced to the same nav window as the detail plot,
         # via ECGApp._draw_detail()'s fan-out (see draw_detail_rrhr()).
-        subplot_frame = tk.Frame(plot_area, bg=PLOT["bg"], bd=0, highlightthickness=0)
-        subplot_frame.grid(row=1, column=0, sticky="nsew", padx=SPACE_XS, pady=(0, SPACE_XS))
-        self._slots["detail_rrhr"] = CanvasSlot(subplot_frame, 12, 2.8, toolbar=False)
+        # Show/hide is toggled by btn_toggle_rrhr in the hdr toolbar above.
+        self.subplot_frame = tk.Frame(self.plot_area, bg=PLOT["bg"], bd=0, highlightthickness=0)
+        self.subplot_frame.grid(row=1, column=0, sticky="nsew", padx=SPACE_XS, pady=(0, SPACE_XS))
+        if not self.ui.rrhr_strip_visible:
+            self.subplot_frame.grid_remove()
+        self._slots["detail_rrhr"] = CanvasSlot(self.subplot_frame, 12, 2.8, toolbar=False)
 
     def _build_tab_hrv_unified(self) -> None:
         """Unified HRV tab with internal segmented navigation.
@@ -2482,7 +2437,7 @@ class ECGApp(ctk.CTk):
         row.grid_columnconfigure(1, weight=2)
 
         # Stats textbox (narrow)
-        stats_card = ctk.CTkFrame(row, fg_color=CARD, corner_radius=0)
+        stats_card = ctk.CTkFrame(row, fg_color=PANEL, corner_radius=0)
         stats_card.grid(row=0, column=0, sticky="nsew", padx=(0, SPACE_S))
         stats_card.grid_rowconfigure(0, weight=0)
         stats_card.grid_rowconfigure(1, weight=1)
@@ -2492,12 +2447,12 @@ class ECGApp(ctk.CTk):
                                 text_color="white",
                                 command=lambda: self._copy_tsv(self.txt_rr))
         _rr_btn.grid(row=0, column=0, sticky="ew", padx=SPACE_M, pady=(SPACE_S, 0))
-        self.txt_rr = ctk.CTkTextbox(stats_card, font=FONT_MONO, fg_color=CARD,
+        self.txt_rr = ctk.CTkTextbox(stats_card, font=FONT_MONO, fg_color=PANEL,
                                      text_color=TEXT, border_width=0)
         self.txt_rr.grid(row=1, column=0, sticky="nsew", padx=SPACE_M, pady=(SPACE_XS, SPACE_S))
 
         # Histogram
-        hist_card = ctk.CTkFrame(row, fg_color=CARD, corner_radius=0)
+        hist_card = ctk.CTkFrame(row, fg_color=PANEL, corner_radius=0)
         hist_card.grid(row=0, column=1, sticky="nsew")
         hist_card.grid_rowconfigure(0, weight=1)
         hist_card.grid_columnconfigure(0, weight=1)
@@ -2508,7 +2463,7 @@ class ECGApp(ctk.CTk):
         parent.grid_rowconfigure(0, weight=1)
         parent.grid_columnconfigure(0, weight=1)
 
-        inner = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=6)
+        inner = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=6)
         inner.grid(row=0, column=0, sticky="nsew", padx=SPACE_M, pady=SPACE_M)
         inner.grid_rowconfigure(1, weight=1)
         inner.grid_columnconfigure(0, weight=1)
@@ -2522,7 +2477,7 @@ class ECGApp(ctk.CTk):
                       text_color="white", width=140,
                       command=lambda: self._copy_tsv(self.txt_td)
                       ).pack(side="right")
-        self.txt_td = ctk.CTkTextbox(inner, font=FONT_MONO, fg_color=CARD,
+        self.txt_td = ctk.CTkTextbox(inner, font=FONT_MONO, fg_color=PANEL,
                                      text_color=TEXT, border_width=0)
         self.txt_td.grid(row=1, column=0, sticky="nsew", padx=SPACE_M, pady=(0, SPACE_M))
 
@@ -2555,7 +2510,7 @@ class ECGApp(ctk.CTk):
         content.grid_columnconfigure(0, weight=1)
         content.grid_columnconfigure(1, weight=2)
 
-        left = ctk.CTkFrame(content, fg_color=CARD, corner_radius=6)
+        left = ctk.CTkFrame(content, fg_color=PANEL, corner_radius=6)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, SPACE_S))
         left.grid_rowconfigure(1, weight=1)
         left.grid_columnconfigure(0, weight=1)
@@ -2568,7 +2523,7 @@ class ECGApp(ctk.CTk):
                       text_color="white", width=140,
                       command=lambda: self._copy_tsv(self.txt_fd)
                       ).pack(side="right")
-        self.txt_fd = ctk.CTkTextbox(left, font=FONT_MONO, fg_color=CARD,
+        self.txt_fd = ctk.CTkTextbox(left, font=FONT_MONO, fg_color=PANEL,
                                      text_color=TEXT, border_width=0)
         self.txt_fd.grid(row=1, column=0, sticky="nsew", padx=SPACE_M, pady=(0, SPACE_S))
 
@@ -2578,7 +2533,7 @@ class ECGApp(ctk.CTk):
         right.grid_rowconfigure(1, weight=1)
         right.grid_columnconfigure(0, weight=1)
         for row_i, slot_key in enumerate(["psd", "radar"]):
-            card = ctk.CTkFrame(right, fg_color=CARD, corner_radius=0)
+            card = ctk.CTkFrame(right, fg_color=PANEL, corner_radius=0)
             # Espacement symétrique entre les deux graphiques empilés (PSD/radar) :
             # avant, le bas avait pady=0 → les deux cartes semblaient "collées"
             # côté inférieur alors qu'il y avait de l'air côté supérieur.
@@ -2615,7 +2570,7 @@ class ECGApp(ctk.CTk):
         content.grid_columnconfigure(0, weight=1)
         content.grid_columnconfigure(1, weight=2)
 
-        left = ctk.CTkFrame(content, fg_color=CARD, corner_radius=6)
+        left = ctk.CTkFrame(content, fg_color=PANEL, corner_radius=6)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, SPACE_S))
         left.grid_rowconfigure(0, weight=0)
         left.grid_rowconfigure(1, weight=1)
@@ -2629,11 +2584,11 @@ class ECGApp(ctk.CTk):
                       text_color="white", width=140,
                       command=lambda: self._copy_tsv(self.txt_nl)
                       ).pack(side="right")
-        self.txt_nl = ctk.CTkTextbox(left, font=FONT_MONO, fg_color=CARD,
+        self.txt_nl = ctk.CTkTextbox(left, font=FONT_MONO, fg_color=PANEL,
                                      text_color=TEXT, border_width=0)
         self.txt_nl.grid(row=1, column=0, sticky="nsew", padx=SPACE_M, pady=(0, SPACE_S))
 
-        right = ctk.CTkFrame(content, fg_color=CARD, corner_radius=0)
+        right = ctk.CTkFrame(content, fg_color=PANEL, corner_radius=0)
         right.grid(row=0, column=1, sticky="nsew")
         right.grid_rowconfigure(0, weight=1)
         right.grid_columnconfigure(0, weight=1)
@@ -2696,7 +2651,7 @@ class ECGApp(ctk.CTk):
             command=lambda: self._copy_tsv(self.txt_epochs))
         self.btn_copy_epochs.pack(side="right", padx=(0, SPACE_XS))  # type: ignore[union-attr]
 
-        ep_sf = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=0)
+        ep_sf = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=0)
         ep_sf.grid(row=3, column=0, sticky="nsew", padx=SPACE_M, pady=(SPACE_S, SPACE_S))
         ep_sf.grid_rowconfigure(0, weight=1)
         ep_sf.grid_columnconfigure(0, weight=1)
@@ -2764,7 +2719,7 @@ class ECGApp(ctk.CTk):
                       font=FONT_BTN_SEC, height=28, corner_radius=5
                       ).pack(side="right")
 
-        plot_frame = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=0)
+        plot_frame = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=0)
         plot_frame.grid(row=1, column=0, sticky="nsew", padx=SPACE_M, pady=(0, SPACE_M))
         plot_frame.grid_rowconfigure(0, weight=1)
         plot_frame.grid_columnconfigure(0, weight=1)
@@ -3038,8 +2993,8 @@ class ECGApp(ctk.CTk):
                                handlesize=0)
         paned.pack(fill="both", expand=True)
 
-        left_inner = tk.Frame(paned, bg=CARD, bd=0, highlightthickness=0)
-        right_inner = tk.Frame(paned, bg=CARD, bd=0, highlightthickness=0)
+        left_inner = tk.Frame(paned, bg=PANEL, bd=0, highlightthickness=0)
+        right_inner = tk.Frame(paned, bg=PANEL, bd=0, highlightthickness=0)
         paned.add(left_inner, minsize=180, stretch="always")
         paned.add(right_inner, minsize=300, stretch="always")
         # Set initial split after widget is mapped
@@ -3077,14 +3032,14 @@ class ECGApp(ctk.CTk):
         self.lbl_template_info.pack(side="right", padx=(0, SPACE_M))  # type: ignore[union-attr]
 
         # ── Mean beat plot ──────────────────────────────────────────────────
-        beat_card = ctk.CTkFrame(t, fg_color=CARD, corner_radius=0)
+        beat_card = ctk.CTkFrame(t, fg_color=PANEL, corner_radius=0)
         beat_card.grid(row=1, column=0, sticky="nsew", padx=SPACE_S, pady=(0, SPACE_S))
         beat_card.grid_rowconfigure(0, weight=1)
         beat_card.grid_columnconfigure(0, weight=1)
         self._slots["beat"] = CanvasSlot(beat_card, 14, 5.0, toolbar=False)
 
         # ── Distributions: amplitude + correlation ──────────────────────────
-        dist_card = ctk.CTkFrame(t, fg_color=CARD, corner_radius=0)
+        dist_card = ctk.CTkFrame(t, fg_color=PANEL, corner_radius=0)
         dist_card.grid(row=2, column=0, sticky="nsew", padx=SPACE_S, pady=(0, SPACE_S))
         dist_card.grid_rowconfigure(0, weight=1)
         dist_card.grid_columnconfigure(0, weight=1)
@@ -3168,7 +3123,7 @@ class ECGApp(ctk.CTk):
 
         # ── Scrollable body ───────────────────────────────────────────────────
         outer_scroll = ctk.CTkScrollableFrame(
-            t, fg_color=BG,
+            t, fg_color=PANEL,
             scrollbar_button_color=BORDER,
             scrollbar_button_hover_color=BORDER2,
         )
@@ -3203,7 +3158,7 @@ class ECGApp(ctk.CTk):
             row_frame.pack(fill="x", pady=(0, SPACE_S))
             for i, (key, h, w) in enumerate(specs):
                 pad_right = i < len(specs) - 1
-                card = ctk.CTkFrame(row_frame, fg_color=CARD, corner_radius=6, height=h)
+                card = ctk.CTkFrame(row_frame, fg_color=PANEL, corner_radius=6, height=h)
                 px = (0, 4) if pad_right else (0, 0)
                 card.pack(side="left", fill="both", expand=True, padx=px)
                 card.pack_propagate(False)
@@ -3294,9 +3249,9 @@ class ECGApp(ctk.CTk):
 
         # ━━━ SECTION 4 — Rapport texte ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         sec3 = _section(outer_scroll, "📝  Detailed Report", MUTED)
-        txt_card = ctk.CTkFrame(sec3, fg_color=CARD, corner_radius=6)
+        txt_card = ctk.CTkFrame(sec3, fg_color=PANEL, corner_radius=6)
         txt_card.pack(fill="x", pady=(0, SPACE_L))
-        self.txt_sum = ctk.CTkTextbox(txt_card, font=FONT_MONO, fg_color=CARD,
+        self.txt_sum = ctk.CTkTextbox(txt_card, font=FONT_MONO, fg_color=PANEL,
                                       text_color=TEXT, border_width=0, height=380)
         self.txt_sum.pack(fill="both", expand=True, padx=SPACE_M, pady=SPACE_M)
 
@@ -3444,16 +3399,42 @@ class ECGApp(ctk.CTk):
             color = MUTED
         self.lbl_ml_status.configure(text=text, text_color=color)  # type: ignore[union-attr]
 
-    # ── No-filter master toggle ──────────────────────────────
+    # ── Filtering master toggle ───────────────────────────────
 
-    def _on_no_filter_toggle(self) -> None:
-        """Enable/disable the no-filter mode and dim the filter controls.
+    def _on_filtering_toggle(self) -> None:
+        """Grey out the notch/band-pass/cleaning group when Filtering is off."""
+        self.detection_ctrl.on_filtering_toggle()
 
-        Utilise une liste plate pré-calculée (_filter_control_widgets) au lieu
-        d'une traversée récursive winfo_children() — évite de configurer 50+
-        widgets imbriqués à chaque toggle.
+    _CLEAN_METHOD_LABELS = {
+        "neurokit":        "NeuroKit",
+        "pantompkins1985": "Pan-Tompkins",
+        "elgendi2010":     "Elgendi",
+        "hamilton2002":    "Hamilton",
+        "biosppy":         "BioSPPy",
+    }
+
+    def _update_filter_summary(self) -> None:
+        """Refresh the read-only 'Processing' summary from live widget values.
+
+        Mirrors exactly what compute_preview_bundle() will actually do to
+        the signal -- so it only reflects FILTER SETTINGS (band-pass/notch/
+        cleaning), not the DISPLAY & PREVIEW group (show raw/invert/preview),
+        which don't change what gets analysed.
         """
-        self.detection_ctrl.on_no_filter_toggle()
+        if self.lbl_filter_summary is None:
+            return
+        if self.sw_filtering is None or not bool(self.sw_filtering.get()):
+            lines = ["Processing", "•  Raw signal"]
+        else:
+            lp = self._safe_float(self.ent_lp, MouseECG.BP_LO_HZ)
+            hp = self._safe_float(self.ent_hp, MouseECG.BP_HI_HZ)
+            lines = ["Processing", f"•  Band-pass: {lp:g}–{hp:g} Hz"]
+            if self.sw_notch is not None and bool(self.sw_notch.get()):
+                lines.append("•  Notch: 50 Hz")
+            clean_val = self.cb_clean.get() if self.cb_clean is not None else "neurokit"
+            clean_label = self._CLEAN_METHOD_LABELS.get(clean_val, clean_val.title())
+            lines.append(f"•  {clean_label} cleaning")
+        self.lbl_filter_summary.configure(text="\n".join(lines))
 
     # ── Raw / Filtered toggle ─────────────────────────────────
 
@@ -3849,16 +3830,62 @@ class ECGApp(ctk.CTk):
         PacingPeriodManagerDialog(self)
 
     def _update_pacing_count(self) -> None:
-        """Refresh the pacing-period count badge in the toolbar and the
-        right panel's ANNOTATIONS section summary."""
-        if self.lbl_pacing_count is not None:
-            n = len(self._pacing_periods)
-            self.lbl_pacing_count.configure(  # type: ignore[union-attr]
-                text=f"{n}" if n else "",
-                text_color=ORANGE if n else MUTED)
+        """Refresh the pacing-period count in the ANNOTATIONS panel section's
+        summary (the toolbar's redundant "Pacing Periods" chip was removed --
+        this dialog is now reached solely from that panel section)."""
         if self.lbl_panel_pacing_count is not None:
             n = len(self._pacing_periods)
             self.lbl_panel_pacing_count.configure(text=f"{n} pacing periods")  # type: ignore[union-attr]
+
+    def _toggle_rrhr_strip(self) -> None:
+        """Show/hide the RR/HR/Quality sub-plot strip below the detail plot.
+
+        Hiding it lets the detail plot reclaim row 1's space (weight=0 makes
+        row 0 the only expanding row); showing it restores the 70/30 split.
+        """
+        self.ui.rrhr_strip_visible = not self.ui.rrhr_strip_visible
+        if self.ui.rrhr_strip_visible:
+            self.subplot_frame.grid()
+            self.plot_area.grid_rowconfigure(1, weight=3)
+            self.btn_toggle_rrhr.configure(
+                fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white")
+        else:
+            self.subplot_frame.grid_remove()
+            self.plot_area.grid_rowconfigure(1, weight=0)
+            self.btn_toggle_rrhr.configure(
+                fg_color=BORDER, hover_color=BORDER2, text_color=MUTED)
+
+    def _toggle_left_panel(self) -> None:
+        """Hide/show the left sidebar entirely (simple hide/show, not a rail).
+
+        Collapsing un-packs the panel so the center workspace immediately
+        reclaims its width. Restoring it MUST pass before=self.main --
+        self.sidebar/self.right_panel are deliberately packed before
+        self.main in _build() so main's expand=True doesn't claim the full
+        cavity first; a bare .pack() after .pack_forget() re-appends the
+        slave to the END of the master's pack order (i.e. after main, which
+        has already claimed all the space), silently producing a permanent
+        zero-width panel. before=self.main reinserts it at the correct
+        position regardless of call order.
+        """
+        self.ui.left_panel_collapsed = not self.ui.left_panel_collapsed
+        if self.ui.left_panel_collapsed:
+            self.sidebar.pack_forget()
+            self.btn_toggle_left_panel.configure(text="⟩")
+        else:
+            self.sidebar.pack(side="left", fill="y", before=self.main)
+            self.btn_toggle_left_panel.configure(text="⟨")
+
+    def _toggle_right_panel(self) -> None:
+        """Hide/show the right panel entirely -- see _toggle_left_panel()'s
+        docstring for why before=self.main is required on restore."""
+        self.ui.right_panel_collapsed = not self.ui.right_panel_collapsed
+        if self.ui.right_panel_collapsed:
+            self.right_panel.pack_forget()
+            self.btn_toggle_right_panel.configure(text="⟨")
+        else:
+            self.right_panel.pack(side="right", fill="y", before=self.main)
+            self.btn_toggle_right_panel.configure(text="⟩")
 
     def _run_intervals(self) -> None:
         """Compute interval delineation in background, then launch verifier."""
@@ -3916,25 +3943,21 @@ class ECGApp(ctk.CTk):
         self._render_progress_label()
 
     def _render_progress_label(self) -> None:
-        """Render lbl_progress from the last known (pct, msg) + elapsed/ETA.
+        """Render lbl_progress from the last known (pct, msg) + a time-left estimate.
 
-        Split out from _set_progress so the heartbeat pulse (which fires
-        every 400 ms even when no new progress_cb call has arrived) can
-        keep the elapsed-time counter ticking live, instead of it only
-        updating on the sparse handful of real progress checkpoints a
-        worker happens to report.
+        Called on every real progress_cb checkpoint (via _set_progress) --
+        with the fake heartbeat pulse removed, this no longer ticks between
+        checkpoints, so the ETA shown is the best estimate as of the last
+        real checkpoint, not a live-updating countdown.
         """
         pct = getattr(self, "_last_prog_pct", 0)
         msg = getattr(self, "_last_prog_msg", "")
         start = getattr(self, "_async_start_time", None)
         suffix = ""
-        if start is not None:
+        if start is not None and pct >= 1:
             elapsed = time.time() - start
-            if pct >= 1:
-                eta = elapsed * (100 - pct) / pct
-                suffix = f"   ({elapsed:.0f}s elapsed, ~{eta:.0f}s left)"
-            else:
-                suffix = f"   ({elapsed:.0f}s elapsed)"
+            eta = elapsed * (100 - pct) / pct
+            suffix = f"   (~{eta:.0f}s left)"
         self.lbl_progress.configure(text=f"{pct}%  {msg}{suffix}")
 
     def _start_async(
@@ -3966,6 +3989,14 @@ class ECGApp(ctk.CTk):
         pass_result     : If True, worker() return value is passed to on_done(result).
                           If False (default), on_done is called with no arguments.
         """
+        if getattr(self, "_async_busy", False):
+            # self.progress/self.lbl_progress/_last_prog_pct/_async_start_time
+            # are shared instance state with no per-operation isolation --
+            # letting two _start_async calls run concurrently would interleave
+            # their writes to those attributes and produce chaotic, seemingly
+            # random progress-bar/label motion. Refuse the second call instead.
+            self._set_status("Another operation is already running — please wait", ORANGE)
+            return
         original_text = original_label or button.cget("text")
         button.configure(state="disabled", text=btn_busy_label)
         if status_msg:
@@ -3975,39 +4006,8 @@ class ECGApp(ctk.CTk):
         self._async_start_time = time.time()
         self._last_prog_pct = 0
         self._last_prog_msg = ""
+        self._async_busy = True
         self._render_progress_label()
-
-        # ── Heartbeat animation ───────────────────────────────────────────────
-        # Pulses the progress bar between its current value and (value + 3%)
-        # every 400 ms so the user can always tell the app is alive, even during
-        # a long numpy/scipy call that produces no intermediate callbacks.
-        _pulse_after_id: str | None = None
-        _pulse_direction: int = 1     # 1 = growing, -1 = shrinking
-        _pulse_base: float    = 0.0   # last "real" progress value
-
-        def _pulse() -> None:
-            nonlocal _pulse_after_id, _pulse_direction, _pulse_base
-            if _pulse_after_id is None:
-                return
-            cur = self.progress.get()
-            # If the real progress moved forward, update base and reset pulse
-            if cur > _pulse_base + 0.04 or cur < _pulse_base:
-                _pulse_base      = cur
-                _pulse_direction = 1
-            delta = 0.03 * _pulse_direction
-            nxt   = cur + delta
-            # Clamp so pulse never exceeds base+4% and never goes below base
-            if nxt > _pulse_base + 0.04:
-                nxt              = _pulse_base + 0.04
-                _pulse_direction = -1
-            elif nxt < _pulse_base:
-                nxt              = _pulse_base
-                _pulse_direction = 1
-            self.progress.set(max(0.0, min(0.99, nxt)))
-            self._render_progress_label()   # keep the elapsed-time counter ticking
-            _pulse_after_id = self.after(400, _pulse)
-
-        _pulse_after_id = self.after(400, _pulse)
 
         def _thread_target() -> None:
             try:
@@ -4021,8 +4021,7 @@ class ECGApp(ctk.CTk):
                 self.after(0, lambda e=exc, t=tb: _finish_error(e, t))
 
         def _finish_success(result: Any) -> None:
-            nonlocal _pulse_after_id
-            _pulse_after_id = None          # stop heartbeat
+            self._async_busy = False
             self._stop_progress(button, original_text)
             if pass_result:
                 on_done(result)
@@ -4030,8 +4029,7 @@ class ECGApp(ctk.CTk):
                 on_done()  # noqa: pass_result=False branch — on_done takes no args
 
         def _finish_error(exc: Exception, tb: str) -> None:
-            nonlocal _pulse_after_id
-            _pulse_after_id = None          # stop heartbeat
+            self._async_busy = False
             self._stop_progress(button, original_text)
             self._set_status(f"Error: {exc}", RED)
             messagebox.showerror("Error", f"{exc}\n\n{tb}")
@@ -4081,8 +4079,11 @@ class ECGApp(ctk.CTk):
         changes — the preview segment isn't auto-reactive to keystrokes,
         only re-evaluated on these discrete commit events, matching how
         the rest of the sidebar (Preview Detection button) already works.
+        Also the single choke point for refreshing the "Processing" summary,
+        since every FILTER SETTINGS widget is already wired to this method.
         """
         self.signal_ctrl.refresh_filter_preview()
+        self._update_filter_summary()
 
     def _draw_detail(self, t_start: float | None = None) -> None:
         """Draw the time-windowed detail view with peak markers.
@@ -4317,7 +4318,7 @@ class ECGApp(ctk.CTk):
         win = ctk.CTkToplevel(self)
         win.title("Recent recordings")
         win.geometry("740x480")
-        win.configure(fg_color=BG)
+        win.configure(fg_color=PANEL)
         win.grab_set(); win.lift()
 
         hdr = ctk.CTkFrame(win, fg_color=PANEL, corner_radius=0)
@@ -4325,7 +4326,7 @@ class ECGApp(ctk.CTk):
         ctk.CTkLabel(hdr, text="Recent recordings", font=FONT_CARD_TITLE,
                      text_color=TEXT, anchor="w").pack(side="left", padx=SPACE_L, pady=SPACE_M)
 
-        scroll = ctk.CTkScrollableFrame(win, fg_color=BG)
+        scroll = ctk.CTkScrollableFrame(win, fg_color=PANEL)
         scroll.pack(fill="both", expand=True, padx=SPACE_M, pady=SPACE_M)
 
         def _entry(path: str, hr: str = "—", sdnn: str = "—",
@@ -4502,12 +4503,12 @@ class ECGApp(ctk.CTk):
         win = ctk.CTkToplevel(self)
         win.title("⚙  Parameters")
         win.geometry("540x720")
-        win.configure(fg_color=BG)
+        win.configure(fg_color=PANEL)
         win.resizable(True, True)
         win.grab_set()
         win.lift()
 
-        scroll = ctk.CTkScrollableFrame(win, fg_color=BG,
+        scroll = ctk.CTkScrollableFrame(win, fg_color=PANEL,
                                         scrollbar_button_color=BORDER,
                                         scrollbar_button_hover_color=BORDER2)
         scroll.pack(fill="both", expand=True, padx=0, pady=0)
@@ -4565,11 +4566,14 @@ class ECGApp(ctk.CTk):
 
         # ── FILTERS ───────────────────────────────────────────────────────
         f2 = _sec("🔧  Filters", PURPLE)
-        dlg_no_filter = _row_switch(f2, "Raw signal — no DSP filters (recommended)", "sw_no_filter")
+        dlg_filtering = _row_switch(f2, "Filtering", "sw_filtering")
         dlg_notch     = _row_switch(f2, "Notch 50 Hz", "sw_notch")
         dlg_invert    = _row_switch(f2, "Invert signal polarity", "sw_invert_signal")
-        dlg_hp = _row_entry(f2, "HP cut-off (Hz)",  "ent_lp")
-        dlg_lp = _row_entry(f2, "LP cut-off (Hz)",  "ent_hp")
+        # Labelled Low/High to match the sidebar's FILTERS section -- see
+        # the comment there on why (matches filtering.py's bandpass(lo, hi)
+        # naming, avoids HP/LP filter-type jargon at a glance).
+        dlg_hp = _row_entry(f2, "Low cutoff (Hz)",  "ent_lp")
+        dlg_lp = _row_entry(f2, "High cutoff (Hz)", "ent_hp")
 
         # Clean method
         row_cm = ctk.CTkFrame(f2, fg_color="transparent")
@@ -4675,7 +4679,7 @@ class ECGApp(ctk.CTk):
 
             # Switches
             for sw_attr, dlg_sw in [
-                ("sw_no_filter",    dlg_no_filter),
+                ("sw_filtering",    dlg_filtering),
                 ("sw_notch",        dlg_notch),
                 ("sw_invert_signal",dlg_invert),
                 ("sw_show_raw",     dlg_show_raw),
@@ -4694,7 +4698,7 @@ class ECGApp(ctk.CTk):
                 self.sl_thr.set(float(dlg_thr.get()))  # type: ignore[union-attr]
                 self.lbl_thr.configure(text=f"Sensitivity:  {dlg_thr.get():.3f}")
 
-            self._on_no_filter_toggle()
+            self._on_filtering_toggle()
             self._on_show_raw_toggle()
             self._set_status("Parameters applied ✓", GREEN)
             win.destroy()
@@ -4838,7 +4842,6 @@ class ECGApp(ctk.CTk):
             ("<Control-s>",   lambda e: self._save_session()),
             ("<Control-e>",   lambda e: self._export_excel()),
             ("<Control-w>",   lambda e: self._export_rr_csv()),
-            ("<Control-b>",   lambda e: self._open_batch_dialog()),
             ("<Control-m>",   lambda e: self._open_compare_segments()),
             ("<F1>",          lambda e: self._show_shortcuts_help()),
         ]
@@ -4856,7 +4859,6 @@ class ECGApp(ctk.CTk):
             "Ctrl+S         Save session\n"
             "Ctrl+E         Export Excel\n"
             "Ctrl+W         Export RR intervals CSV\n"
-            "Ctrl+B         Batch processing\n"
             "Ctrl+M         Compare segments\n"
             "Ctrl+Z / Y     Undo / Redo peak edits\n"
             "←  / →         Navigate tachogram\n"
@@ -4903,167 +4905,6 @@ class ECGApp(ctk.CTk):
                 if part.lower().endswith(".mat") and os.path.exists(part):
                     self._load_path(part)
                     break
-
-    # ════════════════════════════════════════════════════════
-    #  6. BATCH PROCESSING DIALOG
-    # ════════════════════════════════════════════════════════
-
-    def _open_batch_dialog(self) -> None:
-        """Open the batch processing window."""
-        win = ctk.CTkToplevel(self)
-        win.title("Batch Processing")
-        win.geometry("760x560")
-        win.configure(fg_color=BG)
-        win.grab_set(); win.lift()
-
-        # ── Header ────────────────────────────────────────────────────────
-        hdr = ctk.CTkFrame(win, fg_color=PANEL, corner_radius=0)
-        hdr.pack(fill="x")
-        ctk.CTkLabel(hdr, text="⚡  Batch Processing",
-                     font=FONT_BTN_PRIMARY, text_color=TEXT,
-                     anchor="w").pack(side="left", padx=SPACE_L, pady=SPACE_M)
-        ctk.CTkButton(hdr, text="✗ Close", command=win.destroy,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                      font=FONT_BTN_SEC, height=28).pack(side="right", padx=SPACE_L)
-
-        body = ctk.CTkFrame(win, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=SPACE_L, pady=SPACE_M)
-
-        # ── File list ─────────────────────────────────────────────────────
-        fl = ctk.CTkFrame(body, fg_color=CARD, corner_radius=8)
-        fl.pack(fill="both", expand=True)
-        fl_hdr = ctk.CTkFrame(fl, fg_color="transparent")
-        fl_hdr.pack(fill="x", padx=SPACE_M, pady=(SPACE_M, SPACE_S))
-        ctk.CTkLabel(fl_hdr, text="Files to process",
-                     font=FONT_SUBSECTION, text_color=MUTED,
-                     anchor="w").pack(side="left")
-        ctk.CTkButton(fl_hdr, text="+ Add folder", height=26,
-                      fg_color=BLUE_DARK, hover_color=BLUE, text_color="white",
-                      font=FONT_SMALL, corner_radius=5,
-                      command=lambda: _add_folder()).pack(side="right")
-        ctk.CTkButton(fl_hdr, text="+ Add files", height=26,
-                      fg_color=BLUE_DARK, hover_color=BLUE, text_color="white",
-                      font=FONT_SMALL, corner_radius=5,
-                      command=lambda: _add_files()).pack(side="right", padx=(0, SPACE_S))
-
-        file_box = ctk.CTkTextbox(fl, fg_color=BG, text_color=TEXT,
-                                  font=FONT_MONO, height=180)
-        file_box.pack(fill="both", expand=True, padx=SPACE_M, pady=(0, SPACE_M))
-
-        # ── Settings row ──────────────────────────────────────────────────
-        cfg = ctk.CTkFrame(body, fg_color="transparent")
-        cfg.pack(fill="x", pady=(SPACE_M, SPACE_S))
-
-        for lbl, attr, default, w in [
-            ("Channel:", "bc_channel", "ECG", 80),
-            ("Output folder:", "bc_outdir", str(Path.home() / "ECG_batch"), 220),
-            ("Workers:", "bc_workers", "4", 44),
-        ]:
-            ctk.CTkLabel(cfg, text=lbl, font=FONT_SMALL,
-                         text_color=MUTED).pack(side="left", padx=(0, SPACE_XS))
-            ent = ctk.CTkEntry(cfg, width=w, height=28, font=FONT_LABEL,
-                               fg_color=BG, border_color=BORDER2, text_color=TEXT)
-            ent.insert(0, default)
-            ent.pack(side="left", padx=(0, SPACE_L))
-            setattr(self, f"_batch_{attr}", ent)
-
-        ctk.CTkButton(cfg, text="📁 Browse", height=28, width=70,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                      font=FONT_SMALL,
-                      command=lambda: (
-                          _d := filedialog.askdirectory(),
-                          self._batch_bc_outdir.delete(0, "end") or
-                          self._batch_bc_outdir.insert(0, _d) if _d else None
-                      )).pack(side="left")
-
-        # ── Progress area ─────────────────────────────────────────────────
-        prog_frame = ctk.CTkFrame(body, fg_color="transparent")
-        prog_frame.pack(fill="x", pady=(SPACE_S, SPACE_S))
-        prog_bar = ctk.CTkProgressBar(prog_frame, height=8, mode="determinate",
-                                      progress_color=BLUE)
-        prog_bar.set(0)
-        prog_bar.pack(fill="x", pady=(0, SPACE_S))
-        lbl_prog = ctk.CTkLabel(prog_frame, text="", font=FONT_SMALL,
-                                text_color=MUTED, anchor="w")
-        lbl_prog.pack(fill="x")
-
-        run_btn = ctk.CTkButton(body, text="▶▶  Start Batch",
-                                fg_color=GREEN, hover_color=GREEN_DARK,
-                                text_color="white",
-                                font=FONT_BTN_PRIMARY, height=34, corner_radius=8)
-        run_btn.pack(fill="x", pady=(SPACE_S, 0))
-
-        _filepaths: "list[str]" = []
-        _bp: "Any" = None
-
-        def _add_files():
-            paths = filedialog.askopenfilenames(
-                filetypes=[("MATLAB", "*.mat"), ("All", "*.*")],
-                title="Select .mat files")
-            for p in paths:
-                if p not in _filepaths:
-                    _filepaths.append(p)
-                    file_box.insert("end", p + "\n")
-
-        def _add_folder():
-            d = filedialog.askdirectory(title="Select folder containing .mat files")
-            if not d:
-                return
-            import glob
-            for p in sorted(glob.glob(os.path.join(d, "*.mat"))):
-                if p not in _filepaths:
-                    _filepaths.append(p)
-                    file_box.insert("end", p + "\n")
-
-        def _start():
-            nonlocal _bp
-            if not _filepaths:
-                messagebox.showwarning("No files", "Add .mat files first.")
-                return
-            out_dir = self._batch_bc_outdir.get().strip()  # type: ignore[union-attr]
-            ch      = self._batch_bc_channel.get().strip()  # type: ignore[union-attr]
-            try:
-                n_workers = int(self._batch_bc_workers.get())  # type: ignore[union-attr]
-            except Exception:
-                n_workers = 2
-            vlf, lf, hf = self._get_freq_bands()
-            params = self._snapshot_params()
-            params.update({
-                "channel":   ch or "ECG",
-                "threshold": float(self.sl_thr.get()) if self.sl_thr else 0.5,  # type: ignore[union-attr]
-                "vlf_band":  list(vlf), "lf_band": list(lf), "hf_band": list(hf),
-                "subject":   self.ent_subject.get().strip() or Path(_filepaths[0]).stem,
-            })
-            run_btn.configure(state="disabled", text="Running…")
-            n = len(_filepaths)
-            prog_bar.set(0)
-
-            def _cb(done: int, total: int, stem: str) -> None:
-                win.after(0, lambda: (
-                    prog_bar.set(done / total),
-                    lbl_prog.configure(
-                        text=f"{done}/{total}  —  {stem}  {'✓' if done==total else '…'}")
-                ))
-
-            from ecg.batch import BatchProcessor
-            _bp = BatchProcessor(_filepaths, params, out_dir,
-                                  progress_cb=_cb, max_workers=n_workers)
-            import threading
-            def _worker():
-                results = _bp.run()
-                ok  = sum(1 for r in results if r.get("ok"))
-                win.after(0, lambda: (
-                    run_btn.configure(state="normal", text="▶▶  Start Batch"),
-                    lbl_prog.configure(
-                        text=f"Done — {ok}/{n} succeeded  →  {out_dir}",
-                        text_color=GREEN if ok == n else ORANGE),
-                    messagebox.showinfo("Batch done",
-                        f"{ok}/{n} files processed successfully.\n"
-                        f"Summary → {os.path.join(out_dir, '_batch_summary.xlsx')}")
-                ))
-            threading.Thread(target=_worker, daemon=True).start()
-
-        run_btn.configure(command=_start)
 
     # ════════════════════════════════════════════════════════
     #  7. RECORDING NOTES (per-file, saved in SQLite)
@@ -5203,9 +5044,14 @@ class ECGApp(ctk.CTk):
 
     def _toolbar_chip(self, parent) -> ctk.CTkFrame:
         """Grouped-control 'chip' background for nav/hdr instrument-toolbar
-        clusters -- the same CARD/BORDER treatment already used for the
-        stat-panel category boxes (see _build_stat_section)."""
-        return ctk.CTkFrame(parent, fg_color=CARD, corner_radius=8,
+        clusters. Uses BG (a subtle off-white, distinct from the PANEL/CARD
+        pure-white now used for large surfaces) rather than CARD -- since
+        PANEL and CARD both became pure white, a CARD-filled chip on a
+        PANEL-filled bar was indistinguishable from its background, and
+        toolbar button groups lost their visual grouping entirely. BG is a
+        gentle enough tint to read as "one control cluster" without
+        reintroducing a visible grey block."""
+        return ctk.CTkFrame(parent, fg_color=BG, corner_radius=8,
                              border_width=1, border_color=BORDER)
 
     def _btn(self, parent, text: str, command, pad: dict,
@@ -5282,11 +5128,12 @@ class ECGApp(ctk.CTk):
         except Exception as e:
             log.debug("epoch/overlap entry restore failed: %s", e)
 
-        # Switches — match FilterParams defaults
+        # Switches — match FilterParams defaults (sw_filtering is the
+        # inverse of fp.no_filter -- ON means filtering is applied)
         _sw_defaults: list[tuple[str, bool]] = [
             ("sw_notch",         fp.notch_filter),
             ("sw_artifact",      fp.artifact_correction),
-            ("sw_no_filter",     fp.no_filter),
+            ("sw_filtering",     not fp.no_filter),
             ("sw_epoch",         fp.auto_epochs),
             ("sw_invert_signal", fp.invert_signal),
         ]
@@ -5308,6 +5155,11 @@ class ECGApp(ctk.CTk):
                 self._on_det_method_change("SG + Derivative (10 kHz)")
         except Exception as e:
             log.debug("cb_det_method reset failed: %s", e)
+
+        # Resync FILTER SETTINGS greying + the "Processing" summary to the
+        # just-reset sw_filtering/notch/cutoff/clean values.
+        self._on_filtering_toggle()
+        self._update_filter_summary()
 
         self._set_status("Parameters reset to mouse ECG defaults ✓", GREEN)
 

@@ -33,7 +33,7 @@ from scipy.signal import welch as _scipy_welch
 _trapz = getattr(np, "trapz", None) or getattr(np, "trapezoid", None)
 
 from ecg.core.models import MouseECG
-from ecg.core.filtering import downsample_for_display, downsample_envelope
+from ecg.core.filtering import downsample_for_display
 from ecg.core.analysis import compute_beat_correlation
 from ecg.ui.plots import style_axes
 from ecg.ui.wave_editor import WaveTemplateEditor
@@ -49,8 +49,6 @@ if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
-
-_OVERVIEW_MAX_POINTS = 2_000
 
 
 class PlotController:
@@ -175,44 +173,20 @@ class PlotController:
         self.app._slots["arr_detail"].update(draw)
 
 
-    def _ensure_overview_cache(self) -> bool:
-        """Lazily compute+cache the minimap's envelope arrays.
-
-        Filtered signal only -- the minimap's job is "where am I in the
-        recording," not raw-vs-filtered comparison; that toggle stays
-        detail-plot-only. Returns False if there's no filtered signal yet.
-        """
-        time, sig_flt = self.app.signal.time, self.app.signal.filtered
-        if time is None or sig_flt is None:
-            return False
-        if self.app.ui.ds_time is None or self.app.ui.ds_sig is None:
-            mins, maxs = downsample_envelope(sig_flt, max_points=_OVERVIEW_MAX_POINTS)
-            self.app.ui.ds_sig     = mins
-            self.app.ui.ds_sig_max = maxs
-            self.app.ui.ds_sig_mid = (mins + maxs) / 2.0
-            self.app.ui.ds_time    = np.linspace(float(time[0]), float(time[-1]), len(mins))
-        return True
-
     def draw_overview(self) -> None:
-        """Full-recording minimap strip above the detail plot.
+        """Full-recording scrubber strip above the detail plot.
 
-        Filled min/max envelope band (cached, filtered signal only),
-        accepted R-peaks only (no rejected/excluded/added markers -- keeps
-        this compact strip uncluttered), and a "current window" highlight
-        recomputed fresh from live ui.nav_pos/ent_window on every call
-        (never cached, so drag/scrub always reflects the true position).
+        A simple flat line spanning the whole recording, plus a "current
+        window" highlight recomputed fresh from live ui.nav_pos/ent_window on
+        every call (never cached, so drag/scrub always reflects the true
+        position) -- the highlight is the scrubber's draggable "cursor".
         Click/drag navigation is wired by NavigationController.on_overview_*,
         not here -- this method only renders. No-ops gracefully if no
         signal is loaded yet.
         """
-        if not self._ensure_overview_cache():
+        time = self.app.signal.time
+        if time is None:
             return
-
-        time, fs, sig_flt = self.app.signal.time, self.app.signal.fs, self.app.signal.filtered
-        t_ds, lo_ds, hi_ds, mid_ds = (self.app.ui.ds_time, self.app.ui.ds_sig,
-                                       self.app.ui.ds_sig_max, self.app.ui.ds_sig_mid)
-        rp_ok = self.app.detection.rpeaks_ok if self.app.detection.rpeaks_ok is not None else np.array([])
-        t_amp = self.app.detection.thresh_amp
         t_max = float(time[-1])
 
         try:
@@ -227,22 +201,19 @@ class PlotController:
         def draw(fig):
             ax = fig.add_subplot(111)
             style_axes(ax)
-            ax.fill_between(t_ds, lo_ds, hi_ds, color=PLOT["signal"], alpha=0.55, lw=0, zorder=2)
-            ax.plot(t_ds, mid_ds, color=PLOT["signal"], lw=0.5, alpha=0.35, zorder=3)
-            if len(rp_ok):
-                ax.scatter(rp_ok / fs, sig_flt[rp_ok], color=PLOT["rpeak_ok"],
-                           s=6, zorder=5, alpha=0.6, linewidths=0)
-            ax.axhline(t_amp, color=PLOT["threshold"], lw=0.8, ls="--", alpha=0.5, zorder=1)
+            ax.plot([float(time[0]), t_max], [0, 0], color=PLOT["signal"], lw=1.5, alpha=0.6, zorder=2)
 
-            # Current-window indicator -- the Audacity/Premiere "viewport" box.
+            # Current-window indicator -- the Audacity/Premiere "viewport" box,
+            # doubling as the scrubber's draggable cursor.
             ax.axvspan(t_start, t_end, color=ORANGE, alpha=0.16, zorder=6, linewidth=0)
             ax.axvline(t_start, color=ORANGE, lw=1.0, alpha=0.8, zorder=7)
             ax.axvline(t_end, color=ORANGE, lw=1.0, alpha=0.8, zorder=7)
 
             ax.set_xlim(float(time[0]), t_max)
+            ax.set_ylim(-1, 1)
             ax.set_yticks([])
             ax.tick_params(axis="x", labelsize=7, colors=PLOT["muted"])
-            ax.margins(x=0, y=0.05)
+            ax.margins(x=0)
             for sp in ("top", "right", "left"):
                 ax.spines[sp].set_visible(False)
 
@@ -555,7 +526,7 @@ class PlotController:
         every Edit Peaks/Undo/Redo/Free Placement/threshold change funnels
         through), so an `is` check here is a correct, self-invalidating
         cache-validity test. Returns False if there's no data to compute
-        from yet (mirrors _ensure_overview_cache()'s convention).
+        from yet.
         """
         d = self.app.detection
         if d.rpeaks_ok is d._beat_corr_for:

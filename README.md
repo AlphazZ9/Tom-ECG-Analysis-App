@@ -34,9 +34,7 @@ mice (typical resting HR ~500 bpm, 180–900 bpm range).
   plus a local SQLite registry of recently analyzed recordings.
 - **Export** — formatted Excel workbooks, GraphPad Prism `.pzfx`, PDF
   reports, CSV.
-- **Batch processing** — analyze many files in parallel, one output workbook
-  per file plus a combined summary sheet.
-- **Theming** — 7 light/dark presets, propagated live across the whole UI.
+- **Theming** — light/dark presets, propagated live across the whole UI.
 
 ## Requirements
 
@@ -73,7 +71,6 @@ ecg-analysis            # after `pip install -e .`
 ├── ecg/
 │   ├── __init__.py       # package version, architecture overview
 │   ├── __main__.py       # `python -m ecg` entry point
-│   ├── batch.py          # parallel multi-file batch pipeline
 │   ├── core/             # pure NumPy/SciPy/pandas — no UI, no file I/O
 │   │   ├── models.py         # species physiology constants, shared dataclasses
 │   │   ├── filtering.py      # bandpass, notch, normalize, downsample
@@ -103,8 +100,8 @@ ecg-analysis            # after `pip install -e .`
 ```
 
 `ecg.core` has no dependency on `ecg.ui` or `ecg.io` — the detection and HRV
-algorithms are pure functions that can be tested, scripted, or reused (e.g.
-from `ecg.batch`) without launching the GUI.
+algorithms are pure functions that can be tested, scripted, or reused without
+launching the GUI.
 
 ## Notes for contributors
 

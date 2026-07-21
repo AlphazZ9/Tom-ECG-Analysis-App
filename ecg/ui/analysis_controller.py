@@ -100,11 +100,14 @@ class AnalysisController:
         _gen = getattr(self.app, "_generation", 0)  # snapshot — detect file change
 
         def _worker():
+            def _prog(p, m):
+                self.app.after(0, lambda pp=p, mm=m: self.app._set_progress(pp, mm))
             return classify_arrhythmias(
                 rpeaks, fs, ctx_key,
                 baseline_s=baseline_s,
                 brady_pct=brady_pct,
                 min_brady_beats=min_beats,
+                progress_cb=_prog,
             )
 
         def _done(events: "list[ArrhythmiaEvent]"):

@@ -20,10 +20,9 @@ from scipy.signal import welch as _scipy_welch
 # numpy 2.x renamed trapz to trapezoid (older numpy/some builds only have
 # trapz). This used to rely on app.py's own module-level shim monkey-patching
 # np.trapz before `from analysis import ...` ran -- which meant this module
-# could not be imported on its own on a numpy version lacking trapz. That's
-# exactly what batch.py's subprocess workers do (they never import app.py),
-# so batch mode could not run at all on numpy >= 2.0 until this was resolved
-# locally, with no dependency on import order.
+# could not be imported on its own on a numpy version lacking trapz unless
+# app.py had already run first. Resolved locally instead, with no dependency
+# on import order, so this module stays importable/testable standalone.
 trapz = getattr(np, "trapz", None) or getattr(np, "trapezoid", None)
 if trapz is None:
     from scipy.integrate import trapezoid as trapz  # last-resort fallback
@@ -32,11 +31,10 @@ from ecg.core.models import AnalysisResults, MouseECG
 from ecg.core.wave_template import WaveTemplate, detect_waves_on_beat
 
 # Detected locally rather than imported from theme.py: this module is pure
-# NumPy/SciPy and is imported by batch.py's subprocess workers (documented as
-# having no Tkinter/CTk dependency), and theme.py does `import customtkinter`
-# plus module-level ctk.set_appearance_mode()/set_default_color_theme() calls
-# -- importing NK_AVAILABLE/nk from there would drag that whole chain into
-# every batch worker process just to check whether neurokit2 is installed.
+# NumPy/SciPy/pandas with no Tkinter/CTk dependency, and theme.py does
+# `import customtkinter` plus module-level ctk.set_appearance_mode()/
+# set_default_color_theme() calls -- importing NK_AVAILABLE/nk from there
+# would drag that whole chain in just to check whether neurokit2 is installed.
 try:
     import neurokit2 as nk
     NK_AVAILABLE = True

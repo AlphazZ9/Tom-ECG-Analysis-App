@@ -83,7 +83,7 @@ class ThemeDialog(ctk.CTkToplevel):
     # ── UI construction ─────────────────────────────────────────────────────
 
     def _build(self) -> None:
-        self.configure(fg_color=BG)
+        self.configure(fg_color=PANEL)
 
         # Title bar
         hdr = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, height=56)
@@ -336,7 +336,7 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         self.title("Artifact Review")
         self.geometry("960x640")
         self.minsize(820, 520)
-        self.configure(fg_color=BG)
+        self.configure(fg_color=PANEL)
         self.grab_set()          # modal
         self.focus_force()
 
@@ -389,7 +389,7 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         content.grid_columnconfigure(1, weight=1)   # info panel
 
         # ── Signal plot ─────────────────────────────────────────
-        plot_card = ctk.CTkFrame(content, fg_color=CARD, corner_radius=6)
+        plot_card = ctk.CTkFrame(content, fg_color=PANEL, corner_radius=6)
         plot_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         plot_card.grid_rowconfigure(0, weight=1)
         plot_card.grid_columnconfigure(0, weight=1)

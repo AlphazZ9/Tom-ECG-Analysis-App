@@ -125,6 +125,9 @@ class UIState:
     """Transient view/render state: navigation position, caches, mpl event ids."""
     nav_pos: float = 0.0
     show_raw: bool = True                       # raw/filtered toggle
+    rrhr_strip_visible: bool = True              # RR/HR/Quality sub-plot strip toggle
+    left_panel_collapsed: bool = False           # left sidebar hide/show toggle
+    right_panel_collapsed: bool = False          # right panel hide/show toggle
     # Filter preview (before/after overlay) -- computed on-demand for the
     # currently visible detail window only, never touches filtered signal or
     # any detection state.
@@ -136,7 +139,6 @@ class UIState:
     scroll_sync_after_id: "str | None" = None    # detail scroll-zoom resync debounce handle
     beat_nav_cid: Optional[int] = None           # mpl event ID for beat navigator
     rr_click_cid: Optional[int] = None           # mpl event connection id for RR click-to-navigate
-    ov_ylim: Optional[tuple] = None              # y-axis zoom cache for overview
     hrv_current_view: str = "RR / HR"
     ctx_keys: list = field(default_factory=list)
     operation_start_time: Optional[float] = None
@@ -144,15 +146,6 @@ class UIState:
     figure_cache: dict = field(default_factory=dict)
     # TSV clipboard store: keyed by widget id, value = TSV string
     tsv_store: "dict[int, str]" = field(default_factory=dict)
-
-    # Display cache -- downsampled arrays, invalidated on file load
-    ds_time: Optional[np.ndarray] = None
-    ds_sig: Optional[np.ndarray] = None          # envelope mins (filtered)
-    ds_sig_max: Optional[np.ndarray] = None      # envelope maxs (filtered)
-    ds_sig_mid: Optional[np.ndarray] = None      # envelope midline (filtered)
-    ds_raw_sig: Optional[np.ndarray] = None      # envelope mins (raw)
-    ds_raw_sig_max: Optional[np.ndarray] = None  # envelope maxs (raw)
-    ds_raw_sig_mid: Optional[np.ndarray] = None  # envelope midline (raw)
 
 
 @dataclass
