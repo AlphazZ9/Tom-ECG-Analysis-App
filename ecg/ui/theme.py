@@ -64,97 +64,35 @@ class ThemeConfig:
     is restored automatically on next launch.
     """
 
-    DEFAULT_FONT_FAMILIES: "list[str]" = [
-        "SF Pro Text", "SF Pro Display", ".AppleSystemUIFont", "Helvetica Neue",
-        "Segoe UI Variable", "Segoe UI", "Calibri", "Roboto",
-        "Ubuntu", "Cantarell", "Inter",
-        "Georgia", "Palatino", "Courier New", "Consolas",
-    ]
-
-    # Seven carefully designed presets
+    # Exactly two themes -- colours pulled from the Adaptive Workbench mockup
+    # (ecg_layout_concepts.html) shown during the redesign brief.
     PRESETS: "dict[str, dict]" = {
-        # -- Light themes --------------------------------------------------
-        "Apple": dict(
+        "Light": dict(
             is_dark=False,
-            BG="#F5F5F7", PANEL="#FAFAFA", CARD="#FFFFFF",
-            BORDER="#D2D2D7", BORDER2="#AEAEB2",
-            TEXT="#1D1D1F", MUTED="#6E6E73", LIGHT="#AEAEB2",
-            RED="#FF3B30",  BLUE="#0071E3", GREEN="#34C759", ORANGE="#FF9500",
-            plot_signal="#0071E3", plot_rpeak="#34C759",
-            description="Apple Human Interface Guidelines — clean, modern, precise",
+            BG="#F4F5F7", PANEL="#ECEEF1", CARD="#FFFFFF",
+            BORDER="#DCE0E5", BORDER2="#C7CDD4",
+            TEXT="#1B222C", MUTED="#5B6472", LIGHT="#939DA8",
+            RED="#D64545",  BLUE="#2D6CDF", GREEN="#2E9E5B", ORANGE="#E08A2A",
+            plot_signal="#2D6CDF", plot_rpeak="#2E9E5B",
+            description="Clean, modern, restrained — the app's default look",
         ),
-        "Arctic": dict(
-            is_dark=False,
-            BG="#F8F9FB", PANEL="#EFF1F5", CARD="#FFFFFF",
-            BORDER="#DDE1EA", BORDER2="#B0B7C3",
-            TEXT="#0F172A", MUTED="#64748B", LIGHT="#94A3B8",
-            RED="#C62828",  BLUE="#1A56DB", GREEN="#1B5E20", ORANGE="#D84315",
-            plot_signal="#1A56DB", plot_rpeak="#1B5E20",
-            description="Crisp off-white with deep cobalt accents",
-        ),
-        "Warm Lab": dict(
-            is_dark=False,
-            BG="#FAF7F0", PANEL="#F0EBE0", CARD="#FFFEF8",
-            BORDER="#DDD3C0", BORDER2="#BEA882",
-            TEXT="#2C1A0E", MUTED="#7D6A55", LIGHT="#A89880",
-            RED="#B34700",  BLUE="#1A6FA8", GREEN="#2D6A1A", ORANGE="#C07000",
-            plot_signal="#1A6FA8", plot_rpeak="#2D6A1A",
-            description="Warm parchment tones for long analysis sessions",
-        ),
-        "Solarized": dict(
-            is_dark=False,
-            BG="#FDF6E3", PANEL="#EEE8D5", CARD="#FFFDF5",
-            BORDER="#D3C9B3", BORDER2="#B0A892",
-            TEXT="#073642", MUTED="#586E75", LIGHT="#839496",
-            RED="#DC322F",  BLUE="#268BD2", GREEN="#859900", ORANGE="#CB4B16",
-            plot_signal="#268BD2", plot_rpeak="#859900",
-            description="Ethan Schoonover's classic readable palette",
-        ),
-        # -- Dark themes ---------------------------------------------------
-        "Apple Dark": dict(
+        "Dark": dict(
             is_dark=True,
-            BG="#1C1C1E", PANEL="#2C2C2E", CARD="#3A3A3C",
-            BORDER="#3A3A3C", BORDER2="#48484A",
-            TEXT="#F5F5F7", MUTED="#98989D", LIGHT="#636366",
-            RED="#FF453A",  BLUE="#0A84FF", GREEN="#30D158", ORANGE="#FF9F0A",
-            plot_signal="#0A84FF", plot_rpeak="#30D158",
-            description="Apple Dark Mode — macOS Monterey palette",
-        ),
-        "Nordic": dict(
-            is_dark=True,
-            BG="#2E3440", PANEL="#3B4252", CARD="#434C5E",
-            BORDER="#4C566A", BORDER2="#5E81AC",
-            TEXT="#ECEFF4", MUTED="#BEC7D8", LIGHT="#8A97A8",
-            RED="#BF616A",  BLUE="#88C0D0", GREEN="#A3BE8C", ORANGE="#EBCB8B",
-            plot_signal="#88C0D0", plot_rpeak="#A3BE8C",
-            description="Nord palette: muted arctic blues, ultra-readable",
-        ),
-        "Midnight": dict(
-            is_dark=True,
-            BG="#0D1117", PANEL="#161B22", CARD="#1C2128",
-            BORDER="#30363D", BORDER2="#484F58",
-            TEXT="#E6EDF3", MUTED="#7D8590", LIGHT="#545D68",
-            RED="#F85149",  BLUE="#388BFD", GREEN="#3FB950", ORANGE="#E3B341",
-            plot_signal="#388BFD", plot_rpeak="#3FB950",
-            description="GitHub Dark: deep black, vivid signal accents",
-        ),
-        "Dracula": dict(
-            is_dark=True,
-            BG="#282A36", PANEL="#1E1F29", CARD="#343746",
-            BORDER="#44475A", BORDER2="#6272A4",
-            TEXT="#F8F8F2", MUTED="#BD93F9", LIGHT="#6272A4",
-            RED="#FF5555",  BLUE="#8BE9FD", GREEN="#50FA7B", ORANGE="#FFB86C",
-            plot_signal="#8BE9FD", plot_rpeak="#50FA7B",
-            description="High-contrast purple haze, zero eye-strain in dark rooms",
+            BG="#14171C", PANEL="#1B1F26", CARD="#1B1F26",
+            BORDER="#2B3138", BORDER2="#3A4149",
+            TEXT="#E7EAEE", MUTED="#9BA5B2", LIGHT="#656E79",
+            RED="#E5695F",  BLUE="#5B8DF5", GREEN="#4CBA7C", ORANGE="#E8A552",
+            plot_signal="#5B8DF5", plot_rpeak="#4CBA7C",
+            description="The same design, low-light",
         ),
     }
 
     def __init__(self) -> None:
-        self.preset_name: str   = "Apple"
+        self.preset_name: str   = "Light"
         self.font_family: str   = _detect_system_font()
         self.font_scale:  float = 1.0
         self.is_dark:     bool  = False
-        self._colors:     dict  = dict(ThemeConfig.PRESETS["Apple"])
+        self._colors:     dict  = dict(ThemeConfig.PRESETS["Light"])
 
     def __getattr__(self, name: str) -> str:
         """Forward colour attribute lookups to the internal _colors dict."""
@@ -173,13 +111,6 @@ class ThemeConfig:
         self.preset_name = name
         self._colors     = dict(preset)
         self.is_dark     = preset["is_dark"]
-
-    def set_accent(self, color_name: str, hex_val: str) -> None:
-        """Override a single accent colour (RED, BLUE, GREEN, or ORANGE)."""
-        if color_name in ("RED", "BLUE", "GREEN", "ORANGE"):
-            self._colors[color_name] = hex_val
-            if not self.preset_name.endswith("*"):
-                self.preset_name += "*"
 
     def font(self, size: int, bold: bool = False) -> "tuple[str, int, str]":
         scaled = max(8, int(round(size * self.font_scale)))
@@ -220,11 +151,23 @@ class ThemeConfig:
             try:
                 with open(THEME_PATH, "r", encoding="utf-8") as fh:
                     data = json.load(fh)
-                # Only update recognised fields; ignore any unknown keys
-                for field in ("preset_name", "font_family", "font_scale",
-                              "is_dark", "_colors"):
+                # Only update recognised fields; ignore any unknown keys.
+                # font_family is deliberately excluded -- it's no longer
+                # user-configurable (no picker), so it always stays whatever
+                # _detect_system_font() gave the fresh obj = cls() above,
+                # rather than carrying forward a value someone picked back
+                # when the now-removed font-family combo still existed.
+                for field in ("preset_name", "font_scale", "is_dark", "_colors"):
                     if field in data:
                         setattr(obj, field, data[field])
+                # Migrate a preset removed in the 2-theme consolidation (e.g.
+                # a pre-existing ~/.ecg_theme.json still says "Apple" or
+                # "Nordic*") -- snap to whichever current preset matches the
+                # saved is_dark, re-deriving _colors cleanly instead of
+                # carrying the old palette forward under a name that no
+                # longer exists.
+                if obj.preset_name.rstrip("*") not in cls.PRESETS:
+                    obj.apply_preset("Dark" if obj.is_dark else "Light")
                 return obj
             except Exception as exc:
                 log.warning(
@@ -493,6 +436,7 @@ def apply_theme_config(tc: "ThemeConfig") -> None:
     global FONT_KPI_VALUE, FONT_KPI_LABEL, FONT_KPI_HERO, FONT_BTN_PRIMARY, FONT_BTN_SEC
     global FONT_SIDEBAR_HDR
     global FONT_MICRO, FONT_HINT, FONT_BADGE, FONT_SUBSECTION, FONT_CARD_TITLE
+    global FONT_DIALOG_TITLE
 
     BG      = tc._colors.get("BG",      BG)
     PANEL   = tc._colors.get("PANEL",   PANEL)
@@ -556,15 +500,9 @@ def apply_theme_config(tc: "ThemeConfig") -> None:
     FONT_BADGE        = tc.font(9,  bold=True)
     FONT_SUBSECTION   = tc.font(10, bold=True)
     FONT_CARD_TITLE   = tc.font(12, bold=True)
-
+    FONT_DIALOG_TITLE = tc.font(18, bold=True)
 
     _sync_to_submodules()
-
-
-def apply_plot_theme(dark: bool) -> None:
-    """Legacy shim used by _toggle_dark -- delegates to apply_theme_config."""
-    THEME.is_dark = dark
-    apply_theme_config(THEME)
 
 
 def make_font(size: int = 12, bold: bool = False) -> "tuple[str, int, str]":
@@ -594,6 +532,7 @@ FONT_HINT         = make_font(10)             # texte d'aide / statut sous un bo
 FONT_BADGE        = make_font(9,  bold=True)  # badges courts (sévérité, tag d'état)
 FONT_SUBSECTION   = make_font(10, bold=True)  # en-tête de sous-bloc (sous FONT_SIDEBAR_HDR)
 FONT_CARD_TITLE   = make_font(12, bold=True)  # titre de carte (alias sémantique de FONT_SECTION_HDR)
+FONT_DIALOG_TITLE = make_font(18, bold=True)  # en-tête de dialogue pleine page (ex. Appearance Settings)
 
 def _sync_to_submodules() -> None:
     """Push updated colour/font globals into all already-imported ecg.ui.* modules.
@@ -623,6 +562,7 @@ def _sync_to_submodules() -> None:
         "FONT_BODY", "FONT_MONO", "FONT_KPI_VALUE", "FONT_KPI_LABEL", "FONT_KPI_HERO",
         "FONT_BTN_PRIMARY", "FONT_BTN_SEC", "FONT_SIDEBAR_HDR",
         "FONT_MICRO", "FONT_HINT", "FONT_BADGE", "FONT_SUBSECTION", "FONT_CARD_TITLE",
+        "FONT_DIALOG_TITLE",
     )
     # Every module below does `from ecg.ui.theme import BG, PANEL, ...` at
     # import time, which copies the value once -- when apply_theme_config()

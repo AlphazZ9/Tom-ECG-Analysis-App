@@ -23,7 +23,7 @@ from ecg.io.loaders import load_mat_signal, _serialise_results, _deserialise_res
 from ecg.io.session import load_session, save_session, delete_session
 from ecg.io.db import _DB_AVAILABLE, upsert_recording, set_verified
 from ecg.core.ml_detector import save_training_sample, delete_training_sample
-from ecg.ui.theme import THEME, BLUE, GREEN, MUTED
+from ecg.ui.theme import BLUE, GREEN, MUTED
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
@@ -651,7 +651,6 @@ class SessionController:
             s["current_tab"] = "📈 Detection"
         s["edit_mode"] = self.app.detection.edit_mode
         s["nav_pos"]   = self.app.ui.nav_pos
-        s["dark_mode"] = self.app.ui.dark_mode
         return s
 
     def restore_ui_state(self, s: dict) -> None:
@@ -725,7 +724,6 @@ class SessionController:
                 pass  # interpretation removed
             except Exception as e:
                 log.warning("Failed to restore context from session: %s", e)
-        self.app.ui.dark_mode = bool(s.get("dark_mode", THEME.is_dark))
         saved_edit = s.get("edit_mode", False)
         if bool(saved_edit) != self.app.detection.edit_mode:
             self.app._toggle_edit_mode()

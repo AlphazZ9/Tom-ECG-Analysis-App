@@ -25,7 +25,7 @@ from ecg.ui.theme import (
     RED, RED_LIGHT, BLUE, GREEN, ORANGE, PLOT,
     BLUE_DARK, CORAL, TEAL, PURPLE_DARK,
     FONT_LABEL, FONT_SMALL, FONT_BTN_PRIMARY, FONT_BTN_SEC,
-    make_font,
+    FONT_HINT,
 )
 
 if TYPE_CHECKING:
@@ -131,7 +131,7 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
             self,
             text="Drag a coloured line to move a landmark centre.  "
                  "Drag a dashed edge to resize the search window.",
-            font=make_font(10), text_color=MUTED,
+            font=FONT_HINT, text_color=MUTED,
         ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 2))
 
     def _build_controls(self) -> None:

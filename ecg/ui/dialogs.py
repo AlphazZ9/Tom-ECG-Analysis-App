@@ -30,7 +30,8 @@ from ecg.ui.theme import (
     GRAY, GRAY_LIGHT, ARTIFACT_TYPE_COLOR,
     FONT_TITLE, FONT_SECTION_HDR, FONT_LABEL, FONT_SMALL,
     FONT_BODY, FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR,
-    make_font,
+    FONT_HINT, FONT_KPI_LABEL, FONT_CARD_TITLE, FONT_SUBSECTION,
+    FONT_DIALOG_TITLE,
 )
 from ecg.core.models import MouseECG
 from ecg.core.ml_detector import (
@@ -46,15 +47,14 @@ if TYPE_CHECKING:
 log = logging.getLogger("ecg")
 
 class ThemeDialog(ctk.CTkToplevel):
-    """Polished appearance settings panel.
+    """Appearance settings panel.
 
     Layout
     ------
     Top   : title bar + subtitle
-    Left  : 6 preset cards arranged in a 2-column grid; each shows a
-            mini colour swatch strip (BG / PANEL / accent) + name + description
-    Right : Font family combo, size slider, 4 accent colour override pickers,
-            reset-to-preset button
+    Left  : the 2 preset cards (Light / Dark), each showing a mini colour
+            swatch strip (BG / PANEL / accent) + name + description
+    Right : font size slider
     Bottom: Apply / Save as Default / Close
 
     Applying immediately calls app._rebuild_ui(); closing without saving
@@ -72,15 +72,10 @@ class ThemeDialog(ctk.CTkToplevel):
 
         self._app       = parent
         self._working   = ThemeConfig.load()   # copy to work with
-        self._working.apply_preset(THEME.preset_name.rstrip("*"))
-        self._working.font_family = THEME.font_family
-        self._working.font_scale  = THEME.font_scale
-        # Carry over any custom accent overrides
-        for k in ("RED","BLUE","GREEN","ORANGE"):
-            self._working._colors[k] = THEME._colors.get(k, self._working._colors[k])
+        self._working.apply_preset(THEME.preset_name)
+        self._working.font_scale = THEME.font_scale
 
         self._saved = False
-        self._accent_vars: "dict[str, tk.StringVar]" = {}
 
         self._build()
         self._highlight_active_preset()
@@ -94,10 +89,10 @@ class ThemeDialog(ctk.CTkToplevel):
         hdr = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, height=56)
         hdr.pack(fill="x")
         hdr.pack_propagate(False)
-        ctk.CTkLabel(hdr, text="Appearance", font=make_font(18, bold=True),
+        ctk.CTkLabel(hdr, text="Appearance", font=FONT_DIALOG_TITLE,
                      text_color=TEXT, anchor="w").pack(side="left", padx=20, pady=12)
-        ctk.CTkLabel(hdr, text="Choose a preset or customise colours and fonts",
-                     font=make_font(11), text_color=MUTED, anchor="w").pack(
+        ctk.CTkLabel(hdr, text="Choose Light or Dark",
+                     font=FONT_SMALL, text_color=MUTED, anchor="w").pack(
                          side="left", padx=(0, 20), pady=12)
 
         # Main area
@@ -126,7 +121,7 @@ class ThemeDialog(ctk.CTkToplevel):
         left.grid(row=0, column=0, sticky="nsew")
 
         ctk.CTkLabel(left, text="COLOUR PRESETS",
-                     font=make_font(11, bold=True), text_color=MUTED,
+                     font=FONT_SIDEBAR_HDR, text_color=MUTED,
                      anchor="w").pack(fill="x", padx=4, pady=(0, 8))
 
         grid = ctk.CTkFrame(left, fg_color="transparent")
@@ -174,18 +169,18 @@ class ThemeDialog(ctk.CTkToplevel):
         # Name + dark/light badge
         name_row = ctk.CTkFrame(outer, fg_color="transparent")
         name_row.pack(fill="x", padx=10)
-        ctk.CTkLabel(name_row, text=name, font=make_font(12, bold=True),
+        ctk.CTkLabel(name_row, text=name, font=FONT_CARD_TITLE,
                      text_color=TEXT, anchor="w").pack(side="left")
         badge_col  = "#2E3440" if is_dark else "#E8ECF2"
         badge_text = "dark" if is_dark else "light"
         badge_fc   = "#ECEFF4" if is_dark else "#555F6E"
         ctk.CTkLabel(name_row,
                      text=f"  {badge_text}  ",
-                     font=make_font(9), fg_color=badge_col, text_color=badge_fc,
+                     font=FONT_KPI_LABEL, fg_color=badge_col, text_color=badge_fc,
                      corner_radius=4).pack(side="left", padx=(6, 0))
 
         # Description
-        ctk.CTkLabel(outer, text=desc, font=make_font(10), text_color=muted_c,
+        ctk.CTkLabel(outer, text=desc, font=FONT_HINT, text_color=muted_c,
                      anchor="w", wraplength=220, justify="left").pack(
                          fill="x", padx=10, pady=(4, 10))
 
@@ -199,32 +194,20 @@ class ThemeDialog(ctk.CTkToplevel):
                                         width=280)
         right.grid(row=0, column=2, sticky="nsew", pady=0)
 
-        # ── Font family ───────────────────────────────────────────────────────
-        ctk.CTkLabel(right, text="FONT FAMILY", font=make_font(11, bold=True),
-                     text_color=MUTED, anchor="w").pack(fill="x", padx=8, pady=(4, 4))
-
-        font_families = self._available_fonts()
-        self._font_var = tk.StringVar(value=self._working.font_family)
-        self._font_combo = ctk.CTkComboBox(
-            right, values=font_families, variable=self._font_var,
-            fg_color=CARD, border_color=BORDER2, text_color=TEXT,
-            button_color=BORDER2, button_hover_color=BORDER,
-            dropdown_fg_color=PANEL, dropdown_text_color=TEXT,
-            font=make_font(11), width=260, height=30,
-            command=self._on_font_family_change,
-        )
-        self._font_combo.pack(padx=8, pady=(0, 12))
-
         # ── Font size slider ──────────────────────────────────────────────────
-        ctk.CTkLabel(right, text="FONT SIZE", font=make_font(11, bold=True),
-                     text_color=MUTED, anchor="w").pack(fill="x", padx=8, pady=(0, 4))
+        # Font family is not user-configurable -- the app is locked to one
+        # fixed system font (_detect_system_font()) for uniformity. Size
+        # stays adjustable since that's an accessibility need, not a style
+        # choice.
+        ctk.CTkLabel(right, text="FONT SIZE", font=FONT_SIDEBAR_HDR,
+                     text_color=MUTED, anchor="w").pack(fill="x", padx=8, pady=(4, 4))
 
         size_row = ctk.CTkFrame(right, fg_color="transparent")
         size_row.pack(fill="x", padx=8, pady=(0, 2))
-        ctk.CTkLabel(size_row, text="A", font=make_font(9), text_color=MUTED).pack(side="left")
+        ctk.CTkLabel(size_row, text="A", font=FONT_KPI_LABEL, text_color=MUTED).pack(side="left")
 
         self._size_label = ctk.CTkLabel(size_row, text=f"{self._working.font_scale:.2f}x",
-                                         font=make_font(11), text_color=TEXT, width=48)
+                                         font=FONT_SMALL, text_color=TEXT, width=48)
         self._size_label.pack(side="right")
 
         self._scale_slider = ctk.CTkSlider(
@@ -237,56 +220,6 @@ class ThemeDialog(ctk.CTkToplevel):
         self._scale_slider.set(self._working.font_scale)
         self._scale_slider.pack(fill="x", padx=8, pady=(0, 16))
 
-        # ── Accent colour overrides ───────────────────────────────────────────
-        ctk.CTkFrame(right, height=1, fg_color=BORDER).pack(fill="x", padx=8, pady=(0, 10))
-        ctk.CTkLabel(right, text="ACCENT COLOURS",
-                     font=make_font(11, bold=True), text_color=MUTED,
-                     anchor="w").pack(fill="x", padx=8, pady=(0, 6))
-        ctk.CTkLabel(right,
-                     text="Override individual accent colours.\n"
-                          "Enter a hex value (e.g. #FF5555).",
-                     font=make_font(10), text_color=MUTED,
-                     anchor="w", justify="left").pack(fill="x", padx=8, pady=(0, 8))
-
-        for token, label in [("RED","Alert / Threshold"), ("BLUE","Signal / Primary"),
-                              ("GREEN","Accepted peaks"),  ("ORANGE","Warning / Edit mode")]:
-            row = ctk.CTkFrame(right, fg_color="transparent")
-            row.pack(fill="x", padx=8, pady=3)
-
-            current = self._working._colors.get(token, "#888888")
-            var = tk.StringVar(value=current)
-            self._accent_vars[token] = var
-
-            # Colour preview swatch
-            swatch = tk.Frame(row, bg=current, width=22, height=22, relief="flat")
-            swatch.pack(side="left", padx=(0, 8))
-
-            ctk.CTkLabel(row, text=label, font=make_font(10), text_color=TEXT,
-                         anchor="w", width=120).pack(side="left")
-
-            ent = ctk.CTkEntry(row, textvariable=var, width=80, height=26,
-                               font=make_font(10), fg_color=CARD,
-                               border_color=BORDER2)
-            ent.pack(side="right")
-
-            # Update swatch on entry change
-            def _update_swatch(sv=var, sw=swatch, tk_name=token):
-                try:
-                    hex_val = sv.get().strip()
-                    if len(hex_val) == 7 and hex_val.startswith("#"):
-                        sw.configure(bg=hex_val)
-                        self._working.set_accent(tk_name, hex_val)
-                except Exception as _sw_exc:
-                    log.debug("colour swatch trace: %s", _sw_exc)
-            var.trace_add("write", lambda *_a, sv=var, sw=swatch, tn=token: (
-                _update_swatch(sv, sw, tn)))
-
-        ctk.CTkFrame(right, height=1, fg_color=BORDER).pack(fill="x", padx=8, pady=(12, 8))
-        ctk.CTkButton(right, text="Reset accents to preset",
-                      fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                      font=make_font(10), height=26, corner_radius=5,
-                      command=self._reset_accents).pack(padx=8, fill="x")
-
     def _build_bottom_bar(self) -> None:
         bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, height=56)
         bar.pack(fill="x", side="bottom")
@@ -295,39 +228,27 @@ class ThemeDialog(ctk.CTkToplevel):
 
         ctk.CTkButton(bar, text="Close",
                       fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                      font=make_font(11), width=90, height=34,
+                      font=FONT_SMALL, width=90, height=34,
                       command=self.destroy).pack(side="right", padx=12, pady=10)
         ctk.CTkButton(bar, text="Save as Default",
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      font=make_font(11, bold=True), width=130, height=34,
+                      font=FONT_SIDEBAR_HDR, width=130, height=34,
                       command=self._save_default).pack(side="right", padx=(0, 6), pady=10)
         ctk.CTkButton(bar, text="Apply",
                       fg_color=BLUE, hover_color=TEXT, text_color="white",
-                      font=make_font(13, bold=True), width=100, height=34,
+                      font=FONT_BTN_PRIMARY, width=100, height=34,
                       command=self._apply).pack(side="right", padx=(0, 6), pady=10)
 
         self._preview_lbl = ctk.CTkLabel(
             bar,
-            text=f"Active: {THEME.preset_name}  |  font: {THEME.font_family}  |  scale: {THEME.font_scale:.2f}x",
-            font=make_font(10), text_color=MUTED, anchor="w")
+            text=f"Active: {THEME.preset_name}  |  scale: {THEME.font_scale:.2f}x",
+            font=FONT_HINT, text_color=MUTED, anchor="w")
         self._preview_lbl.pack(side="left", padx=16)
 
     # ── Helpers ─────────────────────────────────────────────────────────────
 
-    def _available_fonts(self) -> "list[str]":
-        """Return a sorted list of available system font families."""
-        import tkinter.font as tkf
-        try:
-            families = sorted(set(tkf.families(self)))
-            # Prioritise the ThemeConfig-suggested families at the top
-            preferred = [f for f in ThemeConfig.DEFAULT_FONT_FAMILIES if f in families]
-            rest      = [f for f in families if f not in preferred and not f.startswith("@")]
-            return preferred + rest
-        except Exception:
-            return ThemeConfig.DEFAULT_FONT_FAMILIES
-
     def _highlight_active_preset(self) -> None:
-        active = self._working.preset_name.rstrip("*")
+        active = self._working.preset_name
         for name, card in self._preset_btns.items():
             card.configure(border_color=BLUE if name == active else BORDER,
                            border_width=3 if name == active else 2)
@@ -337,13 +258,6 @@ class ThemeDialog(ctk.CTkToplevel):
     def _select_preset(self, name: str) -> None:
         self._working.apply_preset(name)
         self._highlight_active_preset()
-        # Sync accent entry vars
-        for token, var in self._accent_vars.items():
-            var.set(self._working._colors.get(token, ""))
-        self._update_preview_label()
-
-    def _on_font_family_change(self, val: str) -> None:
-        self._working.font_family = val
         self._update_preview_label()
 
     def _on_scale_change(self, val: float) -> None:
@@ -351,19 +265,9 @@ class ThemeDialog(ctk.CTkToplevel):
         self._size_label.configure(text=f"{self._working.font_scale:.2f}x")
         self._update_preview_label()
 
-    def _reset_accents(self) -> None:
-        name = self._working.preset_name.rstrip("*")
-        preset = ThemeConfig.PRESETS.get(name, {})
-        for token, var in self._accent_vars.items():
-            val = preset.get(token, self._working._colors.get(token, "#888888"))
-            var.set(val)
-            self._working._colors[token] = val
-        self._working.preset_name = name   # remove * marker
-
     def _update_preview_label(self) -> None:
         self._preview_lbl.configure(
             text=f"Preview: {self._working.preset_name}  |  "
-                 f"font: {self._working.font_family}  |  "
                  f"scale: {self._working.font_scale:.2f}x")
 
     def _apply(self) -> None:
@@ -374,12 +278,8 @@ class ThemeDialog(ctk.CTkToplevel):
         dialog first, then rebuild the main window.
         """
         global THEME
-        THEME.apply_preset(self._working.preset_name.rstrip("*"))
-        THEME.font_family = self._working.font_family
-        THEME.font_scale  = self._working.font_scale
-        for k, v in self._working._colors.items():
-            THEME._colors[k] = v
-        THEME.is_dark = self._working.is_dark
+        THEME.apply_preset(self._working.preset_name)
+        THEME.font_scale = self._working.font_scale
         # Destroy dialog before rebuilding so CTk appearance change
         # does not invalidate this window's widget handles mid-flight.
         self.destroy()
@@ -468,7 +368,7 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         hdr.pack_propagate(False)
 
         self.lbl_title = ctk.CTkLabel(
-            hdr, text="", font=make_font(13, bold=True), text_color=TEXT)
+            hdr, text="", font=FONT_BTN_PRIMARY, text_color=TEXT)
         self.lbl_title.pack(side="left", padx=16, pady=10)
 
         self.lbl_counter = ctk.CTkLabel(
@@ -505,7 +405,7 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         info.grid(row=0, column=1, sticky="nsew")
         info.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(info, text="ARTIFACT INFO", font=make_font(10, bold=True),
+        ctk.CTkLabel(info, text="ARTIFACT INFO", font=FONT_SUBSECTION,
                      text_color=MUTED).grid(row=0, column=0, sticky="w",
                                             padx=12, pady=(12, 4))
 
@@ -526,7 +426,7 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
             ctk.CTkLabel(info, text=label, font=FONT_SMALL,
                          text_color=MUTED, anchor="w").grid(
                 row=row_i, column=0, sticky="w", padx=12, pady=1)
-            lbl = ctk.CTkLabel(info, text="—", font=make_font(11, bold=True),
+            lbl = ctk.CTkLabel(info, text="—", font=FONT_SIDEBAR_HDR,
                                 text_color=TEXT, anchor="w")
             lbl.grid(row=row_i + 1, column=0, sticky="w", padx=20, pady=(0, 4))
             self._metric_labels[key] = lbl
@@ -534,11 +434,11 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         # Decision indicator
         ctk.CTkFrame(info, height=1, fg_color=BORDER).grid(
             row=13, column=0, sticky="ew", padx=12, pady=8)
-        ctk.CTkLabel(info, text="DECISION", font=make_font(10, bold=True),
+        ctk.CTkLabel(info, text="DECISION", font=FONT_SUBSECTION,
                      text_color=MUTED).grid(row=14, column=0, sticky="w",
                                              padx=12, pady=(0, 4))
         self.lbl_decision = ctk.CTkLabel(info, text="Remove",
-                                          font=make_font(13, bold=True),
+                                          font=FONT_BTN_PRIMARY,
                                           text_color=RED)
         self.lbl_decision.grid(row=15, column=0, sticky="w", padx=12, pady=(0, 8))
 
@@ -551,14 +451,14 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         self.btn_keep = ctk.CTkButton(
             btn_frame, text="✓  Keep", height=36,
             fg_color=GREEN, hover_color=GREEN, text_color="white",
-            font=make_font(12, bold=True), corner_radius=5,
+            font=FONT_CARD_TITLE, corner_radius=5,
             command=lambda: self._set_decision("keep"))
         self.btn_keep.grid(row=0, column=0, sticky="ew", padx=(0, 4))
 
         self.btn_remove = ctk.CTkButton(
             btn_frame, text="✕  Remove", height=36,
             fg_color=RED_DARK, hover_color="#D32F2F", text_color="white",
-            font=make_font(12, bold=True), corner_radius=5,
+            font=FONT_CARD_TITLE, corner_radius=5,
             command=lambda: self._set_decision("remove"))
         self.btn_remove.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
@@ -601,7 +501,7 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         ctk.CTkButton(
             nav, text="✓  Apply Decisions", width=150, height=36,
             fg_color=RED, hover_color=RED_DARK, text_color="white",
-            font=make_font(12, bold=True), corner_radius=5,
+            font=FONT_CARD_TITLE, corner_radius=5,
             command=self._finish).pack(side="right", padx=10, pady=9)
 
         # Keyboard shortcuts
@@ -848,7 +748,7 @@ class AnnotationDialog(ctk.CTkToplevel):
                 color_frame, text=name, value=hex_col,
                 variable=self._color_var,
                 fg_color=hex_col, hover_color=hex_col,
-                font=make_font(11))
+                font=FONT_SMALL)
             rb.pack(anchor="w", pady=1)
 
         row += 1
@@ -946,7 +846,7 @@ class AnnotationManagerDialog(ctk.CTkToplevel):
         hdr.pack(fill="x", padx=2, pady=(0, 2))
         for txt, w in [("", 30), ("Start (s)", 90), ("End (s)", 90),
                        ("Duration", 80), ("Label", 240), ("Colour", 80)]:
-            ctk.CTkLabel(hdr, text=txt, width=w, font=make_font(10, bold=True),
+            ctk.CTkLabel(hdr, text=txt, width=w, font=FONT_SUBSECTION,
                          text_color=TEXT).pack(side="left", padx=3)
 
         for i, ann in enumerate(anns):
@@ -967,7 +867,7 @@ class AnnotationManagerDialog(ctk.CTkToplevel):
                 (ann.get("label", ""),    240),
             ]:
                 ctk.CTkLabel(row, text=txt, width=w,
-                             font=make_font(11), text_color=TEXT,
+                             font=FONT_SMALL, text_color=TEXT,
                              anchor="w").pack(side="left", padx=3)
             # Colour swatch
             swatch = tk.Label(row, bg=ann.get("color", GRAY),
@@ -1154,7 +1054,7 @@ class PacingPeriodManagerDialog(ctk.CTkToplevel):
         hdr.pack(fill="x", padx=2, pady=(0, 2))
         for txt, w in [("", 30), ("Start (s)", 90), ("End (s)", 90),
                        ("Duration", 80), ("Note", 240)]:
-            ctk.CTkLabel(hdr, text=txt, width=w, font=make_font(10, bold=True),
+            ctk.CTkLabel(hdr, text=txt, width=w, font=FONT_SUBSECTION,
                          text_color=TEXT).pack(side="left", padx=3)
 
         for i, pp in enumerate(periods):
@@ -1175,7 +1075,7 @@ class PacingPeriodManagerDialog(ctk.CTkToplevel):
                 (pp.get("note", ""),    240),
             ]:
                 ctk.CTkLabel(row, text=txt, width=w,
-                             font=make_font(11), text_color=TEXT,
+                             font=FONT_SMALL, text_color=TEXT,
                              anchor="w").pack(side="left", padx=3)
 
     def _add(self) -> None:
@@ -1354,16 +1254,16 @@ class MLTrainingDialog(ctk.CTkToplevel):
                                fg_color=CARD if i % 2 == 0 else BG,
                                height=self.ROW_H, corner_radius=0)
             row.pack(fill="x", padx=2, pady=1)
-            ctk.CTkLabel(row, text=label, font=make_font(11), text_color=TEXT,
+            ctk.CTkLabel(row, text=label, font=FONT_SMALL, text_color=TEXT,
                          anchor="w").pack(side="left", padx=(6, 4), fill="x", expand=True)
             ctk.CTkLabel(row, text=f"{entry['n_samples']} samples "
                                     f"({entry['n_positive']} peaks)",
-                         font=make_font(10), text_color=MUTED, width=140,
+                         font=FONT_HINT, text_color=MUTED, width=140,
                          anchor="e").pack(side="left", padx=4)
             ctk.CTkButton(
                 row, text="🗑", width=28, height=22,
                 fg_color=RED, hover_color=RED_DARK, text_color="white",
-                font=make_font(10),
+                font=FONT_HINT,
                 command=lambda fp=fp, filepath=filepath: self._remove_file(fp, filepath),
             ).pack(side="left", padx=(4, 6))
 

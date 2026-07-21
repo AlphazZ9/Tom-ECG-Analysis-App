@@ -124,7 +124,6 @@ class AnalysisState:
 class UIState:
     """Transient view/render state: navigation position, caches, mpl event ids."""
     nav_pos: float = 0.0
-    dark_mode: bool = False
     show_raw: bool = True                       # raw/filtered toggle
     # Filter preview (before/after overlay) -- computed on-demand for the
     # currently visible detail window only, never touches filtered signal or

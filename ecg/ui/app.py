@@ -80,7 +80,7 @@ from ecg.io.db import (
 
 # ── ecg.ui ────────────────────────────────────────────────────────────────────
 from ecg.ui.theme import (
-    THEME, apply_theme_config, apply_plot_theme,
+    THEME, apply_theme_config,
     NK_AVAILABLE, APP_ICON_PATH,
     BG, PANEL, CARD, BORDER, BORDER2, TEXT, MUTED, LIGHT, PLOT,
     RED, BLUE, GREEN, ORANGE,
@@ -644,13 +644,6 @@ class ECGApp(ctk.CTk):
     @_nav_pos.setter
     def _nav_pos(self, value: float) -> None:
         self.ui.nav_pos = value
-
-    @property
-    def _dark_mode(self) -> bool:
-        return self.ui.dark_mode
-    @_dark_mode.setter
-    def _dark_mode(self, value: bool) -> None:
-        self.ui.dark_mode = value
 
     @property
     def _show_raw(self) -> bool:
@@ -4819,27 +4812,6 @@ class ECGApp(ctk.CTk):
         self._update_pacing_count()
 
     # ════════════════════════════════════════════════════════
-    #  DARK MODE (legacy — kept for backward compat)
-    # ════════════════════════════════════════════════════════
-
-    def _toggle_dark(self) -> None:
-        self._dark_mode = not self._dark_mode
-        ctk.set_appearance_mode("dark" if self._dark_mode else "light")
-        apply_plot_theme(self._dark_mode)
-        # Update tk.Frame backgrounds in all CanvasSlots (not managed by CTk)
-        for slot in self._slots.values():
-            try:
-                slot.frame.configure(bg=PLOT["bg"])
-                slot._cv_frame.configure(bg=PLOT["bg"])
-                slot.fig.patch.set_facecolor(PLOT["bg"])
-            except AttributeError as _slot_exc:
-                log.debug("slot theme update: %s", _slot_exc)
-        if self._signal_flt is not None:
-            self._draw_detail()
-        if self._results is not None:
-            self._draw_all_results()
-
-    # ════════════════════════════════════════════════════════
     #  CLIPBOARD / TXT SAVE
     # ════════════════════════════════════════════════════════
 
@@ -5165,9 +5137,14 @@ class ECGApp(ctk.CTk):
     # ════════════════════════════════════════════════════════
 
     def _toggle_dark_live(self) -> None:
-        """Switch dark ↔ light and rebuild the UI without restarting."""
+        """Switch Light <-> Dark and rebuild the UI without restarting.
+
+        Goes through apply_preset() (not a raw THEME.is_dark flip) so colors
+        and is_dark change together -- a bare flip left CTk's native dark
+        chrome sitting over the light preset's actual colors.
+        """
         from ecg.ui.theme import THEME, apply_theme_config
-        THEME.is_dark = not THEME.is_dark
+        THEME.apply_preset("Dark" if not THEME.is_dark else "Light")
         apply_theme_config(THEME)
         THEME.save()
         ui_state = self._snapshot_ui_state()

@@ -26,8 +26,8 @@ from ecg.ui.theme import (
     CORAL, TEAL, PURPLE,
     FONT_LABEL, FONT_SMALL, FONT_BODY, FONT_MONO,
     FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR,
+    FONT_KPI_LABEL, FONT_MICRO,
     SPACE_S, SPACE_M,
-    make_font,
 )
 
 log = logging.getLogger("ecg")
@@ -109,7 +109,7 @@ class IntervalVerifierPanel:
             command=self._prev)
         self.btn_prev.pack(side="left", padx=(2, 1))
 
-        self.lbl_pos = ctk.CTkLabel(frame, text="", font=make_font(9),
+        self.lbl_pos = ctk.CTkLabel(frame, text="", font=FONT_KPI_LABEL,
                                     text_color=TEXT, width=70)
         self.lbl_pos.pack(side="left", padx=2)
 
@@ -120,10 +120,10 @@ class IntervalVerifierPanel:
         self.btn_next.pack(side="left", padx=(1, 6))
 
         # Jump-to-beat
-        ctk.CTkLabel(frame, text="→", font=make_font(9),
+        ctk.CTkLabel(frame, text="→", font=FONT_KPI_LABEL,
                      text_color=MUTED).pack(side="left", padx=(0, 2))
         self.ent_beat = ctk.CTkEntry(
-            frame, width=50, height=24, font=make_font(9),
+            frame, width=50, height=24, font=FONT_KPI_LABEL,
             fg_color=BG, border_color=BORDER2, text_color=TEXT,
             placeholder_text="n°")
         self.ent_beat.pack(side="left", padx=(0, 6))
@@ -131,17 +131,17 @@ class IntervalVerifierPanel:
 
         self.btn_accept = ctk.CTkButton(
             frame, text="✓", width=28, height=24,
-            fg_color=GREEN, text_color="white", font=make_font(11),
+            fg_color=GREEN, text_color="white", font=FONT_SMALL,
             command=self._accept_next)
         self.btn_accept.pack(side="left", padx=(0, 2))
 
         self.btn_reject = ctk.CTkButton(
             frame, text="✗", width=28, height=24,
-            fg_color="#C62828", text_color="white", font=make_font(11),
+            fg_color="#C62828", text_color="white", font=FONT_SMALL,
             command=self._reject_next)
         self.btn_reject.pack(side="left", padx=(0, 6))
 
-        self.lbl_stats = ctk.CTkLabel(frame, text="", font=make_font(8),
+        self.lbl_stats = ctk.CTkLabel(frame, text="", font=FONT_MICRO,
                                       text_color=MUTED)
         self.lbl_stats.pack(side="left", padx=4, fill="x", expand=False)
 
@@ -168,7 +168,7 @@ class IntervalVerifierPanel:
         if rate_parts:
             # Combine into single label to save space
             labels_text = "  |  ".join(txt for txt, _ in rate_parts)
-            lbl_rates = ctk.CTkLabel(frame, text=labels_text, font=make_font(8),
+            lbl_rates = ctk.CTkLabel(frame, text=labels_text, font=FONT_MICRO,
                                     text_color=rate_parts[0][1] if rate_parts else MUTED)
             lbl_rates.pack(side="right", padx=4)
 

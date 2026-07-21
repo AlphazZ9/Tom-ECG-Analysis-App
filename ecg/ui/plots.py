@@ -25,13 +25,17 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.backends._backend_tk import NavigationToolbar2Tk  # noqa: PLC2701
 import tkinter as tk
 
-from ecg.ui.theme import PLOT, PANEL, SPACE_XS, SPACE_S, SPACE_M
+from ecg.ui.theme import PLOT, PANEL, SPACE_XS, SPACE_S, SPACE_M, THEME, make_font
 
 log = logging.getLogger("ecg")
 
-# Apply matplotlib defaults once at import time
+# Apply matplotlib defaults once at import time. font.family matches the
+# CTk chrome's THEME.font_family so chart text doesn't visually mismatch the
+# surrounding UI -- a one-time value since font family is no longer
+# user-changeable (no picker) and apply_theme_config() never re-pushes
+# font.family (only colors), so this can't go stale.
 plt.rcParams.update({
-    "font.family":     "DejaVu Sans",
+    "font.family":     THEME.font_family,
     "font.size":        10,
     "axes.titlesize":   11,
     "axes.titleweight": "bold",
@@ -166,7 +170,7 @@ class CanvasSlot:
             self._bar.pack_propagate(False)
 
             tk.Label(self._bar, text="Y:", bg=_BAR_BG, fg=_LABEL_FG,
-                     font=("DejaVu Sans", 8)).pack(side="left", padx=(SPACE_M, SPACE_XS))
+                     font=make_font(8)).pack(side="left", padx=(SPACE_M, SPACE_XS))
 
             # Min entry
             self._var_ylo = tk.StringVar(value="auto")
@@ -174,11 +178,11 @@ class CanvasSlot:
                 self._bar, textvariable=self._var_ylo,
                 width=7, bg=_ENTRY_BG, fg=_ENTRY_FG, relief="flat",
                 highlightbackground=_ENTRY_BD, highlightthickness=1,
-                insertbackground=_ENTRY_FG, font=("DejaVu Sans", 8))
+                insertbackground=_ENTRY_FG, font=make_font(8))
             self._ent_ylo.pack(side="left", padx=(0, SPACE_XS), pady=SPACE_S)
 
             tk.Label(self._bar, text="–", bg=_BAR_BG,
-                     fg=_LABEL_FG, font=("DejaVu Sans", 8)).pack(side="left")
+                     fg=_LABEL_FG, font=make_font(8)).pack(side="left")
 
             # Max entry
             self._var_yhi = tk.StringVar(value="auto")
@@ -186,21 +190,21 @@ class CanvasSlot:
                 self._bar, textvariable=self._var_yhi,
                 width=7, bg=_ENTRY_BG, fg=_ENTRY_FG, relief="flat",
                 highlightbackground=_ENTRY_BD, highlightthickness=1,
-                insertbackground=_ENTRY_FG, font=("DejaVu Sans", 8))
+                insertbackground=_ENTRY_FG, font=make_font(8))
             self._ent_yhi.pack(side="left", padx=(SPACE_XS, SPACE_M), pady=SPACE_S)
 
             # Auto reset button
             auto_btn = tk.Button(
                 self._bar, text="Auto", bg=_BAR_BG, fg=_LABEL_FG,
                 relief="flat", cursor="hand2",
-                font=("DejaVu Sans", 8), activebackground=_ENTRY_BD,
+                font=make_font(8), activebackground=_ENTRY_BD,
                 command=self._on_yscale_auto)
             auto_btn.pack(side="left", padx=(0, SPACE_S))
 
             tk.Label(self._bar,
                      text="(edit Y min/max then press Enter  ·  or use toolbar zoom)",
                      bg=_BAR_BG, fg=_LABEL_FG,
-                     font=("DejaVu Sans", 7)).pack(side="left", padx=(SPACE_S, 0))
+                     font=make_font(7)).pack(side="left", padx=(SPACE_S, 0))
 
             # Bind Enter / FocusOut on both entries
             for ent in (self._ent_ylo, self._ent_yhi):
