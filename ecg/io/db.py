@@ -71,6 +71,8 @@ _schema_ready = False   # apply _SCHEMA at most once per process, not per connec
 def _conn() -> sqlite3.Connection:
     """Open (or create) the registry database, applying the schema."""
     global _schema_ready
+    if not _DB_AVAILABLE:
+        raise RuntimeError("sqlite3 is unavailable in this Python build")
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(str(_DB_PATH), timeout=5, check_same_thread=False)
     con.row_factory = sqlite3.Row

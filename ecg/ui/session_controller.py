@@ -42,8 +42,12 @@ _TAB_KEY_MAP = {
     "HRV":           "💓 HRV",
     "Intervals":     "📏 Intervals",
     "Beat Template": "〰 Beat Template",
-    "Arrhythmias":   "⚠ Arrhythmias",
+    "Arrhythmias":   "⚠ Abnormal Events",
     "Summary":       "📋 Summary",
+    # "Arrhythmias" tab was renamed to "Abnormal Events" (less clinically-
+    # loaded wording for a mouse study) -- map the pre-rename emoji name
+    # forward too, same one-old-format-per-generation pattern as above.
+    "⚠ Arrhythmias": "⚠ Abnormal Events",
 }
 
 
@@ -472,24 +476,34 @@ class SessionController:
         if self.app.signal.filtered is None or self.app.detection.rpeaks_ok is None:
             messagebox.showwarning("Not ready", "Run Preview Detection first.")
             return
+
+        # Snapshot on the main thread rather than letting the worker read
+        # self.app.signal/self.app.detection live -- if the user opens a
+        # different file while this worker is still running,
+        # reset_for_new_file() nulls those attributes out mid-save.
+        filepath  = self.app.signal.filepath
+        filtered  = self.app.signal.filtered
+        fs        = self.app.signal.fs
+        rpeaks_ok = self.app.detection.rpeaks_ok
+
         self.app._start_async(
             self.app.btn_save_for_training, "Saving…", "Saving training data…",
-            self.save_for_training_worker,
+            lambda: self.save_for_training_worker(filepath, filtered, fs, rpeaks_ok),
             self.on_save_for_training_done,
             pass_result=True,
         )
 
-    def save_for_training_worker(self) -> dict:
+    def save_for_training_worker(
+        self, filepath: str, filtered: np.ndarray, fs: int, rpeaks_ok: np.ndarray,
+    ) -> dict:
         """Background worker for save_for_training_only -- no widget access."""
         def _prog(pct: int, msg: str) -> None:
             self.app.after(0, lambda p=pct, m=msg: self.app._set_progress(p, m))
 
-        filepath = self.app.signal.filepath
         from ecg.io.session import _file_fingerprint
         fp = _file_fingerprint(filepath)
         n_cand = save_training_sample(
-            fp, self.app.signal.filtered, self.app.signal.fs,
-            self.app.detection.rpeaks_ok, progress_cb=_prog)
+            fp, filtered, fs, rpeaks_ok, progress_cb=_prog)
         if _DB_AVAILABLE:
             set_verified(filepath, True)
         return {"n_cand": n_cand}
@@ -526,19 +540,24 @@ class SessionController:
 
         state = self.collect_session_state()   # main-thread widget reads
 
+        # Snapshot on the main thread rather than letting the worker read
+        # self.app.signal live -- if the user opens a different file while
+        # this worker is still running, reset_for_new_file() nulls these
+        # attributes out mid-save.
+        filepath = self.app.signal.filepath
+        filtered = self.app.signal.filtered
+
         self.app._start_async(
             self.app.btn_save_session, "Saving…", "Saving session…",
-            lambda: self.save_session_worker(state),
+            lambda: self.save_session_worker(state, filepath, filtered),
             self.on_save_session_done,
             pass_result=True,
         )
 
-    def save_session_worker(self, state: dict) -> dict:
+    def save_session_worker(self, state: dict, filepath: str, filtered: np.ndarray) -> dict:
         """Background worker for save_session -- MUST NOT touch Tkinter widgets."""
         def _prog(pct: int, msg: str) -> None:
             self.app.after(0, lambda p=pct, m=msg: self.app._set_progress(p, m))
-
-        filepath = self.app.signal.filepath
 
         _prog(5, "Writing session file…")
         out_path = save_session(filepath, state)
@@ -580,7 +599,7 @@ class SessionController:
         try:
             if self.app.session.verified_for_training and self.app.detection.rpeaks_ok is not None:
                 n_cand = save_training_sample(
-                    fp, self.app.signal.filtered, self.app.signal.fs,
+                    fp, filtered, self.app.signal.fs,
                     self.app.detection.rpeaks_ok, progress_cb=_prog)
                 log.info("ML training sample cached for %s (%d candidates)",
                           filepath, n_cand)

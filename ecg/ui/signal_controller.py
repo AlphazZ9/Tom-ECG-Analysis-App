@@ -99,6 +99,12 @@ class SignalController:
             sig = -sig
             log.info("_compute_preview_bundle: user-requested signal inversion applied")
 
+        # Raw/no-filter mode: if the user explicitly asked to detect on the
+        # unfiltered signal and hasn't manually inverted it, honor that
+        # choice by forcing fix_polarity to leave the signal as-is instead
+        # of silently re-flipping it via the automatic polarity vote.
+        force_pol = False if (no_filter and not params.get("invert_signal", False)) else None
+
         def _polarity_prog(pct: int, msg: str) -> None:
             _prog(45 + int(pct * 0.50), msg)
 
@@ -120,7 +126,7 @@ class SignalController:
             # testing what Wavelet detection actually does on a
             # user-already-inverted signal first.
             _prog(48, "Polarity correction…")
-            sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"])
+            sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"], force_polarity=force_pol)
             _prog(50, "CWT — séparation bruit / QRS / J-wave…")
             try:
                 peaks_wt, proms_wt, t_amp_wt = detect_peaks_wavelet(
@@ -160,7 +166,7 @@ class SignalController:
             # requiert des R positifs (upstroke = dérivée positive).
             if not params.get("invert_signal", False):
                 _prog(48, "Polarity correction…")
-                sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"])
+                sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"], force_polarity=force_pol)
             else:
                 inverted = False  # utilisateur a géré la polarité manuellement
             _prog(50, "SG derivative detection…")
@@ -203,7 +209,7 @@ class SignalController:
             # R-peaks doivent être des extrema positifs dans le signal.
             if not params.get("invert_signal", False):
                 _prog(48, "Polarity correction…")
-                sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"])
+                sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"], force_polarity=force_pol)
             else:
                 inverted = False
             _prog(55, "Envelope Max detection…")
@@ -239,7 +245,7 @@ class SignalController:
             # R-wave is a positive-going deflection.
             if not params.get("invert_signal", False):
                 _prog(48, "Polarity correction…")
-                sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"])
+                sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"], force_polarity=force_pol)
             else:
                 inverted = False
             detector_warning: Optional[str] = None
@@ -283,7 +289,7 @@ class SignalController:
 
         # ── Auto (NeuroKit2) pipeline — original path ─────────────────────
         sig_out, inverted, cands, proms = fix_polarity(
-            sig, fs, params["min_rr_ms"], progress_cb=_polarity_prog)
+            sig, fs, params["min_rr_ms"], progress_cb=_polarity_prog, force_polarity=force_pol)
 
         _prog(95, f"Candidates found: {len(cands):,}")
 
