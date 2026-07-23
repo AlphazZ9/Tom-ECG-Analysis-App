@@ -33,7 +33,9 @@ from ecg.ui.theme import (
     FONT_HINT, FONT_KPI_LABEL, FONT_CARD_TITLE, FONT_SUBSECTION,
     FONT_DIALOG_TITLE,
 )
-from ecg.core.models import MouseECG
+from ecg.core.models import (
+    MouseECG, ContextRanges, EXPERIMENTAL_CONTEXTS, save_custom_context,
+)
 from ecg.core.ml_detector import (
     training_data_summary, list_training_files, delete_training_sample,
     train_model, MLPeakModel,
@@ -1190,6 +1192,22 @@ class MLTrainingDialog(ctk.CTkToplevel):
             anchor="w", justify="left", wraplength=510)
         self._lbl_result.pack(fill="x", padx=20, pady=(0, 8))
 
+        # ── Hold-out confusion matrix (hidden until a trained model with
+        # this data exists -- older models saved before this feature won't
+        # have it in their meta) ──────────────────────────────────────────
+        self._cm_frame = ctk.CTkFrame(self, fg_color=CARD, corner_radius=8,
+                                       border_width=1, border_color=BORDER)
+        self._cm_fig = Figure(figsize=(2.6, 2.0), dpi=90,
+                              facecolor=PLOT["bg"], tight_layout=True)
+        self._cm_canvas = FigureCanvasTkAgg(self._cm_fig, master=self._cm_frame)
+        self._cm_canvas.get_tk_widget().pack(side="left", padx=(10, 4), pady=10)
+        self._lbl_cm_metrics = ctk.CTkLabel(
+            self._cm_frame, text="", font=FONT_SMALL, text_color=TEXT,
+            anchor="w", justify="left")
+        self._lbl_cm_metrics.pack(side="left", fill="x", expand=True,
+                                   padx=(4, 10), pady=10)
+        # Not packed yet -- _maybe_show_confusion_matrix() packs/unpacks it.
+
         self.btn_train = ctk.CTkButton(
             self, text="▶  Train Model", command=self._train,
             fg_color=GREEN, hover_color=GREEN_DARK, text_color="white",
@@ -1219,9 +1237,56 @@ class MLTrainingDialog(ctk.CTkToplevel):
                      f"{meta.get('n_training_samples', '?')} samples.  "
                      f"Hold-out accuracy={meta.get('holdout_accuracy', 0):.2f}, "
                      f"F1={meta.get('holdout_f1', 0):.2f}")
+            self._maybe_show_confusion_matrix(
+                meta.get("holdout_confusion_matrix"),
+                meta.get("holdout_precision", 0.0), meta.get("holdout_recall", 0.0),
+                meta.get("holdout_f1", 0.0), meta.get("holdout_n_test", 0))
         else:
             self._lbl_model.configure(text="No model trained yet.")
+            self._maybe_show_confusion_matrix(None, 0.0, 0.0, 0.0, 0)
         self._refresh_file_list()
+
+    def _maybe_show_confusion_matrix(
+        self, cm: "Optional[list]", precision: float, recall: float,
+        f1: float, n_test: int,
+    ) -> None:
+        """Render the hold-out confusion matrix, or hide the panel if absent
+        (older saved models predate this field)."""
+        if not cm:
+            self._cm_frame.pack_forget()
+            return
+        cm_arr = np.asarray(cm, dtype=int)
+        ax = self._cm_fig.axes[0] if self._cm_fig.axes else self._cm_fig.add_subplot(111)
+        ax.clear()
+        ax.imshow(cm_arr, cmap="Blues", vmin=0)
+        labels = ["Non-peak", "Peak"]
+        ax.set_xticks([0, 1]); ax.set_xticklabels(labels, fontsize=7)
+        ax.set_yticks([0, 1]); ax.set_yticklabels(labels, fontsize=7)
+        ax.set_xlabel("Predicted", fontsize=7, color=PLOT.get("muted", MUTED))
+        ax.set_ylabel("Actual", fontsize=7, color=PLOT.get("muted", MUTED))
+        vmax = max(cm_arr.max(), 1)
+        for r in range(2):
+            for c in range(2):
+                v = int(cm_arr[r, c])
+                ax.text(c, r, str(v), ha="center", va="center", fontsize=10,
+                        color="white" if v > vmax * 0.5 else "black")
+        ax.tick_params(colors=PLOT.get("muted", MUTED))
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        self._cm_fig.suptitle("Hold-out confusion matrix", fontsize=8,
+                              color=PLOT.get("text", TEXT))
+        self._cm_canvas.draw()
+
+        self._lbl_cm_metrics.configure(
+            text=f"Precision  {precision:.2f}\n"
+                 f"Recall      {recall:.2f}\n"
+                 f"F1          {f1:.2f}\n"
+                 f"n (hold-out)  {n_test}")
+        # before= is required: by the time this runs (end of __init__, or a
+        # later _refresh_stats() call), btn_train/Close are already packed,
+        # so a bare .pack() would append this AFTER them instead of in its
+        # intended spot between the result label and the Train button.
+        self._cm_frame.pack(fill="x", padx=20, pady=(0, 8), before=self.btn_train)
 
     def _refresh_file_list(self) -> None:
         """Repopulate the scrollable list of cached training files.
@@ -1299,4 +1364,143 @@ class MLTrainingDialog(ctk.CTkToplevel):
         else:
             self._lbl_result.configure(text=f"✗ {result['message']}", text_color=ORANGE)
         self._refresh_stats()
+
+
+class CustomContextDialog(ctk.CTkToplevel):
+    """Modal dialog: define/edit a user-owned "custom" experimental context.
+
+    EXPERIMENTAL_CONTEXTS (ecg.core.models) ships 4 fixed mouse contexts
+    with no user-editable option -- e.g. for a specific strain/substrain
+    whose normal ranges differ from those 4 presets. Saving here plugs the
+    result into that same dict under the "custom" key, so every panel that
+    already reads reference ranges via app._current_ref() picks it up with
+    no further wiring once "Custom" is selected in the Parameters dialog.
+    """
+
+    FIELDS = [
+        ("hr",   "Heart rate",        "bpm"),
+        ("rr",   "RR interval",       "ms"),
+        ("sdnn", "SDNN",              "ms"),
+        ("rmssd","RMSSD",             "ms"),
+        ("pnn6", "pNN6",              "%"),
+        ("lf",   "LF power",          "%"),
+        ("hf",   "HF power",          "%"),
+        ("lfhf", "LF/HF ratio",       ""),
+        ("sd1",  "Poincaré SD1",      "ms"),
+        ("sd2",  "Poincaré SD2",      "ms"),
+        ("pr",   "PR interval",       "ms"),
+        ("qrs",  "QRS duration",      "ms"),
+        ("qt",   "QT interval",       "ms"),
+        ("qtc",  "QTc (corrected)",   "ms"),
+    ]
+
+    def __init__(self, parent, on_saved: "Optional[Callable[[], None]]" = None):
+        super().__init__(parent)
+        self._on_saved = on_saved
+        self.title("🧪  Custom Experimental Context")
+        self.geometry("480x680")
+        self.minsize(420, 400)
+        self.resizable(True, True)
+        self.configure(fg_color=BG)
+        self.grab_set()
+        self.focus_force()
+
+        # Start from whatever "custom" context already exists (a previous
+        # save), else from telemetry_awake as a reasonable starting point --
+        # never fabricated from nothing.
+        base = EXPERIMENTAL_CONTEXTS.get("custom") or EXPERIMENTAL_CONTEXTS["telemetry_awake"]
+
+        ctk.CTkLabel(self, text="🧪  Custom Experimental Context", font=FONT_TITLE,
+                     text_color=TEXT, anchor="w").pack(fill="x", padx=20, pady=(20, 4))
+        ctk.CTkLabel(
+            self, text="Define your own reference ranges (e.g. for a specific "
+                       "strain). Once saved, select \"Custom\" in the Parameters "
+                       "dialog to use these bounds everywhere the app shows a "
+                       "reference band.",
+            font=FONT_SMALL, text_color=MUTED, anchor="w", justify="left",
+            wraplength=430).pack(fill="x", padx=20, pady=(0, 10))
+
+        name_row = ctk.CTkFrame(self, fg_color="transparent")
+        name_row.pack(fill="x", padx=20, pady=(0, 10))
+        name_row.columnconfigure(1, weight=1)
+        ctk.CTkLabel(name_row, text="Name", font=FONT_SMALL, text_color=MUTED,
+                     width=110, anchor="w").grid(row=0, column=0, sticky="w")
+        self._ent_name = ctk.CTkEntry(name_row, font=FONT_LABEL, height=28,
+                                      fg_color=CARD, border_color=BORDER2, text_color=TEXT)
+        self._ent_name.insert(0, base.label if base.label != "Telemetry — awake mouse" else "Custom")
+        self._ent_name.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+        scroll = ctk.CTkScrollableFrame(self, fg_color=CARD, corner_radius=8,
+                                        scrollbar_button_color=BORDER,
+                                        scrollbar_button_hover_color=BORDER2)
+        scroll.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+        scroll.columnconfigure(1, weight=1)
+        scroll.columnconfigure(2, weight=1)
+
+        hdr = ctk.CTkFrame(scroll, fg_color="transparent")
+        hdr.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(2, 6))
+        hdr.columnconfigure(1, weight=1); hdr.columnconfigure(2, weight=1)
+        ctk.CTkLabel(hdr, text="", width=118).grid(row=0, column=0)
+        ctk.CTkLabel(hdr, text="Low", font=FONT_HINT, text_color=MUTED).grid(row=0, column=1)
+        ctk.CTkLabel(hdr, text="High", font=FONT_HINT, text_color=MUTED).grid(row=0, column=2)
+
+        self._entries: "dict[str, tuple[ctk.CTkEntry, ctk.CTkEntry]]" = {}
+        for i, (attr, label, unit) in enumerate(self.FIELDS, start=1):
+            lbl_txt = f"{label}  ({unit})" if unit else label
+            ctk.CTkLabel(scroll, text=lbl_txt, font=FONT_SMALL, text_color=TEXT,
+                        anchor="w", width=140, wraplength=138, justify="left"
+                        ).grid(row=i, column=0, sticky="w", padx=(4, 4), pady=3)
+            e_lo = ctk.CTkEntry(scroll, font=FONT_LABEL, height=26,
+                                fg_color=BG, border_color=BORDER2, text_color=TEXT)
+            e_lo.insert(0, str(getattr(base, f"{attr}_lo")))
+            e_lo.grid(row=i, column=1, sticky="ew", padx=3, pady=3)
+            e_hi = ctk.CTkEntry(scroll, font=FONT_LABEL, height=26,
+                                fg_color=BG, border_color=BORDER2, text_color=TEXT)
+            e_hi.insert(0, str(getattr(base, f"{attr}_hi")))
+            e_hi.grid(row=i, column=2, sticky="ew", padx=3, pady=3)
+            self._entries[attr] = (e_lo, e_hi)
+
+        self._lbl_error = ctk.CTkLabel(self, text="", font=FONT_SMALL,
+                                       text_color=ORANGE, anchor="w",
+                                       wraplength=430, justify="left")
+        self._lbl_error.pack(fill="x", padx=20, pady=(0, 4))
+
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=20, pady=(0, 20))
+        ctk.CTkButton(btn_row, text="Cancel", command=self.destroy,
+                     fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
+                     font=FONT_BTN_SEC, height=32, corner_radius=8
+                     ).pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ctk.CTkButton(btn_row, text="✔  Save", command=self._save,
+                     fg_color=GREEN, hover_color=GREEN_DARK, text_color="white",
+                     font=FONT_BTN_PRIMARY, height=32, corner_radius=8
+                     ).pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+    def _save(self) -> None:
+        values: "dict[str, float]" = {}
+        for attr, label, _unit in self.FIELDS:
+            e_lo, e_hi = self._entries[attr]
+            try:
+                lo = float(e_lo.get()); hi = float(e_hi.get())
+            except ValueError:
+                self._lbl_error.configure(text=f"⚠ {label}: enter numeric values.")
+                return
+            if lo >= hi:
+                self._lbl_error.configure(text=f"⚠ {label}: low must be less than high.")
+                return
+            values[f"{attr}_lo"] = lo
+            values[f"{attr}_hi"] = hi
+
+        name = self._ent_name.get().strip() or "Custom"
+        ctx = ContextRanges(label=name, description="User-defined custom context.",
+                            **values)
+        try:
+            save_custom_context(ctx)
+        except Exception as exc:
+            self._lbl_error.configure(text=f"⚠ Could not save: {exc}")
+            return
+        EXPERIMENTAL_CONTEXTS["custom"] = ctx
+        if self._on_saved is not None:
+            self._on_saved()
+        self.destroy()
 

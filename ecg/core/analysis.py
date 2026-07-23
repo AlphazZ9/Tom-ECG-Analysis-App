@@ -366,7 +366,16 @@ def analyse_hrv_nonlinear(
         progress_cb(0, "Non-linear HRV: preparing R-peaks…")
 
     n_rpeaks_orig = len(rpeaks)
-    if n_rpeaks_orig > max_beats:
+    truncated = n_rpeaks_orig > max_beats
+    if truncated:
+        # Deliberately the first max_beats, NOT an evenly-spaced subsample:
+        # SampEn/DFA are sequence-order statistics computed on adjacent RR
+        # intervals -- sampling every Nth beat across the full recording
+        # would feed them a sequence whose "neighbouring" intervals are
+        # actually minutes apart in real time, silently changing what's
+        # being measured rather than just changing how much of it. Callers
+        # are told via df.attrs (see below) so the UI can disclose the
+        # truncation instead of silently reporting a whole-recording number.
         rpeaks = rpeaks[:max_beats]
         log.warning(f"Limiting to {max_beats} beats (was {n_rpeaks_orig})")
 
@@ -380,8 +389,47 @@ def analyse_hrv_nonlinear(
         return pd.DataFrame()
 
     if progress_cb:
+        progress_cb(60, "Multiscale entropy…")
+
+    # Multiscale entropy (Costa et al. 2002): SampEn recomputed at coarser
+    # and coarser time scales of the SAME (already truncated) RR series
+    # nk.hrv_nonlinear() just used -- catches loss of complexity that a
+    # single-scale SampEn can miss (rodent pharmacology literature reports
+    # cases where combined autonomic blockade only showed up at intermediate
+    # MSE scales, not at scale 1). Needs materially more data than a single
+    # SampEn value to be stable per scale, so this is skipped outright below
+    # a minimum beat count rather than returning a noisy curve.
+    rr_ms_mse = np.diff(rpeaks).astype(float) / fs * 1000
+    mse_scales: "list[int]" = []
+    mse_values: "list[float]" = []
+    mse_point: "Optional[float]" = None
+    MIN_BEATS_MSE = 60   # ~30 points/scale at the coarsest scale used below
+    if len(rr_ms_mse) >= MIN_BEATS_MSE:
+        try:
+            scale_max = max(2, min(15, len(rr_ms_mse) // 30))
+            _, mse_info = nk.entropy_multiscale(
+                rr_ms_mse, scale=list(range(1, scale_max + 1)), show=False)
+            mse_scales = [int(s) for s in mse_info.get("Scale", [])]
+            mse_values = [float(v) for v in mse_info.get("Value", [])]
+            finite = [v for v in mse_values if np.isfinite(v)]
+            mse_point = float(np.sum(finite)) if finite else None
+        except Exception as exc:
+            log.warning("analyse_hrv_nonlinear: entropy_multiscale failed: %s", exc)
+            mse_scales, mse_values, mse_point = [], [], None
+
+    if progress_cb:
         progress_cb(100, "Non-linear HRV done")
 
+    # DataFrame.attrs is the standard pandas mechanism for attaching
+    # non-tabular metadata without changing the column/row structure any
+    # existing caller reads -- see analysis_controller.py's run_nonlinear()
+    # for the UI-facing consumer.
+    result.attrs["n_beats_used"]  = len(rpeaks)
+    result.attrs["n_beats_total"] = n_rpeaks_orig
+    result.attrs["truncated"]     = truncated
+    result.attrs["mse_scales"]    = mse_scales
+    result.attrs["mse_values"]    = mse_values
+    result.attrs["mse_point_estimate"] = mse_point
     return result
 
 
@@ -595,48 +643,6 @@ def analyse_intervals(
     _prog(100, f"Done — {n_complete}/{n} complete beats")
     return df
 
-
-
-# ---------------------------------------------------------------------------
-# run_full_analysis — kept only for backward compatibility with external scripts.
-# It is NOT called anywhere inside this application.  New code should call
-# analyse_core / analyse_hrv_freq / analyse_hrv_nonlinear / analyse_intervals
-# directly so each step can be run on demand and progress can be reported.
-# This function will be removed in a future version.
-# ---------------------------------------------------------------------------
-def run_full_analysis(
-    cleaned:     np.ndarray,
-    rpeaks:      np.ndarray,
-    fs:          float,
-    progress_cb: "Optional[Callable[[int, str], None]]" = None,
-) -> AnalysisResults:
-    """Backward-compatible wrapper: runs core + freq + nonlinear + intervals.
-
-    .. deprecated::
-        Use the individual ``analyse_*`` functions instead.
-    """
-    import warnings as _w
-    _w.warn(
-        "run_full_analysis() is deprecated and will be removed in a future version.  "
-        "Call analyse_core(), analyse_hrv_freq(), analyse_hrv_nonlinear(), and "
-        "analyse_intervals() individually.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    def _sub(lo: int, hi: int, msg: str) -> "Optional[Callable[[int, str], None]]":
-        if progress_cb:
-            _cb = progress_cb  # capture narrowed non-None reference
-            def cb(p: int, m: str) -> None:
-                _cb(lo + int((hi - lo) * p / 100), m)
-            return cb
-        return None
-
-    r = analyse_core(cleaned, rpeaks, fs, _sub(0, 40, "core"))
-    r["hrv_freq"]   = analyse_hrv_freq(rpeaks, fs, _sub(40, 55, "freq"))
-    r["hrv_nonlin"] = analyse_hrv_nonlinear(rpeaks, fs, _sub(55, 75, "nonlin"))
-    r["intervals"]  = analyse_intervals(cleaned, rpeaks, fs, r["rr_ms"],  # type: ignore[typeddict-item]
-                                        progress_cb=_sub(75, 100, "intervals"))
-    return r
 
 
 # ════════════════════════════════════════════════════════════

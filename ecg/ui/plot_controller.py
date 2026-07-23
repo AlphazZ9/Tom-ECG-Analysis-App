@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 import matplotlib
 import matplotlib.ticker
+import matplotlib.patches
 import numpy as np
 import pandas as pd
 from scipy.interpolate import CubicSpline
@@ -330,9 +331,9 @@ class PlotController:
         _pace_snap = list(self.app.analysis.pacing_periods)
 
         primary_sig   = sig_raw   if show_raw else sig_flt
-        primary_color = PLOT["raw"]    if show_raw else PLOT["signal"]
+        primary_color = PLOT["raw"]      if show_raw else PLOT["filtered"]
         ghost_sig     = sig_flt   if show_raw else sig_raw
-        ghost_color   = PLOT["signal"] if show_raw else PLOT["raw"]
+        ghost_color   = PLOT["filtered"] if show_raw else PLOT["raw"]
         if raw_only:
             label_mode = "Raw (not yet analysed)"
         elif no_filter_mode:
@@ -789,11 +790,11 @@ class PlotController:
                                     zorder=5, edgecolors="white",
                                     linewidths=0.6, alpha=0.9)
 
-            spike_note = (f"  ·  {n_spikes} spike{'s' if n_spikes != 1 else ''} détecté{'s' if n_spikes != 1 else ''}"
+            spike_note = (f"  ·  {n_spikes} spike{'s' if n_spikes != 1 else ''} detected"
                           if n_spikes else "")
             axes[0].set_ylabel("RR (ms)")
             axes[0].set_title(
-                f"RR Intervals  ·  moy. {rr_mean:.1f} ms  ·  SD {rr_sd_v:.1f} ms{spike_note}",
+                f"RR Intervals  ·  mean {rr_mean:.1f} ms  ·  SD {rr_sd_v:.1f} ms{spike_note}",
                 loc="left", fontsize=9)
             axes[0].set_title(f"click=navigate  r-click=next spike  ·  {updated_at}",
                               loc="right", fontsize=7,
@@ -816,8 +817,8 @@ class PlotController:
 
             axes[1].set_ylabel("HR (bpm)")
             axes[1].set_xlabel(
-                "Time (s)  —  ▲ accélération soudaine  ▼ décélération soudaine  (seuil ±2.5 SD)")
-            axes[1].set_title(f"Instantaneous HR  ·  moy. {hr_mean:.0f} bpm",
+                "Time (s)  —  ▲ sudden acceleration  ▼ sudden deceleration  (threshold ±2.5 SD)")
+            axes[1].set_title(f"Instantaneous HR  ·  mean {hr_mean:.0f} bpm",
                               loc="left", fontsize=9)
 
         # Capture annotations for closure
@@ -870,7 +871,7 @@ class PlotController:
                 dists = np.abs(_spike_times - t_clicked)
                 nearest_spike_t = float(_spike_times[int(np.argmin(dists))])
                 t_nav = nearest_spike_t
-                spike_info = f"spike à {nearest_spike_t:.3f} s"
+                spike_info = f"spike at {nearest_spike_t:.3f} s"
             elif event.button == 1:
                 # Left-click: navigate to clicked time
                 t_nav = t_clicked
@@ -905,6 +906,22 @@ class PlotController:
 
         rr_clipped = rdf["RR_ms"].clip(MouseECG.RR_MIN_MS, MouseECG.RR_MAX_MS).values
 
+        # HRV Triangular Index / TINN -- already computed by nk.hrv_time()
+        # and shown as bare numbers in the Time Domain table, with no visual
+        # QC element (both are geometric measures of THIS histogram's shape,
+        # so a histogram is exactly where they belong).
+        hti = tinn = None
+        _rt = r.get("hrv_time")
+        if _rt is not None and not _rt.empty:
+            try:
+                hti = float(_rt["HRV_HTI"].values[0])
+            except Exception:
+                hti = None
+            try:
+                tinn = float(_rt["HRV_TINN"].values[0])
+            except Exception:
+                tinn = None
+
         def draw_histogram(fig):
             ax = fig.add_subplot(111)
             style_axes(ax)
@@ -912,7 +929,7 @@ class PlotController:
                     edgecolor="white", lw=0.3)
             ax.set_xlabel("RR (ms)")
             ax.set_ylabel("Count")
-            ax.set_title("Distribution RR", loc="left")
+            ax.set_title("RR Distribution", loc="left")
             # A fixed 1 ms tick spacing only looks reasonable for a narrow RR
             # range (e.g. a quiet anesthetized recording). Any recording with
             # real variability -- an awake mouse, or one containing a
@@ -921,12 +938,77 @@ class PlotController:
             # tick count to whatever range this recording actually has.
             ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=10))
 
+            # Triangular-index fit overlay -- uses NeuroKit2's own bin width
+            # ((1/128) s = 7.8125 ms) so the mode/height match HRV_HTI/
+            # HRV_TINN exactly rather than this panel's 50-bin display
+            # histogram. The baseline is drawn split symmetrically around
+            # the histogram mode rather than re-running NeuroKit2's
+            # asymmetric least-squares N/M search a second time purely for
+            # this QC overlay -- an honest illustration of TINN's width, not
+            # a pixel-exact reproduction of its fit.
+            if hti and np.isfinite(hti) and hti > 0 and len(rr_clipped) > 3:
+                binsize = (1.0 / 128.0) * 1000.0
+                edges = np.arange(0, np.nanmax(rr_clipped) + binsize, binsize)
+                counts, edges = np.histogram(rr_clipped, bins=edges)
+                if len(counts) and counts.max() > 0:
+                    x_mode = float(edges[int(np.argmax(counts))])
+                    y_peak = float(counts.max())
+                    half = (tinn / 2.0) if (tinn and np.isfinite(tinn) and tinn > 0) else binsize
+                    ax.plot([x_mode - half, x_mode, x_mode + half], [0, y_peak, 0],
+                            color=RED, lw=1.3, ls="--", alpha=0.8, zorder=5)
+                    label = f"HTI {hti:.2f}"
+                    if tinn and np.isfinite(tinn):
+                        label += f"  ·  TINN {tinn:.1f} ms"
+                    ax.text(0.98, 0.95, label, ha="right", va="top", fontsize=8,
+                            color=RED, transform=ax.transAxes,
+                            bbox=dict(boxstyle="round,pad=0.2",
+                                      fc=PLOT["axes"], ec="none", alpha=0.8))
+
         self.app._slots["rr_hist"].update(draw_histogram)
+
+    # HRV time-domain column name -> _CONTEXT_FIELD_MAP key (ecg/core/models.py)
+    # -- the subset of hrv_time metrics this app has experimental-context
+    # reference ranges for.
+    _TD_REF_KEYS = {"MeanNN": "RR_mean", "SDNN": "RR_SDNN",
+                     "RMSSD": "RR_RMSSD", "pNN6": "RR_pNN6"}
 
     def plot_hrv_tables(self, r: dict) -> None:
         """Populate time-domain and frequency-domain HRV text boxes."""
-        self.app._set_textbox(self.app.txt_td, self.app._df_to_text(r["hrv_time"]),
-                          tsv=self.app._df_to_tsv(r["hrv_time"]))
+        td_df = r["hrv_time"]
+        if td_df is None or td_df.empty:
+            self.app._set_textbox(self.app.txt_td, "  (not computed)")
+        else:
+            td_lines: list[str] = []
+            for col in td_df.columns:
+                try:
+                    v = float(td_df[col].values[0])
+                    if not np.isfinite(v):
+                        continue
+                except Exception as exc:
+                    log.debug("_plot_hrv_tables td skip '%s': %s", col, exc)
+                    continue
+                name = col.replace("HRV_", "")
+                fmt = f"{v:.1f}" if abs(v) >= 100 else f"{v:.3f}" if abs(v) >= 1 else f"{v:.5f}"
+                dots = "·" * max(2, 30 - len(name))
+                ref_note = ""
+                ref_key = self._TD_REF_KEYS.get(name)
+                if ref_key is not None:
+                    # Same ✓/~/↑/↓ convention as the PDF report's _row()
+                    # (export_controller.py) -- ±15% of the range counts as
+                    # "borderline" rather than a hard in/out cutoff.
+                    lo, hi = self.app._current_ref(ref_key)
+                    margin = (hi - lo) * 0.15
+                    if lo <= v <= hi:
+                        status = "✓"
+                    elif lo - margin <= v <= hi + margin:
+                        status = "~"
+                    else:
+                        status = "↑" if v > hi else "↓"
+                    ref_note = f"   {status}  (normal {lo:.3g}–{hi:.3g})"
+                td_lines.append(f"  {name} {dots}  {fmt:>10}{ref_note}")
+            self.app._set_textbox(
+                self.app.txt_td, "\n".join(td_lines) or "  (no finite values)",
+                tsv=self.app._df_to_tsv(td_df))
 
         fd_df = r["hrv_freq"]
         if fd_df is None or fd_df.empty:
@@ -1108,54 +1190,102 @@ class PlotController:
         except Exception as exc:
             log.warning("_plot_psd failed: %s", exc)
 
-    def plot_radar(self, r: dict) -> None:
-        """Normalised HRV spider / radar chart."""
-        try:
-            metrics: dict[str, float] = {}
-            for df, keys in [
-                (r["hrv_time"],   ["HRV_SDNN", "HRV_RMSSD", "HRV_pNN6"]),
-                (r["hrv_freq"],   ["HRV_LF",   "HRV_HF",    "HRV_LFHF"]),
-                (r["hrv_nonlin"], ["HRV_SD1",  "HRV_SD2",   "HRV_SampEn"]),
-            ]:
-                if df is None or df.empty:
-                    continue
-                for k in keys:
-                    if k not in df.columns:
-                        continue
-                    try:
-                        v = float(df[k].values[0])
-                        if np.isfinite(v):
-                            metrics[k.replace("HRV_", "")] = v
-                    except Exception as exc:
-                        log.debug("_plot_radar skip '%s': %s", k, exc)
+    # SampEn has no per-experimental-context range (not a ContextRanges field,
+    # ecg/core/models.py) -- this fixed range matches PARAM_INFO["SampEn"] in
+    # ecg/io/export.py (ref_lo=0.5, ref_hi=2.5), the same number this app's
+    # PDF report already uses to call SampEn "normal".
+    _RADAR_SAMPEN_RANGE = (0.5, 2.5)
 
-            if len(metrics) < 3:
+    # (radar label, source df key in `r`, HRV column, _current_ref() key or
+    # None for the fixed SampEn range above). LF/HF deliberately read the
+    # *normalised* HRV_LFn/HRV_HFn columns (fraction of total power), not
+    # raw HRV_LF/HRV_HF (absolute power in ms^2/Hz) -- the LF_pct/HF_pct
+    # reference bounds are percentages, so comparing raw power against them
+    # would silently misjudge every recording as "low".
+    _RADAR_SPECS = [
+        ("SDNN",   "hrv_time",   "HRV_SDNN",   "RR_SDNN"),
+        ("RMSSD",  "hrv_time",   "HRV_RMSSD",  "RR_RMSSD"),
+        ("pNN6",   "hrv_time",   "HRV_pNN6",   "RR_pNN6"),
+        ("LF",     "hrv_freq",   "HRV_LFn",    "LF_pct"),
+        ("HF",     "hrv_freq",   "HRV_HFn",    "HF_pct"),
+        ("LF/HF",  "hrv_freq",   "HRV_LFHF",   "LFHF"),
+        ("SD1",    "hrv_nonlin", "HRV_SD1",    "SD1"),
+        ("SD2",    "hrv_nonlin", "HRV_SD2",    "SD2"),
+        ("SampEn", "hrv_nonlin", "HRV_SampEn", None),
+    ]
+
+    def plot_radar(self, r: dict) -> None:
+        """Normalised HRV spider / radar chart.
+
+        Each axis is normalised against ITS OWN physiological reference
+        range (the same experimental-context bounds the Time Domain panel
+        and the PDF report use), not against the other metrics on the same
+        chart. The previous version min-max normalised all 9 raw values
+        (ms, %, a unitless ratio, ms^2/Hz power, and entropy) against EACH
+        OTHER -- whichever metric happened to have the largest raw magnitude
+        was stretched to 100% regardless of whether that value was actually
+        high for that metric, so the "profile" didn't mean anything
+        physiologically. Here, 0 = bottom of the reference range, 1 = top;
+        an axis can go outside [0, 1] when a value is genuinely outside its
+        reference range, and the plot widens to show that rather than
+        clipping it.
+        """
+        try:
+            labels: "list[str]" = []
+            raw_values: "list[float]" = []
+            norm_values: "list[float]" = []
+            for label, df_key, col, ref_key in self._RADAR_SPECS:
+                df = r.get(df_key)
+                if df is None or df.empty or col not in df.columns:
+                    continue
+                try:
+                    v = float(df[col].values[0])
+                except Exception as exc:
+                    log.debug("_plot_radar skip '%s': %s", col, exc)
+                    continue
+                if not np.isfinite(v):
+                    continue
+                if col in ("HRV_LFn", "HRV_HFn"):
+                    v *= 100.0  # fraction -> percent, matches LF_pct/HF_pct's scale
+                lo, hi = (self.app._current_ref(ref_key) if ref_key is not None
+                          else self._RADAR_SAMPEN_RANGE)
+                span = (hi - lo) or 1e-9
+                labels.append(label)
+                raw_values.append(v)
+                norm_values.append((v - lo) / span)
+
+            if len(labels) < 3:
                 return
 
-            labels   = list(metrics.keys())
-            values   = np.array(list(metrics.values()))
-            v_range  = values.max() - values.min()
-            v_norm   = (values - values.min()) / (v_range + 1e-9)
             n        = len(labels)
             angles   = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
-            v_closed = v_norm.tolist() + [v_norm[0]]
+            v_closed = norm_values + [norm_values[0]]
             a_closed = angles + angles[:1]
+            # Axes always show at least the [0,1] reference band; widen only
+            # if a metric actually falls outside its own reference range.
+            y_lo = min(0.0, min(norm_values) - 0.05)
+            y_hi = max(1.0, max(norm_values) + 0.05)
 
-            # Rich labels: name + value — placed by thetagrids (stays inside bounds)
-            rich_labels = [f"{lbl}\n{val:.3g}" for lbl, val in zip(labels, values)]
+            # Rich labels: name + raw value — placed by thetagrids (stays inside bounds)
+            rich_labels = [f"{lbl}\n{val:.3g}" for lbl, val in zip(labels, raw_values)]
 
             def draw_radar(fig):
                 ax = fig.add_subplot(111, polar=True)
                 ax.set_facecolor(PLOT["axes"])
-                ax.plot(a_closed, v_closed, color=RED, lw=2)
-                ax.fill(a_closed, v_closed, color=RED, alpha=0.15)
+                # Shade the reference band itself so "inside the green ring"
+                # has one consistent meaning across every axis.
+                ax.fill(a_closed, [1.0] * (n + 1), color=GREEN, alpha=0.06, zorder=0)
+                ax.plot(a_closed, v_closed, color=RED, lw=2, zorder=3)
+                ax.fill(a_closed, v_closed, color=RED, alpha=0.15, zorder=2)
                 ax.set_thetagrids(np.degrees(angles), rich_labels, color=PLOT["text"])
-                ax.set_ylim(0, 1)
-                ax.set_yticks([0.25, 0.5, 0.75])
-                ax.set_yticklabels(["25%", "50%", "75%"], color=PLOT["muted"])
+                ax.set_ylim(y_lo, y_hi)
+                ax.set_yticks([0.0, 0.5, 1.0])
+                ax.set_yticklabels(["ref. lo", "ref. mid", "ref. hi"],
+                                   color=PLOT["muted"], fontsize=7)
                 ax.grid(color=PLOT["grid"], alpha=0.5)
                 ax.spines["polar"].set_color(PLOT["border"])
-                ax.set_title("HRV Profile (normalised)", pad=8, color=PLOT["text"])
+                ax.set_title("HRV Profile  (0 = ref. low · 1 = ref. high, per metric)",
+                             pad=8, color=PLOT["text"], fontsize=9)
 
             self.app._slots["radar"].update(draw_radar)
         except Exception as exc:
@@ -1173,22 +1303,88 @@ class PlotController:
         nl   = r["hrv_nonlin"]
         sd1  = self.app._safe_df_val(nl, "HRV_SD1", 1)
         sd2  = self.app._safe_df_val(nl, "HRV_SD2", 1)
+        # SD1/SD2 (and the rest of hrv_nonlin) may have been computed from
+        # only the first max_beats of a long recording -- see
+        # analyse_hrv_nonlinear's attrs (core/analysis.py). The scatter
+        # below always shows every beat, so disclose the mismatch instead
+        # of letting the numbers silently imply a different beat count than
+        # the cloud they're printed next to.
+        trunc_note = ""
+        attrs = getattr(nl, "attrs", {})
+        if attrs.get("truncated"):
+            trunc_note = f"  ·  SD1/SD2 from first {attrs['n_beats_used']:,} beats"
+
+        # Ellipse geometry: centred on the plotted series' own mean RR;
+        # SD1 = semi-minor axis (perpendicular to the identity line --
+        # short-term/beat-to-beat spread), SD2 = semi-major axis (along the
+        # identity line -- longer-term spread). Standard Poincaré-ellipse
+        # convention; previously SD1/SD2 were only printed as title text
+        # with no visual link to the scatter they describe.
+        try:
+            sd1_f = float(nl["HRV_SD1"].values[0])
+            sd2_f = float(nl["HRV_SD2"].values[0])
+            have_ellipse = np.isfinite(sd1_f) and np.isfinite(sd2_f)
+        except Exception as exc:
+            log.debug("_plot_nonlinear: SD1/SD2 ellipse skipped: %s", exc)
+            have_ellipse = False
+        center = float(rr_ms.mean())
+
         rr_a = rr_ms[:-1]
         rr_b = rr_ms[1:]
         lim  = [float(rr_ms.min()) - 20, float(rr_ms.max()) + 20]
 
+        mse_scales = attrs.get("mse_scales") or []
+        mse_values = attrs.get("mse_values") or []
+        mse_point  = attrs.get("mse_point_estimate")
+        have_mse   = bool(mse_scales) and bool(mse_values)
+
         def draw_poincare(fig):
-            ax = fig.add_subplot(111)
+            from matplotlib.gridspec import GridSpec
+            # Same reason as draw_intervals()/draw_rr_timeline(): CanvasSlot's
+            # constrained_layout would override explicit row-height margins.
+            try:
+                fig.set_layout_engine(None)
+            except Exception as exc:
+                log.debug("draw_poincare: set_layout_engine(None) failed: %s", exc)
+            gs = GridSpec(2, 1, figure=fig, height_ratios=[5, 2], hspace=0.35,
+                         left=0.13, right=0.96, top=0.93, bottom=0.09)
+            ax = fig.add_subplot(gs[0, 0])
             style_axes(ax)
             ax.scatter(rr_a, rr_b, s=3, alpha=0.25, color=BLUE, rasterized=True)
             ax.plot(lim, lim, color=BORDER2, lw=1, ls="--", alpha=0.7)
+            if have_ellipse:
+                ax.add_patch(matplotlib.patches.Ellipse(
+                    (center, center), width=2 * sd2_f, height=2 * sd1_f,
+                    angle=45, facecolor="none", edgecolor=RED, lw=1.5,
+                    alpha=0.8, zorder=4))
             ax.set_xlim(lim)
             ax.set_ylim(lim)
             # Don't use set_aspect("equal") — it creates dead whitespace when
             # the container isn't square. Force equal axes via xlim/ylim instead.
             ax.set_xlabel("RR_n (ms)")
             ax.set_ylabel("RR_n+1 (ms)")
-            ax.set_title(f"Poincaré diagram  SD1={sd1}  SD2={sd2}", loc="left")
+            ax.set_title(f"Poincaré diagram  SD1={sd1}  SD2={sd2}{trunc_note}",
+                         loc="left", fontsize=9)
+
+            # Multiscale entropy curve -- see analyse_hrv_nonlinear() for why
+            # this needs materially more beats than a single SampEn value and
+            # is skipped (not fabricated) below a minimum beat count.
+            ax_mse = fig.add_subplot(gs[1, 0])
+            style_axes(ax_mse)
+            if have_mse:
+                ax_mse.plot(mse_scales, mse_values, color=PURPLE, lw=1.3,
+                           marker="o", ms=3, zorder=2)
+                pt_txt = f"  ·  Σ={mse_point:.2f}" if mse_point is not None else ""
+                ax_mse.set_title(f"Multiscale entropy{pt_txt}", loc="left", fontsize=8)
+                ax_mse.set_xlabel("Scale factor", fontsize=8)
+                ax_mse.set_ylabel("SampEn", fontsize=8)
+                ax_mse.set_xticks(mse_scales)
+            else:
+                ax_mse.set_title("Multiscale entropy", loc="left", fontsize=8)
+                ax_mse.text(0.5, 0.5, f"Needs ≥60 beats (have {len(rr_ms)})",
+                           ha="center", va="center", color=PLOT["muted"],
+                           fontsize=8, transform=ax_mse.transAxes)
+                ax_mse.set_xticks([]); ax_mse.set_yticks([])
 
         self.app._slots["poincare"].update(draw_poincare)
 
@@ -1512,17 +1708,38 @@ class PlotController:
         col_data = [(col, ivl[col].dropna().values, color)
                     for col, color in zip(cols, palette)]
 
-        # Reference ranges for drawing expected-value bands
-        _ref = {
-            "PR_ms":   MouseECG.PR_NORMAL,
-            "QRS_ms":  MouseECG.QRS_NORMAL,
-            "QT_ms":   MouseECG.QT_NORMAL,
-            "QTc_ms":  MouseECG.QTC_NORMAL,
-        }
+        # Reference ranges for drawing expected-value bands -- from the
+        # currently selected experimental context (same _current_ref()
+        # mechanism as Time Domain / radar / Epochs / Rolling), not the
+        # fixed MouseECG.*_NORMAL constants this used to read.
+        _ref = {key: self.app._current_ref(key)
+                for key in ("PR_ms", "QRS_ms", "QT_ms", "QTc_ms")}
+
+        # QT-RR regression diagnostic: whether the currently selected QTc
+        # formula (Mitchell/Bazett/Hodges) actually removed rate-dependence.
+        # A well-corrected QTc should be roughly flat against RR; a nonzero
+        # slope means the correction under/over-compensates at this
+        # recording's heart-rate range -- exactly the check the rodent QTc
+        # literature recommends instead of trusting one formula's number
+        # blindly (Bazett/Fridericia are documented to mis-correct badly at
+        # rodent RR intervals).
+        have_qtrr = "QTc_ms" in ivl.columns and ivl["QTc_ms"].notna().sum() > 3
+        if have_qtrr:
+            _qtrr = ivl[["RR_ms", "QTc_ms"]].dropna()
+            rr_qtrr  = _qtrr["RR_ms"].values.astype(float)
+            qtc_qtrr = _qtrr["QTc_ms"].values.astype(float)
+            try:
+                from scipy.stats import linregress
+                _fit = linregress(rr_qtrr, qtc_qtrr)
+                slope, intercept, rval = _fit.slope, _fit.intercept, _fit.rvalue
+            except Exception as exc:
+                log.debug("draw_intervals: QT-RR linregress failed: %s", exc)
+                have_qtrr = False
+                slope = intercept = rval = float("nan")
 
         def draw_intervals(fig):
             from matplotlib.gridspec import GridSpec
-            n_cols = len(col_data)
+            n_cols = len(col_data) + (1 if have_qtrr else 0)
             # This figure now arrives from CanvasSlot with constrained_layout
             # active, which would recompute/override the explicit margins
             # below -- opt this one figure out so they stay pixel-identical.
@@ -1577,6 +1794,17 @@ class PlotController:
                                   fc=PLOT["axes"], ec="none", alpha=0.8))
                 label = col.replace("_ms", "")
                 ax.set_title(label, color=color, fontsize=10, pad=4)
+                if col == "QT_ms" and len(finite) > 3:
+                    # QT dispersion (max-min QT across beats) used to be a
+                    # single buried line in the Summary tab's text report
+                    # with a code comment noting its dedicated plot had been
+                    # dropped -- this is the same value, restored to the
+                    # panel that already shows the QT distribution it's
+                    # derived from.
+                    qt_disp = float(np.nanmax(finite) - np.nanmin(finite))
+                    ax.text(0.5, 0.03, f"dispersion {qt_disp:.1f} ms",
+                            ha="center", va="bottom", color=PLOT["muted"],
+                            fontsize=7, transform=ax.transAxes)
                 if ci == 0:
                     ax.set_ylabel("ms", fontsize=8)
                 ax.set_xticks([])
@@ -1584,6 +1812,24 @@ class PlotController:
                 p2, p98 = np.percentile(finite, [2, 98])
                 pad = max((p98 - p2) * 0.25, 5)
                 ax.set_ylim(p2 - pad, p98 + pad)
+
+            if have_qtrr:
+                axr = fig.add_subplot(gs[0, n_cols - 1])
+                style_axes(axr)
+                axr.scatter(rr_qtrr, qtc_qtrr, s=6, color=ORANGE_DARK,
+                            alpha=0.35, linewidths=0, zorder=2)
+                xs = np.array([rr_qtrr.min(), rr_qtrr.max()])
+                axr.plot(xs, slope * xs + intercept, color=RED, lw=1.3,
+                         zorder=3)
+                axr.set_title("QTc–RR", color=ORANGE_DARK, fontsize=10, pad=4)
+                axr.text(0.5, 0.97,
+                         f"slope {slope:+.3f}  ·  r={rval:.2f}",
+                         ha="center", va="top", color=PLOT["muted"], fontsize=8,
+                         transform=axr.transAxes,
+                         bbox=dict(boxstyle="round,pad=0.2",
+                                   fc=PLOT["axes"], ec="none", alpha=0.8))
+                axr.set_xlabel("RR (ms)", fontsize=8)
+                axr.set_ylabel("QTc (ms)", fontsize=8)
 
         self.app._slots["intervals"].update(draw_intervals)
         # Only describe the interval measurement columns, not wave-position columns
@@ -1597,7 +1843,7 @@ class PlotController:
         """Average beat template, ±1 SD band, and amplitude / morphology distributions.
 
         All heavy numpy work (beat matrix, SD, per-beat correlations) was pre-computed
-        in run_full_analysis() on the background thread.  This function only renders.
+        in analyse_core() on the background thread.  This function only renders.
         """
         beat_time   = r.get("beat_time")
         mean_beat   = r.get("beat_template")
@@ -1756,6 +2002,19 @@ class PlotController:
         _sq("sq_corr", f"{mean_corr:.3f}" if np.isfinite(mean_corr) else "—")
         _sq("sq_badbeats",
             f"{100.0 * n_bad / n_beats:.1f}%  ({n_bad}/{n_beats})" if n_beats else "—")
+
+        # Duration-weighted counterpart -- see update_kpis() for why a pure
+        # beat-count percentage can understate noise burden on rodent ECG.
+        n_ivl = min(n_beats, len(rr_ms)) if n_beats else 0
+        if n_ivl:
+            rr_slice   = np.asarray(rr_ms[:n_ivl], dtype=float)
+            corr_slice = np.asarray(beat_corr[:n_ivl], dtype=float)
+            total_ms   = float(np.nansum(rr_slice))
+            noisy_ms   = float(np.nansum(rr_slice[corr_slice < 0.90]))
+            pct_time   = 100.0 * noisy_ms / total_ms if total_ms > 0 else float("nan")
+        else:
+            pct_time = float("nan")
+        _sq("sq_noisy_time", f"{pct_time:.1f}%" if np.isfinite(pct_time) else "—")
 
         arep = self.app.analysis.artifact_report
         if arep:
@@ -2048,7 +2307,8 @@ class PlotController:
         """Reset all KPI labels to dash when results are invalidated."""
         for key in ("hr_mean", "hr_range", "rr_mean", "n_beats",
                     "sdnn", "rmssd", "pnn50", "dur",
-                    "sq_score", "sq_corr", "sq_badbeats", "sq_artifact"):
+                    "sq_score", "sq_corr", "sq_badbeats", "sq_noisy_time",
+                    "sq_artifact"):
             widget = self.app._kpi.get(key)
             if widget is not None:
                 widget.configure(text="--")
@@ -2120,6 +2380,26 @@ class PlotController:
         self.app._kpi["sq_badbeats"].configure(
             text=f"{100.0 * n_bad / n_beats_c:.1f}%  ({n_bad}/{n_beats_c})"
             if n_beats_c else "—")
+
+        # Duration-weighted counterpart to sq_badbeats: rodent ECG is prone
+        # to EMG contamination from near-constant movement/grooming, so a
+        # beat-count percentage alone can understate how much of the actual
+        # recording TIME is unreliable (a corrupted stretch may have very
+        # few beats detected at all). Attribute each RR interval's duration
+        # to its leading beat's quality -- rr_ms[i] is the interval starting
+        # at beat_corr[i].
+        rr_ms = r.get("rr_ms")
+        n_ivl = min(n_beats_c, len(rr_ms)) if rr_ms is not None and n_beats_c else 0
+        if n_ivl:
+            rr_slice   = np.asarray(rr_ms[:n_ivl], dtype=float)
+            corr_slice = np.asarray(beat_corr[:n_ivl], dtype=float)
+            total_ms   = float(np.nansum(rr_slice))
+            noisy_ms   = float(np.nansum(rr_slice[corr_slice < 0.90]))
+            pct_time   = 100.0 * noisy_ms / total_ms if total_ms > 0 else float("nan")
+        else:
+            pct_time = float("nan")
+        self.app._kpi["sq_noisy_time"].configure(
+            text=f"{pct_time:.1f}%" if np.isfinite(pct_time) else "—")
 
         arep = self.app.analysis.artifact_report
         if arep:

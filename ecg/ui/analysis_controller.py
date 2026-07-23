@@ -42,6 +42,13 @@ log = logging.getLogger("ecg")
 
 
 class AnalysisController:
+    # Per-epoch/per-window beat count below which SDNN/RMSSD/pNN6 are still
+    # computed (down to the hard inclusion floor of 5 beats in
+    # compute_epochs/compute_rolling_hrv below) but flagged as low-confidence
+    # -- an HRV metric from under ~10 intervals is noisy. Shared by both
+    # methods so "low confidence" means the same thing in both panels.
+    MIN_CONFIDENT_BEATS = 10
+
     def __init__(self, app: "ECGApp") -> None:
         self.app = app
 
@@ -99,6 +106,18 @@ class AnalysisController:
             min_beats = 10
         _gen = getattr(self.app, "_generation", 0)  # snapshot — detect file change
 
+        # AV conduction-delay detection needs per-beat PR data from Interval
+        # delineation, which is a separate, optional analysis step -- only
+        # wire it in when it has actually been run AND its beat count still
+        # matches these same windowed rpeaks (both come from
+        # _windowed_peaks(), but the analysis window could have been changed
+        # between the two runs). Mismatched length -> skip rather than risk
+        # silently misaligning PR values to the wrong beats.
+        pr_ms = None
+        ivl = (self.app.analysis.results or {}).get("intervals")
+        if ivl is not None and not ivl.empty and "PR_ms" in ivl.columns and len(ivl) == len(rpeaks):
+            pr_ms = ivl["PR_ms"].values.astype(float)
+
         def _worker():
             def _prog(p, m):
                 self.app.after(0, lambda pp=p, mm=m: self.app._set_progress(pp, mm))
@@ -108,6 +127,7 @@ class AnalysisController:
                 brady_pct=brady_pct,
                 min_brady_beats=min_beats,
                 progress_cb=_prog,
+                pr_ms=pr_ms,
             )
 
         def _done(events: "list[ArrhythmiaEvent]"):
@@ -120,7 +140,16 @@ class AnalysisController:
             sev_colors = {"alert": RED_MID, "warning": AMBER, "info": BLUE_MID}
             kind_icons = {
                 "bradycardia": "🔵", "tachycardia": "🔴", "pause": "⏸",
-                "esv_run": "⚡", "irregular_run": "〰",
+                "esv_run": "⚡", "irregular_run": "〰", "av_delay": "⏳",
+            }
+            # Per-KIND (not per-severity) colors for the event ribbon --
+            # sev_colors above only has 3 buckets (alert/warning/info), so
+            # e.g. "pause" and "esv_run" (both "alert") would be visually
+            # identical on a severity-colored strip; this is what actually
+            # lets event-type clustering be read at a glance.
+            kind_colors = {
+                "bradycardia": BLUE_MID, "tachycardia": RED_MID, "pause": RED,
+                "esv_run": AMBER, "irregular_run": PURPLE, "av_delay": CYAN_BRIGHT,
             }
 
             # ── RR timeline (right panel, initial state) ──────
@@ -129,8 +158,50 @@ class AnalysisController:
             t_rr    = (t_peaks[:-1] + t_peaks[1:]) / 2
 
             def draw_rr_timeline(fig):
-                ax = fig.subplots(1, 1)
+                from matplotlib.gridspec import GridSpec
+                # CanvasSlot's constrained_layout would recompute/override
+                # explicit margins below (same reason draw_intervals() opts
+                # out) -- a fig.legend() with no reserved top margin gets
+                # clipped by the figure boundary otherwise.
+                try:
+                    fig.set_layout_engine(None)
+                except Exception as exc:
+                    log.debug("draw_rr_timeline: set_layout_engine(None) failed: %s", exc)
+                gs = GridSpec(2, 1, figure=fig, height_ratios=[1, 6], hspace=0.12,
+                             left=0.08, right=0.98, top=0.80, bottom=0.10)
+                ax_ribbon = fig.add_subplot(gs[0, 0])
+                ax        = fig.add_subplot(gs[1, 0], sharex=ax_ribbon)
+                style_axes(ax_ribbon)
                 style_axes(ax)
+
+                # ── Event ribbon: ethogram-style strip, colored by kind ──
+                by_kind: "dict[str, list[tuple[float, float]]]" = {}
+                for ev in events:
+                    by_kind.setdefault(ev.kind, []).append(
+                        (ev.t_start, max(ev.duration_s, 0.05)))
+                for kind, spans in by_kind.items():
+                    ax_ribbon.broken_barh(
+                        spans, (0.1, 0.8),
+                        facecolors=kind_colors.get(kind, MUTED), zorder=2)
+                ax_ribbon.set_ylim(0, 1)
+                ax_ribbon.set_yticks([])
+                ax_ribbon.tick_params(labelbottom=False)
+                ax_ribbon.set_title("Event ribbon", loc="left", fontsize=8,
+                                    color=PLOT.get("muted", MUTED))
+                if by_kind:
+                    from matplotlib.lines import Line2D
+                    handles = [Line2D([0], [0], color=kind_colors.get(k, MUTED),
+                                      lw=5, label=k.replace("_", " ").title())
+                               for k in by_kind]
+                    # top=0.80 above reserves real figure-level margin for
+                    # this -- fig.legend() (figure-relative 0-1 coords) is
+                    # still used over ax_ribbon.legend() since it isn't
+                    # bound by the ribbon axes' own (short) height.
+                    fig.legend(handles=handles, loc="upper center",
+                              bbox_to_anchor=(0.5, 0.99), ncol=min(len(handles), 6),
+                              fontsize=6.5, frameon=False,
+                              labelcolor=PLOT.get("text", GRAY_LIGHT))
+
                 ax.plot(t_rr, rr_ms, color=PLOT.get("ecg",CYAN_BRIGHT), lw=0.8, zorder=2)
                 ax.set_ylabel("RR (ms)"); ax.set_xlabel("Time (s)")
 
@@ -163,10 +234,10 @@ class AnalysisController:
                     # Brady / tachy threshold lines
                     ax.axhline(brady_rr, color=AMBER, lw=0.9,
                                ls="--", alpha=0.65, zorder=4,
-                               label=f"Seuil brady −{bpct:.0f}%")
+                               label=f"Brady threshold −{bpct:.0f}%")
                     ax.axhline(tachy_rr, color=BLUE_MID, lw=0.9,
                                ls="--", alpha=0.65, zorder=4,
-                               label=f"Seuil tachy +{bpct:.0f}%")
+                               label=f"Tachy threshold +{bpct:.0f}%")
 
                 ax.set_title(
                     "RR series — click an episode to zoom",
@@ -194,7 +265,7 @@ class AnalysisController:
             if not events:
                 lbl = ctk.CTkLabel(
                     self.app._arr_event_scroll,
-                    text="No arrhythmia detected\nfor the active context.",
+                    text="No abnormal events detected\nfor the active context.",
                     font=FONT_SMALL, text_color=MUTED, justify="center",
                 )
                 lbl.grid(row=0, column=0, pady=SPACE_L)
@@ -220,8 +291,8 @@ class AnalysisController:
                 text_color=RED if any(e.severity=="alert" for e in events)
                            else (ORANGE if n else GREEN),
             )
-            self.app._set_status(f"Arrhythmia classification — {n} episode(s)", GREEN)
-            self.app.tabs.set("⚠ Arrhythmias")
+            self.app._set_status(f"Abnormal-event classification — {n} episode(s)", GREEN)
+            self.app.tabs.set("⚠ Abnormal Events")
 
         if self.app.btn_run_arrhythmia is None:
             return
@@ -354,7 +425,7 @@ class AnalysisController:
             if (self.app.detection.rpeaks_ok is not None and len(self.app.detection.rpeaks_ok)):
                 if np.min(np.abs(self.app.detection.rpeaks_ok - new_samp)) < int(MouseECG.MIN_RR_MS / 1000 * fs * 0.5):
                     self.app._set_status(
-                        f"Too close to existing peak à {click_time:.3f} s", ORANGE)
+                        f"Too close to existing peak at {click_time:.3f} s", ORANGE)
                     return
             self.app._push_edit_undo()
             self.app.detection.manual_added.add(new_samp)
@@ -393,7 +464,7 @@ class AnalysisController:
         self.app._run_detection(float(self.app.sl_thr.get()))  # type: ignore[union-attr]
         self.app._draw_arr_detail()
         self.app._draw_detail(self.app.ui.nav_pos)
-        self.app._set_status(msg + "  — rerun Core Analysis pour mettre à jour HRV", ORANGE)
+        self.app._set_status(msg + "  — rerun Core Analysis to refresh HRV", ORANGE)
         self.app._update_undo_btns()
 
     def on_arr_scroll(self, event) -> None:
@@ -417,17 +488,21 @@ class AnalysisController:
     def copy_arrhythmia_tsv(self) -> None:
         tsv = getattr(self.app, "_arrhythmia_tsv", None)
         if not tsv:
-            self.app._set_status("Run arrhythmia classification first.", RED)
+            self.app._set_status("Run abnormal-event classification first.", RED)
             return
         self.app.clipboard_clear()
         self.app.clipboard_append(tsv)
-        self.app._set_status("Arrhythmias copied to clipboard (Excel ready)", GREEN)
+        self.app._set_status("Abnormal events copied to clipboard (Excel ready)", GREEN)
 
     def qtc_formula(self) -> str:
-        """Return 'mitchell' or 'bazett' from the Intervals tab combo selector."""
+        """Return 'mitchell', 'bazett', or 'hodges' from the Intervals tab combo selector."""
         try:
             val = self.app.cb_qtc_formula.get()  # type: ignore
-            return "bazett" if "Bazett" in val else "mitchell"
+            if "Bazett" in val:
+                return "bazett"
+            if "Hodges" in val:
+                return "hodges"
+            return "mitchell"
         except Exception:
             return "mitchell"
 
@@ -444,6 +519,14 @@ class AnalysisController:
         rr_s   = np.clip(rr_arr, MouseECG.RR_MIN_MS, None) / 1000.0
         if formula == "bazett":
             qtc = qt_ms / np.sqrt(rr_s)
+        elif formula == "hodges":
+            # Hodges: QTc = QT + 1.75*(HR-60), HR in bpm. Reported in the
+            # literature as the best-performing corrector among Bazett/
+            # Fridericia/Hodges when compared empirically in rats and mice
+            # (Bazett/Fridericia are calibrated to human ~1000ms RR and
+            # documented to over/under-correct badly at rodent RR scale).
+            hr_bpm = 60_000.0 / np.clip(rr_arr, MouseECG.RR_MIN_MS, None)
+            qtc = qt_ms + 1.75 * (hr_bpm - 60.0)
         else:
             qtc = qt_ms / (rr_s ** (1.0 / 3.0))
         qtc = np.where((qtc < MouseECG.QTC_ABS_MIN) | (qtc > MouseECG.QTC_ABS_MAX),
@@ -452,7 +535,8 @@ class AnalysisController:
         ivl["QTc_ms"] = qtc
         self.app.analysis.results["intervals"] = ivl
         self.update_interval_plots()
-        fname = "Mitchell (∛RR)" if formula == "mitchell" else "Bazett (√RR)"
+        fname = {"mitchell": "Mitchell (∛RR)", "bazett": "Bazett (√RR)",
+                 "hodges": "Hodges (linear HR)"}[formula]
         self.app._set_status(f"QTc recomputed — formula: {fname}  ✓", GREEN)
 
     def update_interval_plots(self) -> None:
@@ -482,7 +566,7 @@ class AnalysisController:
 
         active = [m for m, cb in self.app._roll_metrics.items() if cb.get()]
         if not active:
-            self.app._set_status("Sélectionner au moins une métrique.", RED)
+            self.app._set_status("Select at least one metric.", RED)
             return
 
         rpeaks = self.app._windowed_peaks()
@@ -491,6 +575,13 @@ class AnalysisController:
             return
         fs     = float(self.app.signal.fs)
         _gen = getattr(self.app, "_generation", 0)  # snapshot — detect file change
+
+        # LF_nu/HF_nu/LF_HF need a per-window Welch PSD (analyse_hrv_freq) --
+        # meaningfully more expensive than the O(1) time-domain stats below,
+        # so only pay for it when the user actually selected one of those
+        # metrics. SD1/SD2 are cheap closed-form Poincare formulas and are
+        # always computed alongside the existing time-domain set.
+        need_freq = bool({"LF_nu", "HF_nu", "LF_HF"} & set(active))
 
         def _worker():
             t_peaks  = rpeaks / fs
@@ -512,12 +603,41 @@ class AnalysisController:
                 diffs = np.abs(np.diff(rr))
                 pnn6  = float(100.0 * np.sum(diffs > MouseECG.PNN_THRESHOLD) / len(diffs)) \
                         if len(diffs) else np.nan
+                # Poincare SD1/SD2 -- same closed-form definitions as the
+                # Non-linear panel (SD1 from successive-difference variance,
+                # SD2 from total variance), cheap enough to always compute.
+                if len(rr) > 2:
+                    sd1 = float(np.sqrt(0.5 * np.var(diffs, ddof=1)))
+                    sd2 = float(np.sqrt(max(2.0 * np.var(rr, ddof=1) - 0.5 * np.var(diffs, ddof=1), 0.0)))
+                else:
+                    sd1 = sd2 = np.nan
+                # LF_nu/HF_nu/LF_HF -- reuses the exact same analyse_hrv_freq()
+                # path as the Frequency panel (mouse-specific bands, Welch
+                # PSD, its own MIN_BEATS_SPECTRAL guard). Returns an empty
+                # DataFrame -- NaN below -- rather than a number when a
+                # window is too short for a meaningful spectral estimate,
+                # instead of silently fabricating one.
+                lf_nu = hf_nu = lf_hf = np.nan
+                if need_freq:
+                    try:
+                        fdf = analyse_hrv_freq(ep, fs)
+                        if not fdf.empty:
+                            lf_nu = float(fdf["HRV_LFn"].values[0]) * 100.0
+                            hf_nu = float(fdf["HRV_HFn"].values[0]) * 100.0
+                            lf_hf = float(fdf["HRV_LFHF"].values[0])
+                    except Exception as exc:
+                        log.debug("compute_rolling_hrv: analyse_hrv_freq failed at t=%.1f: %s", t0, exc)
                 rows.append({
                     "t_mid": round(t0 + win_s / 2, 2),
                     "HR":    round(hr,    1),
                     "SDNN":  round(sdnn,  2),
                     "RMSSD": round(rmssd, 2),
                     "pNN6":  round(pnn6,  1),
+                    "SD1":   round(sd1, 3) if np.isfinite(sd1) else np.nan,
+                    "SD2":   round(sd2, 3) if np.isfinite(sd2) else np.nan,
+                    "LF_nu": round(lf_nu, 1) if np.isfinite(lf_nu) else np.nan,
+                    "HF_nu": round(hf_nu, 1) if np.isfinite(hf_nu) else np.nan,
+                    "LF_HF": round(lf_hf, 3) if np.isfinite(lf_hf) else np.nan,
                     "n_beats": len(ep),
                 })
                 pct = int((i + 1) / max(n_wins, 1) * 100)
@@ -538,12 +658,18 @@ class AnalysisController:
 
             df = pd.DataFrame(rows)
             self.app.analysis.rolling_hrv_df = df
+            low_n = df["n_beats"].values < self.MIN_CONFIDENT_BEATS
 
             ctx    = EXPERIMENTAL_CONTEXTS.get(self.app.analysis.exp_context)
             colors = {"HR": ORANGE_DARK, "SDNN": BLUE_DARK,
-                      "RMSSD": GREEN_DARK, "pNN6": PURPLE}
+                      "RMSSD": GREEN_DARK, "pNN6": PURPLE,
+                      "SD1": CORAL, "SD2": CYAN_BRIGHT,
+                      "LF_nu": BLUE_MID, "HF_nu": GREEN, "LF_HF": AMBER}
             ylabels = {"HR": "HR (bpm)", "SDNN": "SDNN (ms)",
-                       "RMSSD": "RMSSD (ms)", "pNN6": "pNN6 (%)"}
+                       "RMSSD": "RMSSD (ms)", "pNN6": "pNN6 (%)",
+                       "SD1": "SD1 (ms)", "SD2": "SD2 (ms)",
+                       "LF_nu": "LF (n.u., %)", "HF_nu": "HF (n.u., %)",
+                       "LF_HF": "LF/HF"}
             # reference bands per metric from active context
             ref_bands: "dict[str, tuple[float,float]]" = {}
             if ctx:
@@ -552,6 +678,11 @@ class AnalysisController:
                     "SDNN":  (ctx.sdnn_lo,  ctx.sdnn_hi),
                     "RMSSD": (ctx.rmssd_lo, ctx.rmssd_hi),
                     "pNN6":  (ctx.pnn6_lo,  ctx.pnn6_hi),
+                    "SD1":   (ctx.sd1_lo,   ctx.sd1_hi),
+                    "SD2":   (ctx.sd2_lo,   ctx.sd2_hi),
+                    "LF_nu": (ctx.lf_lo,    ctx.lf_hi),
+                    "HF_nu": (ctx.hf_lo,    ctx.hf_hi),
+                    "LF_HF": (ctx.lfhf_lo,  ctx.lfhf_hi),
                 }
 
             n_plots = len(active)
@@ -588,9 +719,17 @@ class AnalysisController:
 
                     ax.plot(t, y, color=color, lw=1.4, zorder=3)
                     ax.fill_between(t, y, alpha=0.08, color=color, zorder=2)
+                    # Low-confidence windows (< MIN_CONFIDENT_BEATS beats): open,
+                    # lighter markers instead of filled ones -- same convention
+                    # as compute_epochs' draw_epochs().
+                    if low_n.any():
+                        ax.plot(t[low_n], y[low_n], "o", ms=4.5, mfc="none",
+                                mec=color, mew=1.0, alpha=0.6, zorder=4)
+                    if (~low_n).any():
+                        ax.plot(t[~low_n], y[~low_n], "o", ms=3.0, color=color, zorder=4)
                     ax.set_ylabel(ylabels[metric], fontsize=8)
                     ax.set_title(
-                        f"{metric}  —  window {win_s:.0f}s · pas {step_s:.0f}s",
+                        f"{metric}  —  window {win_s:.0f}s · step {step_s:.0f}s",
                         loc="left", fontsize=8)
                     if ax is not axes[-1]:
                         ax.tick_params(labelbottom=False)
@@ -598,30 +737,29 @@ class AnalysisController:
                 axes[-1].set_xlabel("Time (s)")
                 ctx_txt = ctx.label if ctx else ""
                 if ctx_txt:
-                    fig.text(0.99, 0.01, f"Contexte : {ctx_txt}",
+                    fig.text(0.99, 0.01, f"Context: {ctx_txt}",
                              ha="right", va="bottom", fontsize=7,
                              color=PLOT.get("muted", "#888"),
                              transform=fig.transFigure)
 
             self.app._slots["rolling_hrv"].update(draw_rolling)
+            table_text = df.to_string(index=False)
+            if low_n.any():
+                table_text += (
+                    f"\n\n  * {int(low_n.sum())} window(s) have fewer than "
+                    f"{self.MIN_CONFIDENT_BEATS} beats — SDNN/RMSSD/pNN6 for "
+                    f"those rows are noisy (hollow markers on the plot above).")
+            self.app._set_textbox(self.app.txt_rolling, table_text,
+                              tsv=self.app._df_to_tsv(df))
             n = len(df)
             self.app.lbl_roll_status.configure(  # type: ignore[union-attr]
-                text=f"  {n} windows · {win_s:.0f}s · pas {step_s:.0f}s  ✓",
+                text=f"  {n} windows · {win_s:.0f}s · step {step_s:.0f}s  ✓",
                 text_color=GREEN)
             self.app._set_status(f"Rolling HRV — {n} windows computed", GREEN)
             self.app.tabs.set("💓 HRV"); self.app.after(50, lambda: self.app._on_hrv_view_change("Rolling"))
 
         self.app._start_async_result(
             self.app.btn_roll_compute, "Computing…", _worker, _done)
-
-    def copy_rolling_tsv(self) -> None:
-        df = self.app.analysis.rolling_hrv_df
-        if df is None:
-            self.app._set_status("Compute Rolling HRV first.", RED)
-            return
-        self.app.clipboard_clear()
-        self.app.clipboard_append(self.app._df_to_tsv(df))
-        self.app._set_status("Rolling HRV copié dans le presse-papiers (Excel ready)", GREEN)
 
     def run_analysis(self) -> None:
         if not NK_AVAILABLE:
@@ -890,6 +1028,11 @@ class AnalysisController:
             results: dict = self.app.analysis.results  # narrow for type checkers
             tasks = [
                 ("Non-linear metrics", lambda: self.app._plot_nonlinear(results)),
+                # The radar's SD1/SD2/SampEn axes come from hrv_nonlin -- redraw
+                # it here too (not just from run_freq()) so it doesn't stay
+                # stuck showing a stale/incomplete profile when Non-linear is
+                # computed after (or without) Frequency having been run first.
+                ("HRV radar",          lambda: self.app._plot_radar(results)),
                 ("Summary",            lambda: self.app._plot_summary(results)),
             ]
             sampen = "—"
@@ -897,9 +1040,18 @@ class AnalysisController:
                 sampen = f"{float(result['HRV_SampEn'].values[0]):.3f}"
             except Exception as _exc:
                 log.debug("run_nonlinear: SampEn formatting failed: %s", _exc, exc_info=True)
+            # Disclose beat-count truncation (analyse_hrv_nonlinear caps at
+            # max_beats=1000 for runtime -- on a long recording that's only
+            # the opening minutes, and there was previously no on-screen
+            # sign of this at all, only a log line).
+            trunc_note = ""
+            if result.attrs.get("truncated"):
+                trunc_note = (f"  ·  first {result.attrs['n_beats_used']:,} of "
+                               f"{result.attrs['n_beats_total']:,} beats")
             if self.app.lbl_nonlin_status is not None:
                 self.app.lbl_nonlin_status.configure(  # type: ignore[union-attr]
-                    text=f"  Done  SampEn={sampen}", text_color=GREEN)
+                    text=f"  Done  SampEn={sampen}{trunc_note}",
+                    text_color=ORANGE if trunc_note else GREEN)
             self.app._run_plot_chain(
                 tasks,
                 on_complete=lambda: self.app._set_status("Non-linear HRV done", GREEN))
@@ -1099,8 +1251,16 @@ class AnalysisController:
                     rmssd  = float(hrv_ep["HRV_RMSSD"].values[0])
                 except Exception as exc:
                     log.warning("Epoch hrv_time failed, manual calc: %s", exc)
-                    sdnn  = float(rr.std())
+                    # ddof=1 (sample std) to match nk.hrv_time's own convention
+                    # and compute_rolling_hrv's manual computation below --
+                    # this previously defaulted to ddof=0 (population std),
+                    # silently disagreeing with both whenever this fallback
+                    # actually triggered.
+                    sdnn  = float(rr.std(ddof=1)) if len(rr) > 1 else float("nan")
                     rmssd = float(np.sqrt(np.mean(np.diff(rr) ** 2)))
+                diffs = np.abs(np.diff(rr))
+                pnn6  = float(100.0 * np.sum(diffs > MouseECG.PNN_THRESHOLD) / len(diffs)) \
+                        if len(diffs) else float("nan")
                 rows.append({
                     "Epoch_start_s": round(t0, 1),
                     "Epoch_end_s":   round(t1, 1),
@@ -1109,6 +1269,7 @@ class AnalysisController:
                     "MeanNN":        round(float(rr.mean()), 1),
                     "SDNN":          round(sdnn, 2),
                     "RMSSD":         round(rmssd, 2),
+                    "pNN6":          round(pnn6, 1),
                 })
                 # Progress via after() — safe cross-thread call, throttled to every 5%
                 pct = int((idx_ep + 1) / max(n_ep, 1) * 100)
@@ -1127,20 +1288,51 @@ class AnalysisController:
             df    = pd.DataFrame(rows)
             self.app.analysis.epoch_df = df
             t_mid = (df["Epoch_start_s"] + df["Epoch_end_s"]) / 2
+            low_n = df["N_beats"].values < self.MIN_CONFIDENT_BEATS
+
+            # Reference bands from the active experimental context -- same
+            # source and pattern as compute_rolling_hrv's draw_rolling().
+            ctx = EXPERIMENTAL_CONTEXTS.get(self.app.analysis.exp_context)
+            ref_bands: "dict[str, tuple[float, float]]" = {}
+            if ctx:
+                ref_bands = {
+                    "HR_mean": (ctx.hr_lo,    ctx.hr_hi),
+                    "SDNN":    (ctx.sdnn_lo,  ctx.sdnn_hi),
+                    "RMSSD":   (ctx.rmssd_lo, ctx.rmssd_hi),
+                    "pNN6":    (ctx.pnn6_lo,  ctx.pnn6_hi),
+                }
 
             plot_specs = [
                 ("HR_mean", "HR (bpm)",   ORANGE_DARK, "Heart Rate per Epoch"),
-                ("SDNN",    "SDNN (ms)",  BLUE_DARK, "SDNN per Epoch"),
-                ("RMSSD",   "RMSSD (ms)", GREEN_DARK, "RMSSD per Epoch"),
+                ("SDNN",    "SDNN (ms)",  BLUE_DARK,   "SDNN per Epoch"),
+                ("RMSSD",   "RMSSD (ms)", GREEN_DARK,  "RMSSD per Epoch"),
+                ("pNN6",    "pNN6 (%)",   PURPLE,      "pNN6 per Epoch"),
             ]
 
             def draw_epochs(fig):
-                axes = fig.subplots(3, 1, sharex=True)
+                axes = fig.subplots(4, 1, sharex=True)
+                try:
+                    fig.set_constrained_layout_pads(hspace=0.08)
+                except Exception as exc:
+                    log.debug("draw_epochs: set_constrained_layout_pads failed: %s", exc)
                 for ax, (col, ylabel, color, title) in zip(axes, plot_specs):
                     style_axes(ax)
                     y = df[col].values
-                    ax.plot(t_mid, y, color=color, lw=1.5, marker="o", ms=3.5)
-                    ax.fill_between(t_mid, y, alpha=0.10, color=color)
+                    if col in ref_bands:
+                        lo, hi = ref_bands[col]
+                        ax.axhspan(lo, hi, alpha=0.10, color=color, linewidth=0, zorder=0)
+                        ax.axhline(lo, color=color, lw=0.6, ls="--", alpha=0.45, zorder=1)
+                        ax.axhline(hi, color=color, lw=0.6, ls="--", alpha=0.45, zorder=1)
+                    ax.plot(t_mid, y, color=color, lw=1.5, zorder=3)
+                    ax.fill_between(t_mid, y, alpha=0.10, color=color, zorder=2)
+                    # Low-confidence epochs (< MIN_CONFIDENT_BEATS beats): open,
+                    # lighter markers instead of filled ones -- same data,
+                    # visually distinguished rather than silently identical.
+                    if low_n.any():
+                        ax.plot(t_mid[low_n], y[low_n], "o", ms=4.5, mfc="none",
+                                mec=color, mew=1.0, alpha=0.6, zorder=4)
+                    if (~low_n).any():
+                        ax.plot(t_mid[~low_n], y[~low_n], "o", ms=3.5, color=color, zorder=4)
                     ax.set_ylabel(ylabel)
                     ax.set_title(title, loc="left")
                     if ax is not axes[-1]:
@@ -1148,7 +1340,13 @@ class AnalysisController:
                 axes[-1].set_xlabel("Time (s)")
 
             self.app._slots["epochs"].update(draw_epochs)
-            self.app._set_textbox(self.app.txt_epochs, df.to_string(index=False),
+            table_text = df.to_string(index=False)
+            if low_n.any():
+                table_text += (
+                    f"\n\n  * {int(low_n.sum())} epoch(s) have fewer than "
+                    f"{self.MIN_CONFIDENT_BEATS} beats — SDNN/RMSSD/pNN6 for "
+                    f"those rows are noisy (hollow markers on the plot above).")
+            self.app._set_textbox(self.app.txt_epochs, table_text,
                               tsv=self.app._df_to_tsv(df))
             n_ep = len(df)
             # Update the label in the Epochs tab header
@@ -1169,9 +1367,8 @@ class AnalysisController:
         Named for the test it actually runs (mannwhitneyu) -- this used to be
         called wilcoxon_test, but the Wilcoxon signed-rank test is a paired
         test and doesn't apply to two independent segments the way this is
-        used. Not currently wired into any caller (see _open_compare_segments
-        in app.py); kept as an available utility for a future segment-vs-
-        segment significance test.
+        used. Called from _open_compare_segments in app.py to test whether
+        the two segments' RR-interval distributions differ significantly.
 
         Returns (p_value, interpretation_string).
         Falls back gracefully if scipy is unavailable.

@@ -54,7 +54,7 @@ from openpyxl import Workbook
 
 # ── ecg.core ──────────────────────────────────────────────────────────────────
 from ecg.core.models import (
-    ArrhythmiaEvent, MouseECG, FilterParams,
+    ArrhythmiaEvent, MouseECG, FilterParams, EXPERIMENTAL_CONTEXTS,
 )
 from ecg.core.detection import (
     detect_rr_artifacts, apply_artifact_decisions,
@@ -1168,6 +1168,9 @@ class ECGApp(ctk.CTk):
         ctk.CTkLabel(table_card, text="Metric comparison",
                      font=FONT_SUBSECTION, text_color=MUTED,
                      anchor="w").pack(padx=SPACE_M, pady=(SPACE_M, SPACE_S), fill="x")
+        lbl_mw = ctk.CTkLabel(table_card, text="", font=FONT_MICRO,
+                              text_color=MUTED, anchor="w")
+        lbl_mw.pack(padx=SPACE_M, pady=(0, SPACE_XS), fill="x")
         tbl = ctk.CTkScrollableFrame(table_card, fg_color=BG, height=380,
                                      scrollbar_button_color=BORDER)
         tbl.pack(fill="both", expand=True, padx=SPACE_S, pady=(0, SPACE_M))
@@ -1292,9 +1295,17 @@ class ECGApp(ctk.CTk):
                                             lf_band=lf, hf_band=hf)
                 sb = compute_segment_stats(sig, rp, fs, lo_b, hi_b, lb,
                                             lf_band=lf, hf_band=hf)
-                win.after(0, lambda: _on_done(sa, sb))
+                # Whole-distribution significance test between the two
+                # segments' RR-interval series (not per-metric -- Mann-
+                # Whitney compares two samples, and the per-row table above
+                # is mostly single summary statistics, not resampleable
+                # distributions).
+                mw_p, mw_interp = self.analysis_ctrl.mannwhitney_test(
+                    np.asarray(sa.get("rr_ms", []), dtype=float),
+                    np.asarray(sb.get("rr_ms", []), dtype=float))
+                win.after(0, lambda: _on_done(sa, sb, mw_p, mw_interp))
 
-            def _on_done(sa: dict, sb: dict) -> None:
+            def _on_done(sa: dict, sb: dict, mw_p: float, mw_interp: str) -> None:
                 run_btn.configure(state="normal")
                 progress_bar.stop(); progress_bar.pack_forget()
                 # Persist for Prism export
@@ -1309,6 +1320,10 @@ class ECGApp(ctk.CTk):
                              f"{sb['label']}: {sb['n_beats']} beats",
                         text_color=GREEN)
                     export_btn.configure(state="normal")   # unlock Export button
+                mw_txt = (f"p = {mw_p:.4g}" if np.isfinite(mw_p) else "n/a")
+                lbl_mw.configure(
+                    text=f"RR-interval distributions (Mann-Whitney U):  "
+                         f"{mw_txt}  ({mw_interp})")
                 _populate_table(sa, sb)
                 _populate_plot(sa, sb)
 
@@ -1966,7 +1981,7 @@ class ECGApp(ctk.CTk):
         self._btn(f, "🖼  Export Figures  (PNG)",      self._export_figures,    fpx, variant="secondary", h=28)
         self._btn(f, "📦  Export ZIP  (Excel+Figs)",  self._export_zip,        fpx, variant="secondary", h=28)
         self._btn(f, "📄  PDF Report  (1 page)",      self._export_pdf_report, fpx, variant="secondary", h=28)
-        self._btn(f, "🔬  Export Arrhythmia PDF",     self._export_arrhythmia_pdf, fpx, variant="secondary", h=28)
+        self._btn(f, "🔬  Export Abnormal Events PDF", self._export_arrhythmia_pdf, fpx, variant="secondary", h=28)
         self._btn(f, "🔬  Export GraphPad Prism",     self._export_prism,      fpx, variant="secondary", h=28)
         ctk.CTkFrame(f, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_S))
         self._btn(f, "📝  Notes (this recording)",    self._open_notes_dialog, fpx, variant="secondary", h=28)
@@ -2006,6 +2021,7 @@ class ECGApp(ctk.CTk):
             ("Quality", GREEN_DARK, [
                 ("sq_score",    "Overall score",       "%", False),
                 ("sq_badbeats", "Beats < 0.90 corr.",  "",  False),
+                ("sq_noisy_time", "Time < 0.90 corr.", "%", False),
                 ("sq_artifact", "Auto-corrected",       "", False),
             ]),
         ]
@@ -2083,7 +2099,7 @@ class ECGApp(ctk.CTk):
         )
         self.tabs.pack(fill="both", expand=True)
         for name in ["📈 Detection", "💓 HRV", "📏 Intervals",
-                     "〰 Beat Template", "⚠ Arrhythmias", "📋 Summary"]:
+                     "〰 Beat Template", "⚠ Abnormal Events", "📋 Summary"]:
             self.tabs.add(name)
 
         self._build_tab_detection()
@@ -2560,7 +2576,7 @@ class ECGApp(ctk.CTk):
         )
         self.btn_run_nonlin.pack(side="left")  # type: ignore[union-attr]
         self.lbl_nonlin_status = ctk.CTkLabel(
-            bar, text="  SampEn + DFA peuvent prendre 30 s+ sur longs enregistrements",
+            bar, text="  SampEn + DFA can take 30 s+ on long recordings",
             font=FONT_SMALL, text_color=MUTED, anchor="w")
         self.lbl_nonlin_status.pack(side="left", padx=SPACE_M)  # type: ignore[union-attr]
 
@@ -2627,7 +2643,7 @@ class ECGApp(ctk.CTk):
             ent.insert(0, default)
             ent.pack(side="left", padx=(0, SPACE_L))
             setattr(self, f"ent_{attr_n}", ent)
-        self.sw_epoch = self._switch(settings_row, "Auto-run après analyse",
+        self.sw_epoch = self._switch(settings_row, "Auto-run after analysis",
                                      dict(padx=0))
         self.sw_epoch.pack(side="left")
         self.lbl_epoch_info = ctk.CTkLabel(
@@ -2667,7 +2683,6 @@ class ECGApp(ctk.CTk):
 
     def _build_hrv_view_rolling(self, parent: ctk.CTkFrame) -> None:
         """Rolling / sliding-window HRV — formerly the 'Rolling HRV' tab."""
-        parent.grid_rowconfigure(1, weight=1)
         parent.grid_columnconfigure(0, weight=1)
 
         bar = ctk.CTkFrame(parent, fg_color="transparent")
@@ -2689,20 +2704,6 @@ class ECGApp(ctk.CTk):
         self.ent_roll_step.insert(0, "5")
         self.ent_roll_step.pack(side="left", padx=(SPACE_S, SPACE_L))
 
-        ctk.CTkLabel(bar, text="Metrics:", font=FONT_SMALL,
-                     text_color=MUTED).pack(side="left")
-        self._roll_metrics: "dict[str, ctk.CTkCheckBox]" = {}
-        for metric, default in [("HR", True), ("SDNN", True),
-                                 ("RMSSD", True), ("pNN6", False)]:
-            cb = ctk.CTkCheckBox(bar, text=metric, font=FONT_SMALL,
-                                 text_color=MUTED, fg_color=BLUE,
-                                 checkmark_color="white",
-                                 border_color=BORDER2, width=16)
-            if default:
-                cb.select()
-            cb.pack(side="left", padx=(SPACE_S, 0))
-            self._roll_metrics[metric] = cb
-
         self.btn_roll_compute = ctk.CTkButton(
             bar, text="⟳  Compute", command=self._compute_rolling_hrv,
             fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
@@ -2714,20 +2715,62 @@ class ECGApp(ctk.CTk):
             font=FONT_SMALL, text_color=MUTED, anchor="w")
         self.lbl_roll_status.pack(side="left", padx=SPACE_M)  # type: ignore[union-attr]
 
-        ctk.CTkButton(bar, text="📋 Copy TSV", command=self._copy_rolling_tsv,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                      font=FONT_BTN_SEC, height=28, corner_radius=5
-                      ).pack(side="right")
+        # Metrics checkboxes get their own row -- HR/SDNN/RMSSD/pNN6 plus
+        # SD1/SD2/LF_nu/HF_nu/LF_HF (task: surface compute_segment_stats'
+        # richer metric set as continuous trends, not just inside the
+        # Compare Segments modal) no longer fit the single window/step/
+        # compute row without wrapping badly.
+        metrics_bar = ctk.CTkFrame(parent, fg_color="transparent")
+        metrics_bar.grid(row=1, column=0, sticky="ew", padx=SPACE_M, pady=(0, SPACE_S))
+        ctk.CTkLabel(metrics_bar, text="Metrics:", font=FONT_SMALL,
+                     text_color=MUTED).pack(side="left")
+        self._roll_metrics: "dict[str, ctk.CTkCheckBox]" = {}
+        for metric, default in [("HR", True), ("SDNN", True), ("RMSSD", True),
+                                 ("pNN6", False), ("SD1", False), ("SD2", False),
+                                 ("LF_nu", False), ("HF_nu", False), ("LF_HF", False)]:
+            cb = ctk.CTkCheckBox(metrics_bar, text=metric, font=FONT_SMALL,
+                                 text_color=MUTED, fg_color=BLUE,
+                                 checkmark_color="white",
+                                 border_color=BORDER2, width=16)
+            if default:
+                cb.select()
+            cb.pack(side="left", padx=(SPACE_S, 0))
+            self._roll_metrics[metric] = cb
+
+        parent.grid_rowconfigure(1, weight=0)
+        parent.grid_rowconfigure(2, weight=0)
+        parent.grid_rowconfigure(3, weight=1)
+        parent.grid_rowconfigure(4, weight=0)
+
+        # copy bar
+        roll_bar = ctk.CTkFrame(parent, fg_color="transparent")
+        roll_bar.grid(row=2, column=0, sticky="ew", padx=SPACE_M, pady=(0, SPACE_S))
+        ctk.CTkLabel(roll_bar, text="Window table:", font=FONT_SMALL,
+                     text_color=MUTED).pack(side="left")
+        self.btn_copy_rolling = ctk.CTkButton(
+            roll_bar, text="📋  Copy for Excel", height=24,
+            font=FONT_SMALL, fg_color=BLUE, hover_color=BLUE_HOVER,
+            text_color="white", width=160,
+            command=lambda: self._copy_tsv(self.txt_rolling))
+        self.btn_copy_rolling.pack(side="right", padx=(0, SPACE_XS))
 
         plot_frame = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=0)
-        plot_frame.grid(row=1, column=0, sticky="nsew", padx=SPACE_M, pady=(0, SPACE_M))
+        plot_frame.grid(row=3, column=0, sticky="nsew", padx=SPACE_M, pady=(0, SPACE_S))
         plot_frame.grid_rowconfigure(0, weight=1)
         plot_frame.grid_columnconfigure(0, weight=1)
         self._slots["rolling_hrv"] = CanvasSlot(plot_frame, 14, 6.0, toolbar=False)
 
+        rolling_tb = ctk.CTkTextbox(parent, font=FONT_BODY, fg_color="transparent",
+                                    text_color=TEXT, border_width=0,
+                                    scrollbar_button_color=BORDER,
+                                    scrollbar_button_hover_color=BORDER2,
+                                    height=160)
+        rolling_tb.grid(row=4, column=0, sticky="ew", padx=SPACE_M, pady=(0, SPACE_S))
+        self.txt_rolling = rolling_tb
+
     def _build_tab_arrhythmias(self) -> None:
-        """Build the Arrhythmias tab: event cards (left) + ECG viewer (right)."""
-        t = self.tabs.tab("⚠ Arrhythmias")
+        """Build the Abnormal Events tab: event cards (left) + ECG viewer (right)."""
+        t = self.tabs.tab("⚠ Abnormal Events")
         t.grid_rowconfigure(1, weight=1)
         t.grid_columnconfigure(0, weight=1)
 
@@ -2934,7 +2977,7 @@ class ECGApp(ctk.CTk):
     # ── sync undo/redo buttons in arrhythmia tab ─────────────
 
     def _update_undo_btns(self) -> None:
-        """Update all undo/redo button instances (Detection + Arrhythmias tabs)."""
+        """Update all undo/redo button instances (Detection + Abnormal Events tabs)."""
         self.detection_ctrl.update_undo_btns()
 
     def _copy_arrhythmia_tsv(self) -> None:
@@ -2969,7 +3012,7 @@ class ECGApp(ctk.CTk):
             bar, width=140, height=28, font=FONT_LABEL,
             fg_color=BG, border_color=BORDER2, button_color=BORDER2,
             text_color=TEXT, dropdown_fg_color=BG, dropdown_text_color=TEXT,
-            values=["Mitchell (∛RR)", "Bazett (√RR)"],
+            values=["Mitchell (∛RR)", "Bazett (√RR)", "Hodges (linear HR)"],
             command=self._on_qtc_formula_change,
         )
         self.cb_qtc_formula.set("Mitchell (∛RR)")
@@ -3069,9 +3112,6 @@ class ECGApp(ctk.CTk):
     def _compute_rolling_hrv(self) -> None:
         """Compute sliding-window HRV and render the timeline plot."""
         self.analysis_ctrl.compute_rolling_hrv()
-
-    def _copy_rolling_tsv(self) -> None:
-        self.analysis_ctrl.copy_rolling_tsv()
 
     def _build_tab_summary(self) -> None:
         """Summary tab: a curated verdict, not a wall of duplicate plots.
@@ -3173,12 +3213,13 @@ class ECGApp(ctk.CTk):
         stat_row.pack(fill="x", pady=(0, SPACE_S))
         stat_grid = ctk.CTkFrame(stat_row, fg_color="transparent")
         stat_grid.pack(fill="x", padx=SPACE_L, pady=SPACE_M)
-        for col in range(4):
+        for col in range(5):
             stat_grid.grid_columnconfigure(col, weight=1, uniform="sq")
         _SQ_DEFS = [
             ("sq_score",   "Overall score"),
             ("sq_corr",    "Mean template correlation"),
             ("sq_badbeats","Beats below 0.90 corr."),
+            ("sq_noisy_time", "Time below 0.90 corr."),
             ("sq_artifact","Auto-corrected"),
         ]
         self._sum_quality_vals: "dict[str, ctk.CTkLabel]" = {}
@@ -3243,7 +3284,7 @@ class ECGApp(ctk.CTk):
         ctk.CTkLabel(linkout, text="Full plots for every metric above live in their own tabs.",
                      font=FONT_SMALL, text_color=MUTED, anchor="w").pack(
             side="left", padx=SPACE_M, pady=SPACE_S)
-        ctk.CTkLabel(linkout, text="HRV · Intervals · Beat Template · Arrhythmias  →",
+        ctk.CTkLabel(linkout, text="HRV · Intervals · Beat Template · Abnormal Events  →",
                      font=FONT_SMALL, text_color=BLUE, anchor="e").pack(
             side="right", padx=SPACE_M, pady=SPACE_S)
 
@@ -4228,7 +4269,7 @@ class ECGApp(ctk.CTk):
         """Average beat template, ±1 SD band, and amplitude / morphology distributions.
 
         All heavy numpy work (beat matrix, SD, per-beat correlations) was pre-computed
-        in run_full_analysis() on the background thread.  This function only renders.
+        in analyse_core() on the background thread.  This function only renders.
         """
         self.plot_ctrl.plot_beat_template(r)
 
@@ -4645,6 +4686,61 @@ class ECGApp(ctk.CTk):
             anchor="w", wraplength=480, justify="left",
         ).pack(**px, pady=(0, SPACE_M), fill="x")
 
+        # ── EXPERIMENTAL CONTEXT ─────────────────────────────────────────────
+        # Reference ranges shown throughout the app (Time Domain status,
+        # radar chart, Epochs/Rolling bands, Intervals bands, PDF export) all
+        # come from EXPERIMENTAL_CONTEXTS[exp_context] -- there was previously
+        # no live UI to actually choose among them (only session-file restore
+        # could change it), so every analysis silently used the
+        # telemetry_awake default regardless of the real recording condition.
+        f5 = _sec("🧪  Experimental Context", TEAL)
+        _CTX_LABELS = {key: ranges.label for key, ranges in EXPERIMENTAL_CONTEXTS.items()}
+        _CTX_KEYS_BY_LABEL = {v: k for k, v in _CTX_LABELS.items()}
+        row_ctx = ctk.CTkFrame(f5, fg_color="transparent")
+        row_ctx.pack(fill="x", **px, pady=(SPACE_S, SPACE_S))
+        row_ctx.columnconfigure(1, weight=1)
+        ctk.CTkLabel(row_ctx, text="Context", font=FONT_SMALL, text_color=MUTED,
+                     anchor="w", width=160).grid(row=0, column=0, sticky="w")
+        dlg_ctx = ctk.CTkComboBox(row_ctx, font=FONT_LABEL, height=28,
+                                  fg_color=BG, border_color=BORDER2,
+                                  button_color=BORDER2, text_color=TEXT,
+                                  dropdown_fg_color=BG, dropdown_text_color=TEXT,
+                                  values=list(_CTX_LABELS.values()))
+        current_label = _CTX_LABELS.get(self.analysis.exp_context, _CTX_LABELS["telemetry_awake"])
+        dlg_ctx.set(current_label)
+        dlg_ctx.grid(row=0, column=1, sticky="ew", padx=(SPACE_S, 0))
+
+        lbl_ctx_desc = ctk.CTkLabel(
+            f5, text=EXPERIMENTAL_CONTEXTS.get(self.analysis.exp_context, EXPERIMENTAL_CONTEXTS["telemetry_awake"]).description,
+            font=FONT_KPI_LABEL, text_color=LIGHT, anchor="w",
+            wraplength=480, justify="left")
+        lbl_ctx_desc.pack(**px, pady=(0, SPACE_S), fill="x")
+
+        def _on_ctx_change(_choice: str = "") -> None:
+            key = _CTX_KEYS_BY_LABEL.get(dlg_ctx.get())
+            ctx = EXPERIMENTAL_CONTEXTS.get(key) if key else None
+            lbl_ctx_desc.configure(text=ctx.description if ctx else "")
+        dlg_ctx.configure(command=_on_ctx_change)
+
+        def _open_custom_context() -> None:
+            from ecg.ui.dialogs import CustomContextDialog
+            def _on_saved() -> None:
+                # Refresh the combo's label/value list in case the user
+                # renamed "Custom", and select it now that it's been saved.
+                new_labels = {key: ranges.label for key, ranges in EXPERIMENTAL_CONTEXTS.items()}
+                _CTX_LABELS.clear(); _CTX_LABELS.update(new_labels)
+                _CTX_KEYS_BY_LABEL.clear()
+                _CTX_KEYS_BY_LABEL.update({v: k for k, v in new_labels.items()})
+                dlg_ctx.configure(values=list(_CTX_LABELS.values()))
+                dlg_ctx.set(_CTX_LABELS["custom"])
+                _on_ctx_change()
+            CustomContextDialog(win, on_saved=_on_saved)
+
+        ctk.CTkButton(f5, text="✎  Edit Custom Context…", command=_open_custom_context,
+                     fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
+                     font=FONT_BTN_SEC, height=28, corner_radius=6
+                     ).pack(**px, pady=(0, SPACE_M), anchor="w")
+
         # ── Buttons ───────────────────────────────────────────────────────
         ctk.CTkFrame(s, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_M, SPACE_S))
         btn_row = ctk.CTkFrame(s, fg_color="transparent")
@@ -4676,6 +4772,14 @@ class ECGApp(ctk.CTk):
             if self.cb_det_method is not None:
                 self.cb_det_method.set(dlg_det_method.get())
                 self._on_det_method_change(dlg_det_method.get())
+
+            # Experimental context -- no sidebar widget to mirror (there is
+            # none), so this writes straight to analysis state. Panels pick
+            # it up next time they're (re)computed, same as every other
+            # Parameters-dialog change here.
+            ctx_key = _CTX_KEYS_BY_LABEL.get(dlg_ctx.get())
+            if ctx_key:
+                self.analysis.exp_context = ctx_key
 
             # Switches
             for sw_attr, dlg_sw in [
