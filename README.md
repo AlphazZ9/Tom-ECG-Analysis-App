@@ -15,6 +15,10 @@ Reference ranges for every metric are driven by a selectable experimental
 context (telemetry/awake, isoflurane, ketamine-xylazine, surface electrodes,
 or your own custom-defined context), not a single generic "normal" band.
 
+**New to the app?** See the [User Guide](docs/USER_GUIDE.md) for a
+screenshot walkthrough of the actual workflow — loading a recording,
+detection, HRV analysis, abnormal events, and export.
+
 ## Features
 
 ### Signal & R-peak detection

@@ -18,6 +18,11 @@ sélectionnable (télémétrie/éveillée, isoflurane, kétamine-xylazine,
 électrodes de surface, ou un contexte personnalisé défini par vous), et non
 d'une unique plage « normale » générique.
 
+**Nouveau sur l'application ?** Voir le [Guide utilisateur](docs/USER_GUIDE.md)
+(en anglais) pour une visite guidée illustrée du flux de travail réel —
+chargement d'un enregistrement, détection, analyse VRC, événements anormaux
+et export.
+
 ## Fonctionnalités
 
 ### Signal & détection des pics R
