@@ -482,7 +482,7 @@ class SignalController:
         self.app._sync_nav_pos_entry()
         if self.app.lbl_sig_duration is not None:
             self.app.lbl_sig_duration.configure(  # type: ignore[union-attr]
-                text=f"durée totale : {dur:.1f} s", text_color=MUTED)
+                text=f"total duration: {dur:.1f} s", text_color=MUTED)
         self.app._draw_detail()
 
         self.app.analysis.t_start = 0.0
@@ -703,7 +703,7 @@ class SignalController:
         self.app._sync_nav_pos_entry()
         if self.app.lbl_sig_duration is not None:
             self.app.lbl_sig_duration.configure(  # type: ignore[union-attr]
-                text=f"durée totale : {dur:.1f} s", text_color=MUTED)
+                text=f"total duration: {dur:.1f} s", text_color=MUTED)
         self.app._draw_detail()
 
         # Reset analysis window on new signal load and update feedback label

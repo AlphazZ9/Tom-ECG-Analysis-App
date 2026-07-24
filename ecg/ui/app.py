@@ -2795,7 +2795,7 @@ class ECGApp(ctk.CTk):
             fg_color=BG, border_color=BORDER2, text_color=TEXT)
         self.ent_arr_baseline.insert(0, "30")
         self.ent_arr_baseline.pack(side="left", padx=(0, SPACE_XS))
-        _tip = ctk.CTkLabel(bar, text="(pré-stimulus)", font=FONT_KPI_LABEL,
+        _tip = ctk.CTkLabel(bar, text="(pre-stimulus)", font=FONT_KPI_LABEL,
                             text_color=MUTED)
         _tip.pack(side="left", padx=(0, SPACE_M))
 
