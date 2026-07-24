@@ -33,7 +33,7 @@ class DetectionController:
         self.app = app
 
     def update_undo_btns(self) -> None:
-        """Update all undo/redo button instances (Detection + Arrhythmias tabs)."""
+        """Update all undo/redo button instances (Detection + Abnormal Events tabs)."""
         n_u, n_r = len(self.app.detection.edit_undo), len(self.app.detection.edit_redo)
         for attr, n in [("btn_undo_edit", n_u), ("btn_redo_edit", n_r),
                         ("btn_arr_undo",  n_u), ("btn_arr_redo",  n_r),

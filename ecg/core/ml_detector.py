@@ -434,7 +434,8 @@ def train_model(min_samples: int = 50) -> dict:
     try:
         from sklearn.ensemble import RandomForestClassifier
         from sklearn.model_selection import train_test_split
-        from sklearn.metrics import accuracy_score, f1_score
+        from sklearn.metrics import (accuracy_score, f1_score, confusion_matrix,
+                                      precision_score, recall_score)
     except ImportError:
         return {"ok": False, "message": "scikit-learn is required -- pip install scikit-learn joblib"}
 
@@ -449,8 +450,14 @@ def train_model(min_samples: int = 50) -> dict:
     clf = _make_clf()
     clf.fit(X_train, y_train)
     y_pred = clf.predict(X_test)
-    accuracy = float(accuracy_score(y_test, y_pred))
-    f1 = float(f1_score(y_test, y_pred))
+    accuracy  = float(accuracy_score(y_test, y_pred))
+    f1        = float(f1_score(y_test, y_pred))
+    precision = float(precision_score(y_test, y_pred, zero_division=0))
+    recall    = float(recall_score(y_test, y_pred, zero_division=0))
+    # Rows/cols ordered [0, 1] = [non-peak, peak] regardless of which labels
+    # are actually present in y_test, so the UI can always index it as
+    # cm[actual][predicted] without checking clf.classes_ itself.
+    cm = confusion_matrix(y_test, y_pred, labels=[0, 1]).tolist()
 
     # Hold-out split above is only to report an honest accuracy/F1 estimate;
     # the deployed model is refit on all available labeled data.
@@ -466,6 +473,10 @@ def train_model(min_samples: int = 50) -> dict:
         "model_type": "RandomForestClassifier",
         "holdout_accuracy": round(accuracy, 4),
         "holdout_f1": round(f1, 4),
+        "holdout_precision": round(precision, 4),
+        "holdout_recall": round(recall, 4),
+        "holdout_confusion_matrix": cm,
+        "holdout_n_test": int(len(y_test)),
     }
     MLPeakModel(clf_final, meta).save()
 
@@ -474,4 +485,6 @@ def train_model(min_samples: int = 50) -> dict:
         "message": f"Trained on {len(y)} labeled candidates from {len(files)} file(s).",
         "n_files": len(files), "n_samples": int(len(y)),
         "accuracy": accuracy, "f1": f1,
+        "precision": precision, "recall": recall,
+        "confusion_matrix": cm, "n_test": int(len(y_test)),
     }

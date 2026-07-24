@@ -79,7 +79,7 @@ class ThemeConfig:
             BORDER="#DCE0E5", BORDER2="#C7CDD4",
             TEXT="#1B222C", MUTED="#5B6472", LIGHT="#939DA8",
             RED="#D64545",  BLUE="#2D6CDF", GREEN="#2E9E5B", ORANGE="#E08A2A",
-            plot_signal="#2D6CDF", plot_rpeak="#2E9E5B",
+            plot_signal="#2D6CDF", plot_rpeak="#2E9E5B", plot_filtered="#6A1B9A",
             description="Clean, modern, restrained — the app's default look",
         ),
         "Dark": dict(
@@ -88,7 +88,7 @@ class ThemeConfig:
             BORDER="#2B3138", BORDER2="#3A4149",
             TEXT="#E7EAEE", MUTED="#9BA5B2", LIGHT="#656E79",
             RED="#E5695F",  BLUE="#5B8DF5", GREEN="#4CBA7C", ORANGE="#E8A552",
-            plot_signal="#5B8DF5", plot_rpeak="#4CBA7C",
+            plot_signal="#5B8DF5", plot_rpeak="#4CBA7C", plot_filtered="#9125D2",
             description="The same design, low-light",
         ),
     }
@@ -312,6 +312,22 @@ _EXTENDED_PALETTE_BASE: "dict[str, str]" = {
 }
 
 
+# Type-only declarations (no assignment -- a no-op at runtime) so static
+# analyzers can resolve `from ecg.ui.theme import BLUE_DARK` etc. across
+# every importing file. The real string values are still set exactly as
+# before, dynamically, by _apply_extended_palette()'s globals().update()
+# below; this just gives that dynamic write a declared type to attach to,
+# closing the pyright/Pylance "unknown import symbol" blind spot documented
+# on _apply_extended_palette() without changing any runtime behaviour.
+BLUE_DARK: str; BLUE_HOVER: str; BLUE_MID: str; BLUE_DEEP: str
+PURPLE: str; PURPLE_DARK: str; PURPLE_LIGHT: str
+PINK: str; TEAL: str; TEAL_DARK: str; CYAN: str; CYAN_BRIGHT: str
+GREEN_DARK: str; GREEN_MID: str
+ORANGE_DARK: str; ORANGE_DEEP: str; AMBER: str; AMBER_DARK: str
+RED_DARK: str; RED_MID: str; RED_LIGHT: str
+CORAL: str; NAVY: str; GRAY: str; GRAY_LIGHT: str
+
+
 def _adapt_for_mode(hex_val: str, is_dark: bool) -> str:
     """Lighten an extended-palette colour for dark mode; unchanged in light.
 
@@ -411,7 +427,8 @@ def _make_plot_theme(tc: "ThemeConfig") -> "dict[str, str]":
             muted=tc._colors.get("MUTED","#BEC7D8"),
             border=tc._colors.get("BORDER2","#5E81AC"),
             signal=tc._colors.get("plot_signal", "#88C0D0"),
-            raw=tc._colors.get("BORDER2", "#6272A4"),
+            raw=tc._colors.get("BLUE", "#5B8DF5"),
+            filtered=tc._colors.get("plot_filtered", "#9125D2"),
             rpeak_ok=tc._colors.get("plot_rpeak", "#A3BE8C"),
             rpeak_bad=tc._colors.get("MUTED", "#7D8590"),
             threshold=tc._colors.get("RED", "#BF616A"),
@@ -425,7 +442,8 @@ def _make_plot_theme(tc: "ThemeConfig") -> "dict[str, str]":
             muted=tc._colors.get("MUTED","#64748B"),
             border=tc._colors.get("BORDER2","#B0B7C3"),
             signal=tc._colors.get("plot_signal", "#1A56DB"),
-            raw=tc._colors.get("BORDER2", "#90A4AE"),
+            raw=tc._colors.get("BLUE", "#2D6CDF"),
+            filtered=tc._colors.get("plot_filtered", "#6A1B9A"),
             rpeak_ok=tc._colors.get("plot_rpeak", "#1B5E20"),
             rpeak_bad=tc._colors.get("BORDER2", "#B0B7C3"),
             threshold=tc._colors.get("RED", "#C62828"),

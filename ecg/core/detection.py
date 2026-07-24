@@ -2417,8 +2417,20 @@ def classify_arrhythmias(
     brady_pct:       float = 20.0,
     min_brady_beats: int   = 10,
     progress_cb:     Optional[Callable[[int, str], None]] = None,
+    pr_ms:           "Optional[np.ndarray]" = None,
 ) -> list[ArrhythmiaEvent]:
-    """Rule-based arrhythmia classification for mouse ECG."""
+    """Rule-based arrhythmia classification for mouse ECG.
+
+    pr_ms : optional per-beat PR interval (ms), same length and order as
+        rpeaks (i.e. pr_ms[i] is the PR interval measured at rpeaks[i]),
+        typically sourced from analyse_intervals()'s output. When provided,
+        enables sustained-PR-prolongation detection ("av_delay" kind) --
+        see the caller for the alignment safety check, since this function
+        trusts positional correspondence and does not re-verify it.
+        When None (Interval delineation hasn't been run), AV-delay
+        detection is silently skipped -- every other event kind is
+        unaffected, matching this function's behaviour before pr_ms existed.
+    """
     def _prog(pct: int, msg: str) -> None:
         if progress_cb:
             progress_cb(pct, msg)
@@ -2471,7 +2483,7 @@ def classify_arrhythmias(
         events.append(ArrhythmiaEvent(
             kind=kind,
             label=f"{arrow}{abs(delta):.0f}% vs baseline "
-                  f"({baseline_hr:.0f}\u2192{hr_m:.0f} bpm)  {run_len} batt.",
+                  f"({baseline_hr:.0f}\u2192{hr_m:.0f} bpm)  {run_len} beats",
             t_start=float(t_peaks[run_start]),
             t_end=float(t_peaks[min(run_end, len(t_peaks) - 1)]),
             n_beats=run_len, hr_mean=hr_m, rr_mean=float(rr_seg.mean()),
@@ -2548,9 +2560,50 @@ def classify_arrhythmias(
                 ))
 
     _find_runs_generic(esv_mask, "esv_run",
-                       "Salve ESV potentielle — {n} batt. ({hr:.0f} bpm)", "alert")
+                       "Potential ESV run — {n} beats ({hr:.0f} bpm)", "alert")
 
     _prog(70, "Pauses/ESV runs found…")
+
+    # AV conduction delay -- only possible when per-beat PR data was passed
+    # in (see this function's docstring). pr_ms is indexed like rpeaks
+    # (length n+1); slice to n and treat pr_ms[i] as the PR measured at the
+    # LEADING beat of RR-interval i, matching every other run-detection mask
+    # in this function (brady_ind, tachy_ind, esv_mask all index by interval,
+    # not by beat).
+    if pr_ms is not None and ctx is not None and len(pr_ms) == len(rpeaks):
+        pr_arr = np.asarray(pr_ms, dtype=float)[:n]
+        pr_hi  = ctx.pr_hi
+        av_mask = np.isfinite(pr_arr) & (pr_arr > pr_hi)
+
+        def _emit_av(run_start: int, run_end: int) -> None:
+            run_len = run_end - run_start
+            if run_len < min_brady_beats:
+                return
+            pr_seg = pr_arr[run_start:run_end]
+            pr_seg = pr_seg[np.isfinite(pr_seg)]
+            if len(pr_seg) == 0:
+                return
+            rr_seg = rr_ms[run_start:run_end]
+            events.append(ArrhythmiaEvent(
+                kind="av_delay",
+                label=(f"Sustained PR prolongation — {run_len} beats "
+                       f"(PR {float(pr_seg.mean()):.0f} ms, ref ≤{pr_hi:.0f} ms)"),
+                t_start=float(t_peaks[run_start]),
+                t_end=float(t_peaks[min(run_end, len(t_peaks) - 1)]),
+                n_beats=run_len,
+                hr_mean=float(60_000 / rr_seg.mean()) if len(rr_seg) else 0.0,
+                rr_mean=float(rr_seg.mean()) if len(rr_seg) else 0.0,
+                severity="warning",
+            ))
+
+        in_run = False; run_start = 0
+        for i, cond in enumerate(av_mask):
+            if cond and not in_run:   in_run = True; run_start = i
+            elif not cond and in_run: _emit_av(run_start, i); in_run = False
+        if in_run:
+            _emit_av(run_start, n)
+
+        _prog(80, "AV conduction delay checked…")
 
     WIN_CV = 7; i = 0
     while i <= n - WIN_CV:
@@ -2567,7 +2620,7 @@ def classify_arrhythmias(
             if not overlap:
                 events.append(ArrhythmiaEvent(
                     kind="irregular_run",
-                    label=f"Irrégularité RR — {WIN_CV} batt. (CV={cv:.0%})",
+                    label=f"RR irregularity — {WIN_CV} beats (CV={cv:.0%})",
                     t_start=t0, t_end=t1, n_beats=WIN_CV,
                     hr_mean=float(60_000 / seg.mean()), rr_mean=float(seg.mean()),
                     severity="info",
@@ -2603,5 +2656,5 @@ def classify_arrhythmias(
         sum(1 for e in merged if e.kind == "irregular_run"),
         baseline_hr, context_key,
     )
-    _prog(100, "Arrhythmia classification done")
+    _prog(100, "Abnormal-event classification done")
     return merged

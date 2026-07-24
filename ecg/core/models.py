@@ -7,6 +7,7 @@ Nothing in this module may import from ecg.ui — it is UI-free by design.
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 from typing import Any, Optional, TypedDict, TYPE_CHECKING
 
@@ -174,7 +175,7 @@ class ContextRanges:
 # Context key → ContextRanges
 EXPERIMENTAL_CONTEXTS: "dict[str, ContextRanges]" = {
     "telemetry_awake": ContextRanges(
-        label="Télémétrie — souris éveillée",
+        label="Telemetry — awake mouse",
         description=(
             "Souris non contrainte, implant télémétriques. Condition de référence. "
             "HR 450–650 bpm, VFC maximale, tonus vagal élevé. "
@@ -219,7 +220,7 @@ EXPERIMENTAL_CONTEXTS: "dict[str, ContextRanges]" = {
         qtc_lo=38,   qtc_hi=118,
     ),
     "ketamine_xylazine": ContextRanges(
-        label="Kétamine / Xylazine",
+        label="Ketamine / Xylazine",
         description=(
             "Anesthésie injectable. Bradycardie marquée, bloc AV fréquent, "
             "QT allongé. HR 200–380 bpm. VFC quasi-abolie. "
@@ -241,7 +242,7 @@ EXPERIMENTAL_CONTEXTS: "dict[str, ContextRanges]" = {
         qtc_lo=45,   qtc_hi=130,
     ),
     "surface_electrodes": ContextRanges(
-        label="Électrodes de surface",
+        label="Surface electrodes",
         description=(
             "Souris contrainte ou légèrement sédatée, électrodes cutanées. "
             "Signal plus bruité, amplitude variable. HR 300–550 bpm selon sédation. "
@@ -407,19 +408,64 @@ SESSION_VERSION = 6          # bump when the schema changes
 SESSION_SUFFIX  = ".ecgsession"   # file extension (content is now JSON)
 SESSION_DIR     = Path.home() / ".ecg_sessions"   # default cache folder
 
+# ── User-editable "custom" experimental context ────────────────────────────
+# EXPERIMENTAL_CONTEXTS above is a fixed set of 4 mouse contexts with no
+# user-editable option (e.g. for a specific strain/substrain whose normal
+# ranges differ from these). Rather than baking in more built-in presets
+# (which would just be more guessed numbers), this lets the user define
+# their own ContextRanges via the Parameters dialog; it plugs into the exact
+# same EXPERIMENTAL_CONTEXTS dict / _current_ref() mechanism every panel
+# already uses, so no downstream code needs to know "custom" is special.
+CUSTOM_CONTEXT_PATH = SESSION_DIR / "custom_context.json"
+
+
+def load_custom_context() -> "Optional[ContextRanges]":
+    """Load the user-defined custom ContextRanges from disk, if one was saved.
+
+    Returns None (not a default) when nothing has been saved yet, or the
+    saved data can't be read -- callers pick their own starting-point
+    defaults rather than this function fabricating physiological bounds.
+    """
+    if not CUSTOM_CONTEXT_PATH.exists():
+        return None
+    try:
+        with open(CUSTOM_CONTEXT_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return ContextRanges(**data)
+    except Exception:
+        return None
+
+
+def save_custom_context(ctx: "ContextRanges") -> None:
+    """Persist the user-defined custom ContextRanges to disk (survives restarts)."""
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CUSTOM_CONTEXT_PATH, "w", encoding="utf-8") as f:
+        json.dump(dataclasses.asdict(ctx), f, indent=2)
+
+
+_custom_ctx = load_custom_context()
+if _custom_ctx is not None:
+    EXPERIMENTAL_CONTEXTS["custom"] = _custom_ctx
+
 
 @dataclasses.dataclass
 class ArrhythmiaEvent:
     """A single classified arrhythmia episode."""
     kind:        str          # "bradycardia" | "tachycardia" | "pause" |
-                              # "esv_run" | "irregular_run"
-                              # NOTE: AV block is NOT a classified kind here --
-                              # classify_arrhythmias() only ever sees R-peak
-                              # timing (no P-wave/PR-interval data), so it
-                              # cannot distinguish AV block from a sinus pause.
-                              # Don't add "block_av" back without wiring in
-                              # per-beat PR-interval data (see analyse_intervals
-                              # in analysis.py / wave_template.py).
+                              # "esv_run" | "irregular_run" | "av_delay"
+                              # NOTE on "av_delay": classify_arrhythmias() only
+                              # sees R-peak timing by default, so a plain
+                              # "pause" is NOT distinguishable from AV block on
+                              # R-peaks alone. When per-beat PR-interval data
+                              # is passed in (from analyse_intervals()), a run
+                              # of sustained PR prolongation is flagged as
+                              # "av_delay" -- this is a heuristic conduction-
+                              # delay flag (median PR vs. the context's
+                              # reference range), NOT a definitive Mobitz I/
+                              # II/3rd-degree diagnosis: distinguishing those
+                              # would require seeing P waves on NON-conducted
+                              # beats (no following QRS to anchor on), which
+                              # this pipeline does not attempt.
     label:       str          # human-readable label
     t_start:     float        # seconds
     t_end:       float        # seconds

@@ -344,10 +344,10 @@ class ExportController:
 
         fig  = _mpl_figure.Figure(figsize=(11.7, 8.3), facecolor=bg)   # A4 landscape
         gs   = gridspec.GridSpec(
-            3, 2, figure=fig,
-            left=0.06, right=0.96, top=0.88, bottom=0.07,
-            hspace=0.45, wspace=0.30,
-            height_ratios=[2.2, 1.6, 1.0],
+            4, 2, figure=fig,
+            left=0.06, right=0.96, top=0.88, bottom=0.05,
+            hspace=0.55, wspace=0.30,
+            height_ratios=[2.0, 1.4, 1.3, 0.85],
         )
 
         # Title block
@@ -445,8 +445,95 @@ class ExportController:
                        ha="center", va="center", color=mut, fontsize=9,
                        transform=ax_rr.transAxes)
 
+        # Panel E — HRV radar (row 2, left) -- same normalization as the
+        # Frequency panel's radar chart (plot_controller.py plot_radar):
+        # each axis 0=ref-lo, 1=ref-hi against ITS OWN reference range, not
+        # min-maxed against each other. Duplicated here rather than shared
+        # because plot_radar() is written against the CanvasSlot draw-fn
+        # callback convention, not a plain fig -- matches this file's
+        # existing pattern of its own independent metric-status logic
+        # (_row() above) rather than reusing plot_hrv_tables()'s.
+        ax_radar = fig.add_subplot(gs[2, 0], polar=True)
+        ax_radar.set_facecolor(bg)
+        _RADAR_SPECS = [
+            ("SDNN",   td,  "HRV_SDNN",   "RR_SDNN"),
+            ("RMSSD",  td,  "HRV_RMSSD",  "RR_RMSSD"),
+            ("pNN6",   td,  "HRV_pNN6",   "RR_pNN6"),
+            ("LF",     fd,  "HRV_LFn",    "LF_pct"),
+            ("HF",     fd,  "HRV_HFn",    "HF_pct"),
+            ("LF/HF",  fd,  "HRV_LFHF",   "LFHF"),
+            ("SD1",    nl,  "HRV_SD1",    "SD1"),
+            ("SD2",    nl,  "HRV_SD2",    "SD2"),
+            ("SampEn", nl,  "HRV_SampEn", None),
+        ]
+        r_labels, r_norm = [], []
+        for label, df, col, ref_key in _RADAR_SPECS:
+            if df is None or df.empty or col not in df.columns:
+                continue
+            try:
+                v = float(df[col].values[0])
+            except Exception:
+                continue
+            if not np.isfinite(v):
+                continue
+            if col in ("HRV_LFn", "HRV_HFn"):
+                v *= 100.0
+            lo, hi = app._current_ref(ref_key) if ref_key is not None else (0.5, 2.5)
+            span = (hi - lo) or 1e-9
+            r_labels.append(label)
+            r_norm.append((v - lo) / span)
+        if len(r_labels) >= 3:
+            n_ax = len(r_labels)
+            angles = np.linspace(0, 2 * np.pi, n_ax, endpoint=False).tolist()
+            v_closed = r_norm + [r_norm[0]]
+            a_closed = angles + angles[:1]
+            y_lo = min(0.0, min(r_norm) - 0.05)
+            y_hi = max(1.0, max(r_norm) + 0.05)
+            ax_radar.fill(a_closed, [1.0] * (n_ax + 1), color=GREEN_MID, alpha=0.06, zorder=0)
+            ax_radar.plot(a_closed, v_closed, color=RED_MID, lw=1.3, zorder=3)
+            ax_radar.fill(a_closed, v_closed, color=RED_MID, alpha=0.15, zorder=2)
+            ax_radar.set_thetagrids(np.degrees(angles), r_labels, color=fg, fontsize=6.5)
+            ax_radar.set_ylim(y_lo, y_hi)
+            ax_radar.set_yticks([0.0, 0.5, 1.0])
+            ax_radar.set_yticklabels(["lo", "mid", "hi"], color=mut, fontsize=5.5)
+            ax_radar.grid(color=mut, alpha=0.3)
+            ax_radar.spines["polar"].set_color(mut)
+        else:
+            ax_radar.axis("off")
+            ax_radar.text(0.5, 0.5, "Not enough metrics for a radar profile",
+                          ha="center", va="center", color=mut, fontsize=8,
+                          transform=ax_radar.transAxes)
+        ax_radar.set_title("HRV profile (ref. lo–hi per metric)", loc="left",
+                           fontsize=9, color=fg, pad=4)
+
+        # Panel F — Abnormal-events summary (row 2, right)
+        ax_arr = fig.add_subplot(gs[2, 1])
+        ax_arr.set_facecolor(bg)
+        ax_arr.axis("off")
+        ax_arr.set_title("Abnormal events", loc="left", fontsize=9, color=fg, pad=4)
+        events = getattr(app.analysis, "arrhythmia_events", None) or []
+        if not events:
+            ax_arr.text(0.0, 0.85, "None classified in this session\n"
+                                    "(run Abnormal Events tab to populate)",
+                        fontsize=7.5, color=mut, transform=ax_arr.transAxes, va="top")
+        else:
+            by_kind: "dict[str, int]" = {}
+            for ev in events:
+                by_kind[ev.kind] = by_kind.get(ev.kind, 0) + 1
+            y = 0.92
+            ax_arr.text(0.0, y, f"{len(events)} episode(s) total",
+                        fontsize=8, color=fg, fontweight="bold",
+                        transform=ax_arr.transAxes, va="top")
+            y -= 0.16
+            for kind, count in sorted(by_kind.items(), key=lambda kv: -kv[1]):
+                ax_arr.text(0.0, y, f"  {kind.replace('_', ' ').title()}: {count}",
+                            fontsize=7.5, color=mut, transform=ax_arr.transAxes, va="top")
+                y -= 0.13
+                if y < 0:
+                    break
+
         # Panel D — Context reference reminder (bottom, full width)
-        ax_ref = fig.add_subplot(gs[2, :])
+        ax_ref = fig.add_subplot(gs[3, :])
         ax_ref.set_facecolor(bg)
         ax_ref.axis("off")
         if ctx:
@@ -493,7 +580,7 @@ class ExportController:
                  HR distribution, RR distribution, Beat morphology quality,
                  RR asymmetry / Porta breakdown, Segment comparison (A vs B),
                  Metadata
-        OneWay   ECG intervals per beat, Arrhythmia episode table
+        OneWay   ECG intervals per beat, Abnormal-event episode table
         """
         app = self.app
         if app.analysis.results is None:
@@ -606,10 +693,10 @@ class ExportController:
             messagebox.showerror("Export failed", str(exc))
 
     def export_arrhythmia_pdf(self) -> None:
-        """Export a PDF with one annotated ECG strip per arrhythmia episode."""
+        """Export a PDF with one annotated ECG strip per abnormal-event episode."""
         app = self.app
         if not app.analysis.arrhythmia_events:
-            messagebox.showwarning("No arrhythmias", "Run arrhythmia classification first.")
+            messagebox.showwarning("No abnormal events", "Run abnormal-event classification first.")
             return
         if app.signal.filtered is None or app.signal.time is None or app.signal.fs is None:
             messagebox.showwarning("No signal", "No ECG signal loaded.")
@@ -618,8 +705,8 @@ class ExportController:
         path = filedialog.asksaveasfilename(
             defaultextension=".pdf",
             filetypes=[("PDF", "*.pdf"), ("All", "*.*")],
-            initialfile=f"{sub}_arrhythmias.pdf",
-            title="Export arrhythmia strips as PDF",
+            initialfile=f"{sub}_abnormal_events.pdf",
+            title="Export abnormal-event strips as PDF",
         )
         if not path:
             return
@@ -633,7 +720,7 @@ class ExportController:
         evts = app.analysis.arrhythmia_events
         WIN  = 6.0   # seconds per strip
 
-        app._set_status("Building arrhythmia PDF…", ORANGE)
+        app._set_status("Building abnormal-event PDF…", ORANGE)
         try:
             with PdfPages(path) as pdf:
                 for ev in evts:
@@ -671,6 +758,6 @@ class ExportController:
                     pdf.savefig(fig, facecolor=fig.get_facecolor())
                     _plt.close(fig)
             app._set_status(
-                f"Arrhythmia PDF saved → {os.path.basename(path)}", GREEN)
+                f"Abnormal-event PDF saved → {os.path.basename(path)}", GREEN)
         except Exception as exc:
             messagebox.showerror("PDF export failed", str(exc))
