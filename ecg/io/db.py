@@ -20,6 +20,8 @@ Schema (single table):
         session_path TEXT,               -- path to JSON sidecar payload
         verified_for_training INTEGER DEFAULT 0,  -- 1 = usable as ML training data
         project_name TEXT    DEFAULT '', -- user-entered cohort/study label
+        rr_sparkline TEXT    DEFAULT '', -- JSON array, downsampled RR_ms series
+                                          -- for the Recent-recordings sparkline
     )
 
 The registry lives at SESSION_DIR / "ecg_registry.db".
@@ -60,7 +62,8 @@ CREATE TABLE IF NOT EXISTS recordings (
     notes        TEXT    NOT NULL DEFAULT '',
     session_path TEXT    NOT NULL DEFAULT '',
     verified_for_training INTEGER NOT NULL DEFAULT 0,
-    project_name TEXT    NOT NULL DEFAULT ''
+    project_name TEXT    NOT NULL DEFAULT '',
+    rr_sparkline TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_fp ON recordings(filepath);
 CREATE INDEX IF NOT EXISTS idx_saved ON recordings(saved_at DESC);
@@ -93,6 +96,12 @@ def _conn() -> sqlite3.Connection:
         try:
             con.execute(
                 "ALTER TABLE recordings ADD COLUMN project_name "
+                "TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            con.execute(
+                "ALTER TABLE recordings ADD COLUMN rr_sparkline "
                 "TEXT NOT NULL DEFAULT ''")
         except sqlite3.OperationalError:
             pass
@@ -132,6 +141,7 @@ def upsert_recording(
     notes: str = "",
     verified_for_training: bool = False,
     project_name: str = "",
+    rr_sparkline: "Optional[list[float]]" = None,
 ) -> None:
     """Insert or update a recording row with optional stats summary.
 
@@ -149,18 +159,26 @@ def upsert_recording(
     *verified_for_training* follows the same plain-overwrite rule -- the
     caller always passes the current checkbox state, so unmarking a
     previously verified file and saving correctly clears the flag here too.
+
+    *rr_sparkline* is a small (already-downsampled, ~200 points max) RR_ms
+    series, JSON-encoded and stored alongside the row so the Recent-
+    recordings popup can draw its sparkline directly from this row instead
+    of re-opening and deserializing the full .ecgsession JSON sidecar per
+    row just to extract one column (see ecg.io.session.load_rr_series,
+    still used as a fallback for rows saved before this column existed).
     """
     stem = Path(filepath).stem
     now  = datetime.now().isoformat()
     s    = stats or {}
+    spark_json = json.dumps(rr_sparkline) if rr_sparkline else ""
     try:
         with _open() as con:
             con.execute("""
                 INSERT INTO recordings
                     (filepath, stem, fingerprint, saved_at, duration_s, n_peaks,
                      hr_mean, sdnn, rmssd, notes, session_path, verified_for_training,
-                     project_name)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                     project_name, rr_sparkline)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(filepath) DO UPDATE SET
                     fingerprint  = excluded.fingerprint,
                     saved_at     = excluded.saved_at,
@@ -172,12 +190,13 @@ def upsert_recording(
                     session_path = excluded.session_path,
                     notes        = excluded.notes,
                     verified_for_training = excluded.verified_for_training,
-                    project_name = excluded.project_name
+                    project_name = excluded.project_name,
+                    rr_sparkline = excluded.rr_sparkline
             """, (filepath, stem, fingerprint, now,
                   s.get("duration_s"), s.get("n_peaks"),
                   s.get("hr_mean"), s.get("sdnn"), s.get("rmssd"),
                   notes, session_path, int(verified_for_training),
-                  project_name))
+                  project_name, spark_json))
     except Exception as exc:
         log.warning("db.upsert_recording failed: %s", exc)
 

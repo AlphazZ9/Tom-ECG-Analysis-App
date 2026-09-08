@@ -36,7 +36,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 from scipy.signal import find_peaks
@@ -50,7 +50,19 @@ log = logging.getLogger("ecg")
 
 MODEL_PATH: Path = Path.home() / ".ecg_ml_detector.joblib"
 META_PATH:  Path = Path.home() / ".ecg_ml_detector.json"
+# One-deep rollback copy of whatever was deployed before the last retrain --
+# see MLPeakModel.save().
+MODEL_BACKUP_PATH: Path = Path.home() / ".ecg_ml_detector.joblib.bak"
+META_BACKUP_PATH:  Path = Path.home() / ".ecg_ml_detector.json.bak"
 TRAINING_DATA_DIR: Path = SESSION_DIR / "ml_training"
+
+# In-process cache for MLPeakModel.load(), keyed on MODEL_PATH's mtime.
+# Without this, every refresh_ml_status() call -- fired on the ML Detector
+# combobox selection, at startup, and after every Save Session -- pays a
+# full joblib unpickle of the trained estimator just to read two floats off
+# its meta dict. mtime-keyed rather than time-based so a retrain (which
+# rewrites MODEL_PATH via save()) still invalidates it correctly.
+_model_cache: "dict[str, Any]" = {"mtime": None, "model": None}
 
 # Candidate within this many ms of an accepted R-peak counts as a positive
 # training example.
@@ -207,21 +219,51 @@ class MLPeakModel:
     def save(self) -> None:
         import joblib
         MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(self.estimator, MODEL_PATH)
-        with open(META_PATH, "w", encoding="utf-8") as fh:
-            json.dump(self.meta, fh, indent=2)
+        # Keep whatever was previously deployed as a one-deep backup before
+        # overwriting it, so a regression from a bad retrain isn't a total
+        # loss -- it can be restored by hand from the .bak files.
+        backed_up = False
+        if MODEL_PATH.exists() and META_PATH.exists():
+            MODEL_PATH.replace(MODEL_BACKUP_PATH)
+            META_PATH.replace(META_BACKUP_PATH)
+            backed_up = True
+        try:
+            joblib.dump(self.estimator, MODEL_PATH)
+            with open(META_PATH, "w", encoding="utf-8") as fh:
+                json.dump(self.meta, fh, indent=2)
+        except Exception:
+            # The backup-then-write above isn't atomic: if the write fails
+            # partway through, MODEL_PATH/META_PATH would otherwise be left
+            # missing (already moved to .bak) while the new files are
+            # incomplete -- every load()/exists() caller would then report
+            # "no trained model" even though the previous one was fine.
+            # Restore it instead of leaving that hole.
+            if backed_up:
+                if MODEL_BACKUP_PATH.exists():
+                    MODEL_BACKUP_PATH.replace(MODEL_PATH)
+                if META_BACKUP_PATH.exists():
+                    META_BACKUP_PATH.replace(META_PATH)
+            raise
         log.info("MLPeakModel saved -> %s", MODEL_PATH)
 
     @classmethod
     def load(cls) -> "Optional[MLPeakModel]":
         if not MODEL_PATH.exists() or not META_PATH.exists():
+            _model_cache["mtime"] = None
+            _model_cache["model"] = None
             return None
         try:
+            mtime = MODEL_PATH.stat().st_mtime
+            if _model_cache["model"] is not None and _model_cache["mtime"] == mtime:
+                return _model_cache["model"]
             import joblib
             estimator = joblib.load(MODEL_PATH)
             with open(META_PATH, "r", encoding="utf-8") as fh:
                 meta = json.load(fh)
-            return cls(estimator, meta)
+            model = cls(estimator, meta)
+            _model_cache["mtime"] = mtime
+            _model_cache["model"] = model
+            return model
         except Exception as exc:
             log.warning("MLPeakModel.load failed: %s -- treating as untrained", exc)
             return None
@@ -449,6 +491,14 @@ def train_model(min_samples: int = 50) -> dict:
     except ImportError:
         return {"ok": False, "message": "scikit-learn is required -- pip install scikit-learn joblib"}
 
+    # Snapshot the currently-deployed model's hold-out stats (if any) before
+    # this run's .save() overwrites them, so the caller can show a
+    # before/after delta rather than silently replacing a possibly-better
+    # model with a worse one.
+    prev_model = MLPeakModel.load()
+    prev_accuracy = prev_model.meta.get("holdout_accuracy") if prev_model else None
+    prev_f1 = prev_model.meta.get("holdout_f1") if prev_model else None
+
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=0, stratify=y)
 
@@ -490,7 +540,7 @@ def train_model(min_samples: int = 50) -> dict:
     }
     MLPeakModel(clf_final, meta).save()
 
-    return {
+    result = {
         "ok": True,
         "message": f"Trained on {len(y)} labeled candidates from {len(files)} file(s).",
         "n_files": len(files), "n_samples": int(len(y)),
@@ -498,3 +548,7 @@ def train_model(min_samples: int = 50) -> dict:
         "precision": precision, "recall": recall,
         "confusion_matrix": cm, "n_test": int(len(y_test)),
     }
+    if prev_accuracy is not None:
+        result["previous_accuracy"] = prev_accuracy
+        result["previous_f1"] = prev_f1
+    return result

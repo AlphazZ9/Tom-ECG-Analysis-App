@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import colorsys
 import dataclasses
+import functools
 import json
 import logging
 import pickle
@@ -196,8 +197,19 @@ class ThemeConfig:
         return obj
 
 
+@functools.lru_cache(maxsize=1)
 def _detect_system_font() -> str:
-    """Pick the best available UI font for the current platform."""
+    """Pick the best available UI font for the current platform.
+
+    Memoized: font_family is deliberately NOT persisted to THEME_PATH (see
+    the comment in ThemeConfig.load()), so without this cache every
+    ThemeConfig() -- including one built fresh each time the Theme dialog
+    opens (dialogs.py's `self._working = ThemeConfig.load()`) -- spins up
+    and tears down a whole second Tk() interpreter purely to enumerate
+    fonts again. Caching in-process (not on disk) keeps the "always
+    re-detect, never carry forward a stale value" intent while paying the
+    cost once per run instead of once per ThemeConfig().
+    """
     import sys
     import tkinter as _tk
     import tkinter.font as _tkf

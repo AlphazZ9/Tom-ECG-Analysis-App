@@ -238,7 +238,7 @@ class ThemeDialog(ctk.CTkToplevel):
                       font=FONT_SIDEBAR_HDR, width=130, height=34,
                       command=self._save_default).pack(side="right", padx=(0, 6), pady=10)
         ctk.CTkButton(bar, text="Apply",
-                      fg_color=BLUE, hover_color=TEXT, text_color="white",
+                      fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
                       font=FONT_BTN_PRIMARY, width=100, height=34,
                       command=self._apply).pack(side="right", padx=(0, 6), pady=10)
 
@@ -334,6 +334,7 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         fs: float,
         candidates: list[dict],
         rr_min_ms: float = MouseECG.RR_MIN_MS,
+        window_beats: int = 11,
     ):
         super().__init__(parent)
         self.title("Artifact Review")
@@ -348,6 +349,7 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         self._fs         = fs
         self._candidates = [dict(c) for c in candidates]   # deep copy
         self._rr_min_ms  = rr_min_ms
+        self._window_beats = window_beats   # local-median window, for the info-panel help text
         self._idx        = 0      # current candidate index
         self._result     = None   # set when dialog closes
 
@@ -434,6 +436,19 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
             lbl.grid(row=row_i + 1, column=0, sticky="w", padx=20, pady=(0, 4))
             self._metric_labels[key] = lbl
 
+        # Short static explanation of the metrics above -- there was
+        # previously no in-dialog way to judge whether a deviation % is
+        # borderline or clearly artifactual.
+        ctk.CTkLabel(
+            info,
+            text=(f"Deviation = |RR − local median| ÷ local median, where "
+                  f"the local median is taken over the surrounding "
+                  f"{self._window_beats} beats.\n"
+                  f"Red > 30% deviation  ·  Orange ≤ 30%"),
+            font=FONT_HINT, text_color=MUTED, wraplength=200,
+            justify="left", anchor="w").grid(
+                row=12, column=0, sticky="w", padx=12, pady=(0, 8))
+
         # Decision indicator
         ctk.CTkFrame(info, height=1, fg_color=BORDER).grid(
             row=13, column=0, sticky="ew", padx=12, pady=8)
@@ -500,6 +515,10 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         self.lbl_summary = ctk.CTkLabel(
             nav, text="", font=FONT_SMALL, text_color=MUTED)
         self.lbl_summary.pack(side="left", padx=10)
+
+        ctk.CTkLabel(
+            nav, text="←→ navigate · K keep · R remove",
+            font=FONT_HINT, text_color=MUTED).pack(side="left", padx=10)
 
         ctk.CTkButton(
             nav, text="✓  Apply Decisions", width=150, height=36,
@@ -708,7 +727,9 @@ class AnnotationDialog(ctk.CTkToplevel):
 
     def __init__(self, parent, on_save: "Callable[[dict], None]",
                  existing: "Optional[dict]" = None,
-                 t_max: float = 1e6) -> None:
+                 t_max: float = 1e6,
+                 default_start: "Optional[float]" = None,
+                 default_end: "Optional[float]" = None) -> None:
         super().__init__(parent)
         self.title("Add annotation" if existing is None else "Edit annotation")
         self.resizable(False, False)
@@ -720,18 +741,24 @@ class AnnotationDialog(ctk.CTkToplevel):
         pad = dict(padx=12, pady=6)
 
         # ── Form grid ─────────────────────────────────────────────────────
+        # New annotations (no `existing`) prefill Start/End from the caller's
+        # default_start/default_end -- the currently visible Detection-view
+        # window -- so the common case (annotate what's on screen) needs no
+        # typing; editing an existing annotation still shows its own values.
         row = 0
         ctk.CTkLabel(self, text="Start (s):", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
         self._ent_start = ctk.CTkEntry(self, width=110)
-        self._ent_start.insert(0, str((existing or {}).get("t_start", "")))
+        start_val = (existing or {}).get("t_start", default_start)
+        self._ent_start.insert(0, "" if start_val is None else f"{start_val:.3f}")
         self._ent_start.grid(row=row, column=1, sticky="w", **pad)
 
         row += 1
         ctk.CTkLabel(self, text="End (s):", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
         self._ent_end = ctk.CTkEntry(self, width=110)
-        self._ent_end.insert(0, str((existing or {}).get("t_end", "")))
+        end_val = (existing or {}).get("t_end", default_end)
+        self._ent_end.insert(0, "" if end_val is None else f"{end_val:.3f}")
         self._ent_end.grid(row=row, column=1, sticky="w", **pad)
 
         row += 1
@@ -811,18 +838,23 @@ class AnnotationManagerDialog(ctk.CTkToplevel):
         self.geometry("660x420")
         self.resizable(True, True)
         self.grab_set()
+        self.configure(fg_color=PANEL)
         self._app = parent
 
         # ── Toolbar ───────────────────────────────────────────────────────
         bar = ctk.CTkFrame(self, fg_color="transparent")
         bar.pack(side="top", fill="x", padx=10, pady=(8, 4))
         ctk.CTkButton(bar, text="＋  Add annotation", width=140,
+                      fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
+                      font=FONT_BTN_SEC,
                       command=self._add).pack(side="left", padx=(0, 6))
         ctk.CTkButton(bar, text="✏  Edit selected", width=130,
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+                      font=FONT_BTN_SEC,
                       command=self._edit).pack(side="left", padx=2)
         ctk.CTkButton(bar, text="🗑  Delete selected", width=140,
                       fg_color=RED, hover_color=RED_DARK, text_color="white",
+                      font=FONT_BTN_SEC,
                       command=self._delete).pack(side="left", padx=(6, 0))
 
         # ── Scrollable list ───────────────────────────────────────────────
@@ -860,7 +892,7 @@ class AnnotationManagerDialog(ctk.CTkToplevel):
             var = tk.BooleanVar(value=False)
             self._row_vars.append(var)
             ctk.CTkCheckBox(row, text="", variable=var, width=30,
-                            checkbox_width=16, checkbox_height=16
+                            checkbox_width=16, checkbox_height=16, font=FONT_SMALL
                             ).pack(side="left", padx=(4, 0))
             dur = ann["t_end"] - ann["t_start"]
             for txt, w in [
@@ -879,13 +911,25 @@ class AnnotationManagerDialog(ctk.CTkToplevel):
 
     def _add(self) -> None:
         t_max = float(self._app._time[-1]) if self._app._time is not None else 1e6
+        # Prefill from the Detection view's currently visible window (nav_pos
+        # .. nav_pos+window) so the common case -- annotate what's on screen
+        # -- needs no typing. Falls back to no default when nothing is loaded.
+        default_start = default_end = None
+        if self._app._time is not None:
+            try:
+                win = float(self._app.ent_window.get())
+            except Exception:
+                win = 2.0
+            default_start = self._app.ui.nav_pos
+            default_end   = min(t_max, default_start + win)
         def _save(ann: dict) -> None:
             self._app._annotations.append(ann)
             self._app._session_dirty = True
             self._app._draw_detail()
             self._app._update_ann_count()
             self._refresh()
-        AnnotationDialog(self, on_save=_save, t_max=t_max)
+        AnnotationDialog(self, on_save=_save, t_max=t_max,
+                         default_start=default_start, default_end=default_end)
 
     def _selected_indices(self) -> "list[int]":
         return [i for i, v in enumerate(self._row_vars) if v.get()]
@@ -936,7 +980,9 @@ class PacingPeriodDialog(ctk.CTkToplevel):
 
     def __init__(self, parent, on_save: "Callable[[dict], None]",
                  existing: "Optional[dict]" = None,
-                 t_max: float = 1e6) -> None:
+                 t_max: float = 1e6,
+                 default_start: "Optional[float]" = None,
+                 default_end: "Optional[float]" = None) -> None:
         super().__init__(parent)
         self.title("Add pacing period" if existing is None else "Edit pacing period")
         self.resizable(False, False)
@@ -946,18 +992,23 @@ class PacingPeriodDialog(ctk.CTkToplevel):
 
         pad = dict(padx=12, pady=6)
 
+        # New periods (no `existing`) prefill Start/End from the caller's
+        # default_start/default_end -- the currently visible Detection-view
+        # window -- see AnnotationDialog above for the same convention.
         row = 0
         ctk.CTkLabel(self, text="Start (s):", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
         self._ent_start = ctk.CTkEntry(self, width=110)
-        self._ent_start.insert(0, str((existing or {}).get("t_start", "")))
+        start_val = (existing or {}).get("t_start", default_start)
+        self._ent_start.insert(0, "" if start_val is None else f"{start_val:.3f}")
         self._ent_start.grid(row=row, column=1, sticky="w", **pad)
 
         row += 1
         ctk.CTkLabel(self, text="End (s):", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
         self._ent_end = ctk.CTkEntry(self, width=110)
-        self._ent_end.insert(0, str((existing or {}).get("t_end", "")))
+        end_val = (existing or {}).get("t_end", default_end)
+        self._ent_end.insert(0, "" if end_val is None else f"{end_val:.3f}")
         self._ent_end.grid(row=row, column=1, sticky="w", **pad)
 
         row += 1
@@ -1022,17 +1073,22 @@ class PacingPeriodManagerDialog(ctk.CTkToplevel):
         self.geometry("580x420")
         self.resizable(True, True)
         self.grab_set()
+        self.configure(fg_color=PANEL)
         self._app = parent
 
         bar = ctk.CTkFrame(self, fg_color="transparent")
         bar.pack(side="top", fill="x", padx=10, pady=(8, 4))
         ctk.CTkButton(bar, text="＋  Add pacing period", width=150,
+                      fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
+                      font=FONT_BTN_SEC,
                       command=self._add).pack(side="left", padx=(0, 6))
         ctk.CTkButton(bar, text="✏  Edit selected", width=130,
                       fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+                      font=FONT_BTN_SEC,
                       command=self._edit).pack(side="left", padx=2)
         ctk.CTkButton(bar, text="🗑  Delete selected", width=140,
                       fg_color=RED, hover_color=RED_DARK, text_color="white",
+                      font=FONT_BTN_SEC,
                       command=self._delete).pack(side="left", padx=(6, 0))
 
         self._list_frame = ctk.CTkScrollableFrame(self, fg_color=CARD)
@@ -1068,7 +1124,7 @@ class PacingPeriodManagerDialog(ctk.CTkToplevel):
             var = tk.BooleanVar(value=False)
             self._row_vars.append(var)
             ctk.CTkCheckBox(row, text="", variable=var, width=30,
-                            checkbox_width=16, checkbox_height=16
+                            checkbox_width=16, checkbox_height=16, font=FONT_SMALL
                             ).pack(side="left", padx=(4, 0))
             dur = pp["t_end"] - pp["t_start"]
             for txt, w in [
@@ -1083,13 +1139,24 @@ class PacingPeriodManagerDialog(ctk.CTkToplevel):
 
     def _add(self) -> None:
         t_max = float(self._app._time[-1]) if self._app._time is not None else 1e6
+        # Prefill from the Detection view's currently visible window -- see
+        # AnnotationManagerDialog._add() for the same convention.
+        default_start = default_end = None
+        if self._app._time is not None:
+            try:
+                win = float(self._app.ent_window.get())
+            except Exception:
+                win = 2.0
+            default_start = self._app.ui.nav_pos
+            default_end   = min(t_max, default_start + win)
         def _save(period: dict) -> None:
             self._app._pacing_periods.append(period)
             self._app._session_dirty = True
             self._app._draw_detail()
             self._app._update_pacing_count()
             self._refresh()
-        PacingPeriodDialog(self, on_save=_save, t_max=t_max)
+        PacingPeriodDialog(self, on_save=_save, t_max=t_max,
+                           default_start=default_start, default_end=default_end)
 
     def _selected_indices(self) -> "list[int]":
         return [i for i, v in enumerate(self._row_vars) if v.get()]
@@ -1353,9 +1420,17 @@ class MLTrainingDialog(ctk.CTkToplevel):
         finally:
             self.btn_train.configure(state="normal", text="▶  Train Model")  # type: ignore[union-attr]
         if result.get("ok"):
+            prev_acc, prev_f1 = result.get("previous_accuracy"), result.get("previous_f1")
+            if prev_acc is not None:
+                # A previous model existed and was just overwritten (kept as
+                # a .bak on disk, see MLPeakModel.save) -- show the delta so
+                # a regression is visible immediately.
+                stats = (f"(accuracy {prev_acc:.2f}→{result['accuracy']:.2f}, "
+                         f"F1 {prev_f1:.2f}→{result['f1']:.2f} vs. previous model)")
+            else:
+                stats = f"(accuracy={result['accuracy']:.2f}, F1={result['f1']:.2f})"
             self._lbl_result.configure(
-                text=f"✓ {result['message']}  (accuracy={result['accuracy']:.2f}, "
-                     f"F1={result['f1']:.2f})",
+                text=f"✓ {result['message']}  {stats}",
                 text_color=GREEN)
         else:
             self._lbl_result.configure(text=f"✗ {result['message']}", text_color=ORANGE)
@@ -1474,20 +1549,41 @@ class CustomContextDialog(ctk.CTkToplevel):
 
     def _save(self) -> None:
         values: "dict[str, float]" = {}
+        bad_labels: "list[str]" = []
         for attr, label, _unit in self.FIELDS:
             e_lo, e_hi = self._entries[attr]
             try:
                 lo = float(e_lo.get()); hi = float(e_hi.get())
             except ValueError:
-                self._lbl_error.configure(text=f"⚠ {label}: enter numeric values.")
-                return
+                bad_labels.append(f"{label} (not numeric)")
+                continue
             if lo >= hi:
-                self._lbl_error.configure(text=f"⚠ {label}: low must be less than high.")
-                return
+                bad_labels.append(f"{label} (low ≥ high)")
+                continue
             values[f"{attr}_lo"] = lo
             values[f"{attr}_hi"] = hi
 
+        if bad_labels:
+            # Collect every failing row in one pass so a user with several
+            # mistakes sees all of them at once instead of fix-and-resave.
+            self._lbl_error.configure(text=f"⚠ Fix: {', '.join(bad_labels)}.")
+            return
+
         name = self._ent_name.get().strip() or "Custom"
+
+        # There is only ever one "custom" slot on disk (see class docstring)
+        # -- the Name field looks like it defines a distinct, named preset,
+        # so warn before silently destroying a differently-named one.
+        existing = EXPERIMENTAL_CONTEXTS.get("custom")
+        if existing is not None and existing.label != name:
+            if not messagebox.askyesno(
+                "Replace custom context",
+                f"There is only one custom context slot. Saving “{name}” "
+                f"will replace the existing one, “{existing.label}”, which "
+                f"will be lost. Continue?",
+                parent=self):
+                return
+
         ctx = ContextRanges(label=name, description="User-defined custom context.",
                             **values)
         try:
@@ -1731,14 +1827,16 @@ class CohortTrendsDialog(ctk.CTkToplevel):
         colors["Ungrouped"] = MUTED
 
         specs = [
-            ("hr_mean", "Heart rate (bpm)"),
-            ("sdnn",    "SDNN (ms)"),
-            ("rmssd",   "RMSSD (ms)"),
+            ("hr_mean", "Heart rate (bpm)", "HR"),
+            ("sdnn",    "SDNN (ms)",        "SDNN"),
+            ("rmssd",   "RMSSD (ms)",       "RMSSD"),
         ]
         axes = fig.subplots(3, 1, sharex=True)
-        for ax, (key, ylabel) in zip(axes, specs):
+        for ax, (key, ylabel, short) in zip(axes, specs):
+            n_present = 0
             for name, items in groups.items():
                 pts = [(dt, r[key]) for r, dt in items if r.get(key) is not None]
+                n_present += len(pts)
                 if not pts:
                     continue
                 xs, ys = zip(*pts)
@@ -1747,6 +1845,16 @@ class CohortTrendsDialog(ctk.CTkToplevel):
                     ax.plot(xs, ys, "-", color=col, alpha=0.5, lw=1.2, zorder=2)
                 ax.scatter(xs, ys, color=col, s=28, zorder=3, label=name,
                           edgecolors=PLOT["bg"], linewidths=0.6)
+            # Most existing registry rows predate SDNN/RMSSD being saved at
+            # all -- say so, instead of leaving a sparse plot that reads as
+            # a bug rather than old data waiting to be backfilled.
+            n_missing = len(rows) - n_present
+            if n_missing:
+                ax.text(0.99, 0.05,
+                        f"{short} missing for {n_missing} of {len(rows)} "
+                        "recordings — save session again to backfill",
+                        transform=ax.transAxes, ha="right", va="bottom",
+                        fontsize=7, color=PLOT["muted"], style="italic")
             ax.set_facecolor(PLOT["axes"])
             ax.set_ylabel(ylabel, color=PLOT["muted"], fontsize=9)
             ax.tick_params(colors=PLOT["muted"], labelsize=8)
@@ -1756,13 +1864,15 @@ class CohortTrendsDialog(ctk.CTkToplevel):
 
         # One shared legend on the top subplot -- the colour mapping is
         # identical across all three, repeating it three times would just
-        # be noise.
+        # be noise. Anchored above the axes (not "upper left" inside it) so
+        # it never overprints the earliest data points.
         handles, labels = axes[0].get_legend_handles_labels()
         if handles:
             by_label = dict(zip(labels, handles))
             axes[0].legend(by_label.values(), by_label.keys(),
-                          framealpha=0, loc="upper left", fontsize=7,
-                          ncol=min(4, len(by_label)))
+                          framealpha=0, loc="lower left",
+                          bbox_to_anchor=(0.0, 1.02, 1.0, 0.08), mode="expand",
+                          fontsize=7, ncol=min(4, len(by_label)))
 
         axes[-1].set_xlabel("Saved at", color=PLOT["muted"], fontsize=9)
         fig.autofmt_xdate(rotation=25)

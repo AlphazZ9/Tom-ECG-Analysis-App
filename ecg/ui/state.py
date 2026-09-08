@@ -65,6 +65,15 @@ class DetectionState:
     beat_corr: Optional[np.ndarray] = None
     beat_corr_peaks: Optional[np.ndarray] = None
     _beat_corr_for: Optional[np.ndarray] = None
+    corr_debounce_id: "str | None" = None       # beat-correlation recompute debounce handle
+
+    # Same identity-cache pattern for draw_detail()'s per-peak confidence
+    # alpha (plot_controller.py's _ensure_alpha_cache()) -- this used to be
+    # rebuilt from all_candidates/all_prominences (whole-recording arrays)
+    # with pure-Python dict/list work on every single redraw, including
+    # every 30ms mouse-hover tick in Edit mode.
+    rp_ok_alpha: Optional[np.ndarray] = None
+    _alpha_cache_for: Optional[np.ndarray] = None
 
     # Manual peak exclusion
     manual_excluded: set[int] = field(default_factory=set)   # sample indices excluded by user
@@ -130,6 +139,7 @@ class UIState:
     nav_pos: float = 0.0
     show_raw: bool = True                       # raw/filtered toggle
     rrhr_strip_visible: bool = True              # RR/HR/Quality sub-plot strip toggle
+    show_spike_markers: bool = True              # RR/HR tachogram spike-marker toggle
     left_panel_collapsed: bool = False           # left sidebar hide/show toggle
     right_panel_collapsed: bool = False          # right panel hide/show toggle
     # Filter preview (before/after overlay) -- computed on-demand for the
@@ -137,12 +147,20 @@ class UIState:
     # any detection state.
     filter_preview_on: bool = False
     thr_debounce_id: "str | None" = None        # slider debounce handle
+    resize_debounce_id: "str | None" = None     # window-resize debounce handle -- was
+                                                 # sharing thr_debounce_id, so a resize
+                                                 # mid-drag or a slider tick mid-resize
+                                                 # silently cancelled the OTHER feature's
+                                                 # pending job instead of both being honored
     hover_motion_cid: Optional[int] = None       # mpl event connection id
     hover_after_id: "str | None" = None          # motion debounce handle
     ov_drag_after_id: "str | None" = None        # minimap drag-to-scrub debounce handle
     scroll_sync_after_id: "str | None" = None    # detail scroll-zoom resync debounce handle
+    nav_key_after_id: "str | None" = None        # arrow-key repeat redraw debounce handle
+    arr_scroll_after_id: "str | None" = None     # Abnormal Events scroll-zoom resync debounce handle
     beat_nav_cid: Optional[int] = None           # mpl event ID for beat navigator
     rr_click_cid: Optional[int] = None           # mpl event connection id for RR click-to-navigate
+    rr_spike_times: Optional[np.ndarray] = None  # cached spike times from the last plot_rr(), for the Detection-tab stepper
     hrv_current_view: str = "RR / HR"
     ctx_keys: list = field(default_factory=list)
     operation_start_time: Optional[float] = None

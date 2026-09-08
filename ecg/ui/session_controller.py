@@ -75,51 +75,71 @@ class SessionController:
         self.app.session.recent_files.insert(0, path)
         self.app.session.recent_files = self.app.session.recent_files[:8]
 
-    def try_restore_session(self, path: str) -> bool:
+    def try_restore_session(self, path: str) -> None:
         """If a saved session exists for *path*, offer to restore it.
 
-        Returns True if the session restoration was initiated (caller should
-        skip _preview).  The actual restore runs in a background thread via
-        _start_async so the UI stays responsive during signal reload + filtering.
+        Fully async, including the existence/deserialize check itself: even
+        just parsing a large previously-analyzed .ecgsession JSON (full
+        rr_df/beat_corr/peak_amps/intervals arrays reconstructed from plain
+        JSON lists) can take a noticeable fraction of a second to multiple
+        seconds, and this used to run synchronously on the main thread
+        BEFORE _start_async ever spun up a worker thread -- so opening any
+        file with a saved session blocked with zero progress feedback
+        before the "Restoring…" state even had a chance to appear. Now the
+        load_session() call itself is the worker; the Yes/No prompt and the
+        decision to restore vs. call load_raw_only() happen in its on_done
+        callback, on the main thread once the parse is complete. This
+        replaces the previous synchronous True/False return contract --
+        load_path() now always defers to this method for what happens next
+        (restore, or fall through to a raw load) instead of deciding it
+        inline based on a return value that's no longer available
+        synchronously.
         """
-        state = load_session(path)
-        if state is None:
-            self.update_session_ui(has_session=False)
-            return False
+        def _check_worker():
+            return load_session(path)
 
-        saved_at = state.get("saved_at", "unknown time")
-        n_beats  = state.get("n_beats", "?")
-        answer   = messagebox.askyesno(
-            "Session found",
-            f"A saved analysis was found for this file:\n\n"
-            f"  Saved:  {saved_at}\n"
-            f"  Beats:  {n_beats}\n\n"
-            f"Restore it?  (No = load raw signal — click Preview Detection to re-run)",
-            parent=self.app,
-        )
-        if not answer:
-            self.update_session_ui(has_session=True)
-            return False
+        def _check_done(state):
+            if state is None:
+                self.update_session_ui(has_session=False)
+                self.app._load_raw_only()
+                return
 
-        # ── Restauration asynchrone — le reload + _compute_preview_bundle peut
-        # prendre 3–10 s ──
-        # _restore_state_from_session est réellement découpée en deux :
-        #   _restore_session_worker() : partie lourde, pure — reload .mat +
-        #       _compute_preview_bundle — AUCUNE écriture sur self ni sur les
-        #       widgets Tkinter. Tourne dans le thread BG lancé par _start_async.
-        #   _on_restore_session_done(): toutes les écritures sur self et les
-        #       widgets (y compris _run_detection, _draw_detail, etc.).
-        #       Tourne sur le thread principal via after(0, …).
-        _state_snap = state
-        _saved_at   = saved_at
+            saved_at = state.get("saved_at", "unknown time")
+            n_beats  = state.get("n_beats", "?")
+            answer   = messagebox.askyesno(
+                "Session found",
+                f"A saved analysis was found for this file:\n\n"
+                f"  Saved:  {saved_at}\n"
+                f"  Beats:  {n_beats}\n\n"
+                f"Restore it?  (No = load raw signal — click Detect Peaks to re-run)",
+                parent=self.app,
+            )
+            if not answer:
+                self.update_session_ui(has_session=True)
+                self.app._load_raw_only()
+                return
+
+            # ── Restauration asynchrone — le reload + _compute_preview_bundle peut
+            # prendre 3–10 s ──
+            # _restore_state_from_session est réellement découpée en deux :
+            #   _restore_session_worker() : partie lourde, pure — reload .mat +
+            #       _compute_preview_bundle — AUCUNE écriture sur self ni sur les
+            #       widgets Tkinter. Tourne dans le thread BG lancé par _start_async.
+            #   _on_restore_session_done(): toutes les écritures sur self et les
+            #       widgets (y compris _run_detection, _draw_detail, etc.).
+            #       Tourne sur le thread principal via after(0, …).
+            self.app._start_async(
+                self.app.btn_preview, "Restoring…", "Restoring session…",
+                lambda: self.restore_session_worker(state),
+                lambda bundle: self.on_restore_session_done(bundle, saved_at),
+                pass_result=True,
+            )
 
         self.app._start_async(
-            self.app.btn_preview, "Restoring…", "Restoring session…",
-            lambda: self.restore_session_worker(_state_snap),
-            lambda bundle: self.on_restore_session_done(bundle, _saved_at),
+            self.app.btn_preview, "Checking for saved session…", "",
+            _check_worker, _check_done,
             pass_result=True,
         )
-        return True
 
     def restore_session_worker(self, state: dict) -> dict:
         """Background worker — MUST NOT write to self or touch any Tkinter widget.
@@ -177,6 +197,16 @@ class SessionController:
             "signal_bundle":    signal_bundle,
             "filter_params":    fp,
             "thresh_amp":       float(state.get("threshold", float(state.get("thresh_amp", 0.5)))),
+            # The slider FRACTION (0.01-2.0, apply_threshold()'s thresh_frac
+            # param) -- distinct from thresh_amp above, which is the
+            # DERIVED absolute amplitude (thresh_frac * local median
+            # prominence, can be e.g. 5.7). Sessions saved before this field
+            # existed only have thresh_amp under the "threshold" key, so
+            # fall back to the slider's own default (0.5) rather than
+            # re-running detection with an amplitude value in the fraction
+            # slot -- apply_threshold() would then accept almost no peaks
+            # (any prominence >= amplitude * median_prominence).
+            "thresh_frac":      float(state.get("threshold_frac", 0.5)),
             "manual_excluded":  set(int(x) for x in state.get("manual_excluded", [])),
             "manual_added":     set(int(x) for x in state.get("manual_added",    [])),
             "signal_inverted":  bool(state.get("signal_inverted", False)),
@@ -279,7 +309,18 @@ class SessionController:
             self.app._toggle_edit_mode()
 
         # ── Restore threshold slider and re-apply detection ──────────────
-        thr = self.app.detection.thresh_amp
+        # Pre-existing bug (found while verifying an unrelated fix, not
+        # something introduced this session): this used to read
+        # self.app.detection.thresh_amp -- the DERIVED absolute amplitude
+        # (e.g. 5.7) -- and feed it back in as if it were the slider
+        # fraction (0.01-2.0). Restoring a session therefore set the slider
+        # to a wildly out-of-range value and re-ran detection with
+        # apply_threshold()'s thresh_frac=5.7, which accepts essentially no
+        # peaks (prominence >= 5.7x the local median) -- every restored
+        # session silently ended up with 0 accepted peaks. bundle
+        # ["thresh_frac"] (see restore_session_worker) is the actual
+        # fraction that was on the slider when the session was saved.
+        thr = bundle["thresh_frac"]
         if self.app.sl_thr is not None:
             try:
                 self.app.sl_thr.set(float(thr))  # type: ignore[union-attr]
@@ -346,9 +387,8 @@ class SessionController:
 
         # ── Enable analysis buttons ──────────────────────────────────────
         self.app._set_save_session_enabled(True)
-        for btn_attr in ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl"):
-            if getattr(self.app, btn_attr, None) is not None:
-                getattr(self.app, btn_attr).configure(state="normal")
+        self.app._set_result_btns_enabled(
+            True, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl"))
 
         n_beats = len(self.app.detection.rpeaks_ok) if self.app.detection.rpeaks_ok is not None else 0
         self.app._set_status(
@@ -419,6 +459,10 @@ class SessionController:
             "saved_at":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "fs":              int(self.app.signal.fs),
             "threshold":       float(self.app.detection.thresh_amp),
+            # The actual slider fraction, saved separately from the derived
+            # amplitude above (see restore_session_worker's thresh_frac
+            # comment for why conflating the two broke session restore).
+            "threshold_frac":  float(self.app.sl_thr.get()) if self.app.sl_thr is not None else 0.5,
             "manual_excluded": list(self.app.detection.manual_excluded),
             "manual_added":    list(self.app.detection.manual_added),
             "no_filter_mode":  self.app.signal.no_filter_mode,
@@ -474,7 +518,7 @@ class SessionController:
             messagebox.showwarning("No file", "Open a file first.")
             return
         if self.app.signal.filtered is None or self.app.detection.rpeaks_ok is None:
-            messagebox.showwarning("Not ready", "Run Preview Detection first.")
+            messagebox.showwarning("Not ready", "Click Detect Peaks first.")
             return
 
         # Snapshot on the main thread rather than letting the worker read
@@ -535,7 +579,7 @@ class SessionController:
             messagebox.showwarning("No file", "Open a file first.")
             return
         if self.app.signal.filtered is None:
-            messagebox.showwarning("Not ready", "Run Preview Detection first.")
+            messagebox.showwarning("Not ready", "Click Detect Peaks first.")
             return
 
         state = self.collect_session_state()   # main-thread widget reads
@@ -572,6 +616,7 @@ class SessionController:
         if _DB_AVAILABLE:
             _prog(20, "Updating registry…")
             _stats: dict = {}
+            _rr_sparkline = None
             if self.app.analysis.results:
                 _rdf = self.app.analysis.results.get("rr_df")
                 # "hrv_time" is the results key used everywhere else in the
@@ -581,6 +626,21 @@ class SessionController:
                 _hrv = self.app.analysis.results.get("hrv_time")
                 if _rdf is not None and len(_rdf):
                     _stats["hr_mean"] = float(_rdf["HR_bpm"].mean())
+                    # Downsampled here (already on the background thread,
+                    # and rr_df is already in memory) so the Recent-
+                    # recordings popup can draw its sparkline straight from
+                    # this row instead of re-opening and deserializing the
+                    # full .ecgsession file per row. Same 200-point cap
+                    # make_sparkline() itself applies, done once at save
+                    # time rather than once per popup-open.
+                    if "RR_ms" in _rdf.columns:
+                        _rr_vals = _rdf["RR_ms"].to_numpy()
+                        _rr_vals = _rr_vals[np.isfinite(_rr_vals)]
+                        if len(_rr_vals) > 200:
+                            _idx = np.linspace(0, len(_rr_vals) - 1, 200).astype(int)
+                            _rr_vals = _rr_vals[_idx]
+                        if len(_rr_vals) >= 2:
+                            _rr_sparkline = [round(float(v), 2) for v in _rr_vals]
                 if _hrv is not None and "HRV_SDNN" in _hrv.columns:
                     _stats["sdnn"]  = float(_hrv["HRV_SDNN"].values[0])
                 if _hrv is not None and "HRV_RMSSD" in _hrv.columns:
@@ -597,6 +657,7 @@ class SessionController:
                 notes=self.app.session.recording_notes,
                 verified_for_training=self.app.session.verified_for_training,
                 project_name=project_name,
+                rr_sparkline=_rr_sparkline,
             )
 
         # ── ML training-data cache ─────────────────────────────────────
@@ -729,6 +790,7 @@ class SessionController:
         s["rrhr_strip_visible"] = self.app.ui.rrhr_strip_visible
         s["left_panel_collapsed"]  = self.app.ui.left_panel_collapsed
         s["right_panel_collapsed"] = self.app.ui.right_panel_collapsed
+        s["show_spike_markers"] = self.app.ui.show_spike_markers
         return s
 
     def restore_ui_state(self, s: dict) -> None:
@@ -807,6 +869,9 @@ class SessionController:
         saved_right_collapsed = bool(s.get("right_panel_collapsed", False))
         if saved_right_collapsed != self.app.ui.right_panel_collapsed:
             self.app._toggle_right_panel()
+        saved_show_spikes = bool(s.get("show_spike_markers", True))
+        if saved_show_spikes != self.app.ui.show_spike_markers:
+            self.app._toggle_spike_markers()
 
         # Restore experimental context
         ctx = s.get("exp_context", "telemetry_awake")

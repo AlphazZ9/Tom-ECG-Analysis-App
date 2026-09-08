@@ -192,6 +192,22 @@ def load_session(filepath: str) -> "Optional[dict]":
         return None
 
 
+def session_exists(filepath: str) -> bool:
+    """Cheap existence check for callers that only need a yes/no (e.g. a UI
+    status label), equivalent to ``load_session(filepath) is not None`` but
+    without the full JSON-parse-and-deserialize cost.
+
+    The file's fingerprint (size + mtime) is already baked into the
+    canonical session filename by _session_path(), so a plain ``exists()``
+    on that path already answers "is there a session cache for this exact
+    file state" -- the extra work load_session() does beyond that (parsing
+    the JSON body, checking the embedded version/fingerprint fields again)
+    only matters to callers that are about to actually use the loaded
+    state, not ones just deciding what a status label should say.
+    """
+    return _session_path(filepath).exists()
+
+
 def load_rr_series(filepath: str) -> "Optional[np.ndarray]":
     """Return the cached RR-interval series (ms, one value per beat) for
     *filepath*, or None if no session is cached or it has no results.

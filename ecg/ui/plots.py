@@ -152,7 +152,8 @@ class CanvasSlot:
     # ── construction ───────────────────────────────────────────────────────
 
     def __init__(self, parent: Any, width: float = 6, height: float = 4,
-                 toolbar: bool = True, yscale_bar: bool = False) -> None:
+                 toolbar: bool = True, yscale_bar: bool = False,
+                 placeholder: str = "Run analysis to display") -> None:
         self.frame = tk.Frame(parent, bg=PLOT["bg"], bd=0, highlightthickness=0)
         self.frame.pack(fill="both", expand=True)
 
@@ -161,6 +162,7 @@ class CanvasSlot:
         self._manual_ylim:      Optional[tuple]  = None   # (lo, hi) or None = auto
         self._yscale_bar:       bool             = yscale_bar
         self._yscale_cid:       Optional[int]    = None   # mpl event id
+        self._placeholder_text: str              = placeholder
 
         # ── Optional Y-scale bar (above canvas) ───────────────────────────
         if yscale_bar:
@@ -383,7 +385,7 @@ class CanvasSlot:
         self.fig.clear()
         ax = self.fig.add_subplot(111)
         ax.set_facecolor(PLOT["axes"])
-        ax.text(0.5, 0.5, "Run analysis to display",
+        ax.text(0.5, 0.5, self._placeholder_text,
                 ha="center", va="center", color=PLOT["muted"],
                 transform=ax.transAxes, fontsize=9)
         ax.set_xticks([])

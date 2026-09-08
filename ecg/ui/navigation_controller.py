@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from ecg.ui.theme import BLUE_DARK, BORDER, TEXT
+from ecg.ui.theme import AMBER, BLUE_DARK, BORDER, MUTED, TEXT
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
@@ -37,7 +37,17 @@ class NavigationController:
         self.navigate(direction)
 
     def navigate(self, direction: int) -> None:
-        """Shift the detail view left/right by 80 % of the window width."""
+        """Shift the detail view left/right by 80 % of the window width.
+
+        Bound to Left/Right (kb_navigate) which repeat continuously while
+        held, unlike every other rapid-fire input in this app (minimap
+        drag, threshold slider, scroll-zoom), which all debounce their
+        expensive redraw. nav_pos itself and the position entry update
+        immediately on every tick (cheap, so held-key feedback stays
+        instant); only the actual 3-canvas _draw_detail() is debounced, so
+        a burst of OS key-repeat ticks collapses into one redraw instead of
+        one per tick.
+        """
         app = self.app
         if app.signal.time is None or len(app.signal.time) == 0:
             return
@@ -50,7 +60,13 @@ class NavigationController:
         max_start  = float(app.signal.time[-1]) - win
         app.ui.nav_pos = max(0.0, min(max_start, app.ui.nav_pos + direction * win * 0.8))
         self.sync_nav_pos_entry()
-        app._draw_detail()
+        if app.ui.nav_key_after_id is not None:
+            app.after_cancel(app.ui.nav_key_after_id)
+        app.ui.nav_key_after_id = app.after(40, self._flush_nav_key_redraw)
+
+    def _flush_nav_key_redraw(self) -> None:
+        self.app.ui.nav_key_after_id = None
+        self.app._draw_detail()
 
     def navigate_big(self, direction: int) -> None:
         """Jump by 10× the current window width."""
@@ -108,6 +124,46 @@ class NavigationController:
         app.ui.nav_pos = max(0.0, min(max_start, t_target))
         self.sync_nav_pos_entry()
         app._draw_detail()
+
+    def step_spike(self, direction: int) -> None:
+        """Jump to the next/previous suspicious RR beat (HRV tab's spike list).
+
+        Walks ``app.ui.rr_spike_times``, the same array PlotController.plot_rr()
+        already computes for the tachogram's right-click-to-nearest-spike
+        behaviour, so working through several flagged beats no longer needs a
+        right-click on the HRV tab per beat.
+        """
+        app = self.app
+        spikes = app.ui.rr_spike_times
+        if spikes is None or len(spikes) == 0 or app.signal.time is None:
+            app._set_status("No suspicious beats to step through — run Analyze first", MUTED)
+            return
+        try:
+            win = float(app.ent_window.get())
+            if not (0 < win < 1e6):
+                win = 2.0
+        except (ValueError, TypeError):
+            win = 2.0
+        # Compare against the centre of the visible window, not its left
+        # edge (nav_pos) -- a jump always centres the target spike in the
+        # window (t_nav - win/2 below), so comparing against nav_pos itself
+        # would find that same spike again on every "next" press.
+        cur = app.ui.nav_pos + win / 2
+        later    = spikes[spikes > cur + 1e-6]
+        earlier  = spikes[spikes < cur - 1e-6]
+        if direction > 0:
+            t_nav = float(later.min()) if len(later) else float(spikes.min())
+        else:
+            t_nav = float(earlier.max()) if len(earlier) else float(spikes.max())
+        sig_dur = float(app.signal.time[-1])
+        app.ui.nav_pos = max(0.0, min(t_nav - win / 2, sig_dur - win))
+        self.sync_nav_pos_entry()
+        try:
+            app.tabs.set("📈 Detection")
+        except Exception as e:
+            log.debug("tabs.set Detection failed: %s", e)
+        app._draw_detail()
+        app._set_status(f"Navigation → spike at {t_nav:.3f} s", AMBER)
 
     def sync_nav_pos_entry(self) -> None:
         """Update the position entry widget to reflect ui.nav_pos."""

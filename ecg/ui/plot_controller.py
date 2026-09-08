@@ -40,7 +40,7 @@ from ecg.core.analysis import compute_beat_correlation
 from ecg.ui.plots import style_axes
 from ecg.ui.wave_editor import WaveTemplateEditor
 from ecg.ui.theme import (
-    PLOT, RED, AMBER, ORANGE, ORANGE_DARK,
+    THEME, PLOT, RED, AMBER, ORANGE, ORANGE_DARK,
     CYAN, BLUE, BLUE_DARK, BLUE_MID, PURPLE, TEAL, TEAL_DARK,
     BORDER2, RED_MID, MUTED, GRAY, GRAY_LIGHT, NAVY,
     GREEN, GREEN_DARK, PINK, AMBER_DARK, ARTIFACT_TYPE_COLOR,
@@ -56,6 +56,8 @@ log = logging.getLogger("ecg")
 class PlotController:
     def __init__(self, app: "ECGApp") -> None:
         self.app = app
+        # draw_overview()'s artist-mutation cache -- see that method.
+        self._ov_cache: "Optional[dict]" = None
 
     def draw_arr_detail(self) -> None:
         """Draw ECG strip for the selected arrhythmia event, with editable R peaks."""
@@ -155,7 +157,7 @@ class PlotController:
             if mask_added.any():
                 ax.scatter(rp_added[mask_added] / fs, sig_flt[rp_added[mask_added]],
                            color=CYAN, s=140, zorder=7,
-                           marker="*", linewidths=1.2, edgecolors="#006064",
+                           marker="*", linewidths=1.2, edgecolors=TEAL_DARK,
                            label="Added")
 
             ax.axhline(t_amp, color=PLOT.get("threshold",AMBER_DARK),
@@ -175,6 +177,19 @@ class PlotController:
         self.app._slots["arr_detail"].update(draw)
 
 
+    def _draw_overview_cursor(self, ax, t_start: float, t_end: float) -> list:
+        """Draw the current-window highlight (the scrubber's draggable
+        "cursor": a shaded span + two boundary lines) on *ax*.
+
+        Returns the created artists so draw_overview()'s fast path can
+        .remove() them before drawing the next position, instead of
+        clearing/rebuilding the whole figure for a cursor move.
+        """
+        span  = ax.axvspan(t_start, t_end, color=ORANGE, alpha=0.16, zorder=6, linewidth=0)
+        line1 = ax.axvline(t_start, color=ORANGE, lw=1.0, alpha=0.8, zorder=7)
+        line2 = ax.axvline(t_end, color=ORANGE, lw=1.0, alpha=0.8, zorder=7)
+        return [span, line1, line2]
+
     def draw_overview(self) -> None:
         """Full-recording scrubber strip above the detail plot.
 
@@ -185,6 +200,20 @@ class PlotController:
         Click/drag navigation is wired by NavigationController.on_overview_*,
         not here -- this method only renders. No-ops gracefully if no
         signal is loaded yet.
+
+        The STATIC parts of this plot (baseline, annotation/pacing marks,
+        axis/tick/spine setup) only depend on the recording and the
+        annotation/pacing lists, which change far less often than nav_pos
+        does -- they used to be torn down and rebuilt via a full
+        fig.clear() + add_subplot() + constrained-layout resolve on EVERY
+        navigation step (arrow key, Go, spike stepper, minimap drag tick).
+        Cached here (self._ov_cache, keyed on what actually invalidates
+        them) and only the 3 small cursor artists get removed/redrawn on an
+        ordinary nav-pos update -- far cheaper. Falls back to a full
+        rebuild whenever the cache key changes OR the cached axes is no
+        longer part of the slot's current figure (resize/theme-rebuild/
+        first draw), so a missed invalidation case degrades to the
+        (correct, just slower) old behaviour rather than drawing wrong.
         """
         time = self.app.signal.time
         if time is None:
@@ -199,27 +228,69 @@ class PlotController:
             win = 10.0
         t_start = self.app.ui.nav_pos
         t_end   = min(t_max, t_start + win)
+        _ann_snap  = list(self.app.analysis.annotations)
+        _pace_snap = list(self.app.analysis.pacing_periods)
 
+        slot = self.app._slots.get("overview")
+        if slot is None:
+            return
+
+        # Everything that affects the STATIC parts of this plot -- NOT
+        # t_start/t_end, which the fast path below handles on every call.
+        key = (
+            id(time), t_max,
+            tuple((a.get("t_start"), a.get("color")) for a in _ann_snap),
+            tuple(p.get("t_start") for p in _pace_snap),
+        )
+
+        cache = self._ov_cache
+        if cache is not None and cache["key"] == key and cache["ax"] in slot.fig.axes:
+            ax = cache["ax"]
+            for artist in cache["cursor_artists"]:
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+            cache["cursor_artists"] = self._draw_overview_cursor(ax, t_start, t_end)
+            slot.canvas.draw_idle()
+            return
+
+        # Full (re)build -- first draw, recording/annotations changed, or
+        # the cached axes was invalidated by something external (resize,
+        # theme rebuild).
         def draw(fig):
             ax = fig.add_subplot(111)
             style_axes(ax)
             ax.plot([float(time[0]), t_max], [0, 0], color=PLOT["signal"], lw=1.5, alpha=0.6, zorder=2)
 
-            # Current-window indicator -- the Audacity/Premiere "viewport" box,
-            # doubling as the scrubber's draggable cursor.
-            ax.axvspan(t_start, t_end, color=ORANGE, alpha=0.16, zorder=6, linewidth=0)
-            ax.axvline(t_start, color=ORANGE, lw=1.0, alpha=0.8, zorder=7)
-            ax.axvline(t_end, color=ORANGE, lw=1.0, alpha=0.8, zorder=7)
+            # Event marks -- annotation/pacing-period start times across the
+            # WHOLE recording, not just the current window. Cheap: a handful
+            # of axvline calls off lists already in memory, no per-sample
+            # signal work (that's what made the old envelope-plot minimap
+            # slow) -- gives the scrubber some context beyond a flat line.
+            for ann in _ann_snap:
+                ax.axvline(float(ann["t_start"]), color=ann.get("color", ORANGE_DARK),
+                           lw=1.4, alpha=0.7, zorder=4)
+            for pp in _pace_snap:
+                ax.axvline(float(pp["t_start"]), color=TEAL_DARK, lw=1.4, alpha=0.7, zorder=4)
+
+            cursor_artists = self._draw_overview_cursor(ax, t_start, t_end)
 
             ax.set_xlim(float(time[0]), t_max)
             ax.set_ylim(-1, 1)
             ax.set_yticks([])
-            ax.tick_params(axis="x", labelsize=7, colors=PLOT["muted"])
+            # Strip is short and wide -- a handful of adaptive ticks stay
+            # readable, where matplotlib's default spacing would crowd or
+            # get clipped entirely at this height.
+            ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=6))
+            ax.tick_params(axis="x", labelsize=8, colors=PLOT["muted"])
             ax.margins(x=0)
             for sp in ("top", "right", "left"):
                 ax.spines[sp].set_visible(False)
 
-        self.app._slots["overview"].update(draw)
+            self._ov_cache = {"ax": ax, "key": key, "cursor_artists": cursor_artists}
+
+        slot.update(draw)
 
     def draw_detail(self, t_start: float | None = None) -> None:
         """Draw the time-windowed detail view with peak markers.
@@ -298,6 +369,7 @@ class PlotController:
         rp_excl        = self.app.detection.rpeaks_manual_excl  if self.app.detection.rpeaks_manual_excl  is not None else np.array([])
         rp_added       = self.app.detection.rpeaks_manual_added if self.app.detection.rpeaks_manual_added is not None else np.array([])
         t_amp          = self.app.detection.thresh_amp
+        t_frac         = float(self.app.sl_thr.get()) if self.app.sl_thr is not None else 0.0
         edit_mode      = self.app.detection.edit_mode
         no_filter_mode  = self.app.signal.no_filter_mode
         signal_inverted = self.app.signal.inverted
@@ -349,22 +421,12 @@ class PlotController:
         # double-checking" beats directly in the trace instead of only via
         # the pass/fail threshold slider. Purely visual -- doesn't change
         # which peaks are accepted.
-        rp_ok_alpha = np.full(len(rp_ok), 0.95, dtype=float)
-        _cands = self.app.detection.all_candidates
-        _proms = self.app.detection.all_prominences
-        if (_cands is not None and _proms is not None
-                and len(_cands) == len(_proms) and len(_cands) and len(rp_ok)):
-            _prom_lookup = dict(zip(_cands.tolist(), _proms.tolist()))
-            _rp_proms = np.array([_prom_lookup.get(int(p), np.nan) for p in rp_ok])
-            _finite = np.isfinite(_rp_proms)
-            if _finite.sum() >= 2:
-                _lo, _hi = np.nanpercentile(_rp_proms[_finite], [5, 95])
-                if _hi > _lo:
-                    _norm = np.clip((_rp_proms - _lo) / (_hi - _lo), 0.0, 1.0)
-                    # Floor at 0.35 -- even the weakest accepted beat should
-                    # stay visible, just visually de-emphasised, not ghosted
-                    # to the point of looking like it isn't there at all.
-                    rp_ok_alpha = np.where(_finite, 0.35 + 0.60 * _norm, 0.95)
+        # Cached (see _ensure_alpha_cache) -- was rebuilt from whole-
+        # recording arrays with pure-Python dict/list work on every single
+        # redraw, including every hover tick in Edit mode.
+        rp_ok_alpha = self._ensure_alpha_cache()
+        if rp_ok_alpha is None or len(rp_ok_alpha) != len(rp_ok):
+            rp_ok_alpha = np.full(len(rp_ok), 0.95, dtype=float)
 
         primary_sig   = sig_raw   if show_raw else sig_flt
         primary_color = PLOT["raw"]      if show_raw else PLOT["filtered"]
@@ -373,7 +435,7 @@ class PlotController:
         if raw_only:
             label_mode = "Raw (not yet analysed)"
         elif no_filter_mode:
-            label_mode = "Unfiltered" if not show_raw else "Pre-norm baseline"
+            label_mode = "Unfiltered" if not show_raw else "Raw (no filter)"
         else:
             label_mode = "Raw" if show_raw else "Filtered"
 
@@ -458,7 +520,7 @@ class PlotController:
                 _rgba[:, 3] = rp_ok_alpha[mask_ok]
                 ax.scatter(rp_ok[mask_ok] / fs, sig_flt[rp_ok[mask_ok]],
                            color=_rgba, s=55, zorder=5,
-                           marker="o", label="Accepted")
+                           marker="o", label="Accepted (paler = lower confidence)")
             # Cross-method disagreement ring — hollow amber ring around an
             # accepted beat that 0 other detection methods confirmed
             # (Check Agreement). Drawn OVER the accepted dot (zorder 5.5)
@@ -472,7 +534,7 @@ class PlotController:
             if mask_added.any() and sig_flt is not None:
                 ax.scatter(rp_added[mask_added] / fs, sig_flt[rp_added[mask_added]],
                            color=CYAN, s=140, zorder=7,
-                           marker="*", linewidths=1.2, edgecolors="#006064",
+                           marker="*", linewidths=1.2, edgecolors=TEAL_DARK,
                            label=f"Added ({n_added_view})")
 
             # ── Artifact-review markers ─────────────────────────────────────
@@ -542,7 +604,7 @@ class PlotController:
 
             if not raw_only:
                 ax.axhline(t_amp, color=PLOT["threshold"], lw=1.4, ls="--",
-                           label=f"Threshold ({t_amp:.3f})")
+                           label=f"Threshold ({t_frac:.2f} → {t_amp:.2f} norm.)")
             ax.set_xlabel("Time (s)", fontsize=11, fontweight="bold")
             ax.set_ylabel("Amplitude (norm.)", fontsize=11, fontweight="bold")
             filter_tag    = ""   # no_filter is the default — no need for a warning tag
@@ -555,14 +617,20 @@ class PlotController:
             if raw_only:
                 ax.set_title(
                     f"Detail  {t_start:.1f}–{t_end:.1f} s  ·  {label_mode}"
-                    "  ·  click '1 ▶ Preview Detection' to filter & detect",
+                    "  ·  click Detect Peaks to filter & find R-peaks",
                     loc="left", color=title_color)
             else:
                 ax.set_title(
                     f"Detail  {t_start:.1f}–{t_end:.1f} s  ·  {n_in_view} peaks"
                     f"  ·  {label_mode}{filter_tag}{inverted_tag}{title_suffix}",
                     loc="left", color=title_color)
-            ax.legend(framealpha=0, loc="upper right")
+            # Lower right, not upper right -- the threshold line (roughly
+            # mid-height on the typical 0-7 amplitude scale) and the tallest
+            # accepted-peak markers both tend to sit under an upper-right
+            # legend in zoomed views. A semi-opaque panel-matched background
+            # keeps it readable over the trace instead of floating text.
+            ax.legend(loc="lower right", framealpha=0.85,
+                      facecolor=PLOT["axes"], edgecolor=PLOT["border"])
 
         self.app._slots["detail"].update(draw)
 
@@ -575,23 +643,82 @@ class PlotController:
         recompute point (detection_controller.py's run_detection(), which
         every Edit Peaks/Undo/Redo/Free Placement/threshold change funnels
         through), so an `is` check here is a correct, self-invalidating
-        cache-validity test. Returns False if there's no data to compute
-        from yet.
+        cache-validity test.
+
+        The actual recompute is debounced (250ms), not run inline the
+        moment the cache goes stale: compute_beat_correlation() is real
+        per-beat linear algebra over every accepted beat in the WHOLE
+        recording, and run_detection() reassigns rpeaks_ok on every single
+        threshold-slider tick / peak-edit click, so without debouncing this
+        ran synchronously on the main thread on every one of those -- for a
+        long/high-beat-count recording, easily tens to hundreds of ms of
+        stutter per tick during a drag. While a recompute is pending, the
+        PREVIOUS peak set's cached correlation is returned (a brief, bounded
+        staleness during active editing -- the same trade-off the minimap's
+        scroll-zoom resync and drag-scrub already make elsewhere in this
+        file) rather than blocking; draw_detail_rrhr() gets redrawn once the
+        debounced recompute actually lands. Returns False if there's no
+        data to compute from / show yet.
         """
         d = self.app.detection
         if d.rpeaks_ok is d._beat_corr_for:
             return d.beat_corr is not None
+        if d.corr_debounce_id is not None:
+            self.app.after_cancel(d.corr_debounce_id)
+        d.corr_debounce_id = self.app.after(250, self._flush_beat_corr_recompute)
+        return d.beat_corr is not None
+
+    def _flush_beat_corr_recompute(self) -> None:
+        d = self.app.detection
+        d.corr_debounce_id = None
         sig_flt = self.app.signal.filtered
         fs = self.app.signal.fs
         if sig_flt is None or fs is None or d.rpeaks_ok is None or len(d.rpeaks_ok) < 3:
             d.beat_corr = d.beat_corr_peaks = None
             d._beat_corr_for = d.rpeaks_ok
-            return False
-        r = compute_beat_correlation(sig_flt, d.rpeaks_ok, fs)
-        d.beat_corr = r["beat_corr"]
-        d.beat_corr_peaks = r["valid_rp"]
-        d._beat_corr_for = d.rpeaks_ok
-        return d.beat_corr is not None
+        else:
+            r = compute_beat_correlation(sig_flt, d.rpeaks_ok, fs)
+            d.beat_corr = r["beat_corr"]
+            d.beat_corr_peaks = r["valid_rp"]
+            d._beat_corr_for = d.rpeaks_ok
+        # Redraw just the RR/HR/Quality panel so the fresh (or now-cleared)
+        # correlation data actually appears once it lands.
+        self.draw_detail_rrhr()
+
+    def _ensure_alpha_cache(self) -> "Optional[np.ndarray]":
+        """Lazily compute+cache draw_detail()'s per-accepted-peak confidence
+        alpha (rp_ok_alpha), same identity-cache pattern as
+        _ensure_beat_corr_cache() above.
+
+        Without this, the dict-build + list-comprehension over
+        all_candidates/all_prominences (whole-recording arrays) ran on
+        every single draw_detail() call -- including every ~30ms mouse-
+        hover tick while in Edit mode -- with a cost that scaled with total
+        recording peak count, not window size.
+        """
+        d = self.app.detection
+        if d.rpeaks_ok is d._alpha_cache_for:
+            return d.rp_ok_alpha
+        rp_ok = d.rpeaks_ok if d.rpeaks_ok is not None else np.array([])
+        rp_ok_alpha = np.full(len(rp_ok), 0.95, dtype=float)
+        _cands = d.all_candidates
+        _proms = d.all_prominences
+        if (_cands is not None and _proms is not None
+                and len(_cands) == len(_proms) and len(_cands) and len(rp_ok)):
+            _prom_lookup = dict(zip(_cands.tolist(), _proms.tolist()))
+            _rp_proms = np.array([_prom_lookup.get(int(p), np.nan) for p in rp_ok])
+            _finite = np.isfinite(_rp_proms)
+            if _finite.sum() >= 2:
+                _lo, _hi = np.nanpercentile(_rp_proms[_finite], [5, 95])
+                if _hi > _lo:
+                    _norm = np.clip((_rp_proms - _lo) / (_hi - _lo), 0.0, 1.0)
+                    # Floor at 0.35 -- even the weakest accepted beat should
+                    # stay visible, just visually de-emphasised, not ghosted
+                    # to the point of looking like it isn't there at all.
+                    rp_ok_alpha = np.where(_finite, 0.35 + 0.60 * _norm, 0.95)
+        d.rp_ok_alpha = rp_ok_alpha
+        d._alpha_cache_for = d.rpeaks_ok
+        return d.rp_ok_alpha
 
     def draw_detail_rrhr(self, t_start: float | None = None) -> None:
         """RR interval + instantaneous HR + beat-template Quality, stacked,
@@ -692,7 +819,16 @@ class PlotController:
                 fn()
             except Exception:
                 log.exception("Plot task '%s' failed", label)
-            self.app.after(25, lambda i=idx + 1: _run_next(i))
+            # after_idle, not a fixed after(25, ...): each task's own
+            # CanvasSlot.update() already schedules its paint via
+            # canvas.draw_idle() (non-blocking), so the 25ms bought nothing
+            # but latency -- it stacked to ~225ms on a normal Analyze click
+            # (draw_core_results' 5 tasks chaining straight into run_freq's
+            # own 4-task chain) and ~280-300ms on export/session-restore's
+            # 8-task chain. after_idle still yields back to Tk between tasks
+            # (so the progress bar/label keeps updating), just without the
+            # artificial tax.
+            self.app.after_idle(lambda i=idx + 1: _run_next(i))
 
         _run_next(0)
 
@@ -749,7 +885,6 @@ class PlotController:
         the tachogram.  Clicking any point navigates to that beat in Detection.
         Right-clicking jumps specifically to the nearest spike.
         """
-        import datetime as _dt
         rdf       = r["rr_df"]
         rr_ms_raw = r.get("rr_ms", np.array([]))
 
@@ -804,15 +939,22 @@ class PlotController:
         rr_mean = float(rr_all.mean())
         hr_mean = float(hr_all.mean())
         rr_sd_v = float(rr_all.std())
-        c_rr, c_hr = "#388E3C", ORANGE_DARK
+        # BLUE_MID/ORANGE_DARK match the right-panel STATISTICS accents for
+        # "RR Intervals" and "Heart Rate" respectively (app.py) -- these were
+        # a hardcoded, non-theme-adaptive green that didn't match either.
+        c_rr, c_hr = BLUE_MID, ORANGE_DARK
         n_spikes   = len(spike_idx)
-        updated_at = _dt.datetime.now().strftime("%H:%M:%S")
+        # Snapshot once -- draw_tachogram is a closure re-invoked on every
+        # redraw (annotations, theme rebuilds, ...), and the toggle button
+        # calls back into this same plot_rr(), so no live-attribute read is
+        # needed inside the closure itself.
+        show_markers = self.app.ui.show_spike_markers
 
         # Spike colours: orange = moderate, red = severe
         def _spike_color(mag: float) -> str:
             return RED if abs(mag) > 3.5 * rr_sd_v else AMBER
 
-        def draw_tachogram(fig):
+        def draw_tachogram(fig, compact: bool = False):
             axes = fig.subplots(2, 1, sharex=True)
             for ax in axes:
                 style_axes(ax)
@@ -824,29 +966,34 @@ class PlotController:
             # ±1 SD reference band
             axes[0].axhspan(rr_mean - rr_sd_v, rr_mean + rr_sd_v,
                             alpha=0.06, color=c_rr, zorder=0)
-            axes[0].axhline(rr_mean + spike_thr * rr_sd_v,
-                            color=AMBER, lw=0.6, ls=":", alpha=0.5, zorder=1)
-            axes[0].axhline(rr_mean - spike_thr * rr_sd_v,
-                            color=AMBER, lw=0.6, ls=":", alpha=0.5, zorder=1)
 
-            # Spike markers
-            if len(spike_t):
-                for st, sr, sm in zip(spike_t, spike_rr, spike_mag):
-                    col = _spike_color(sm)
-                    axes[0].scatter([st], [sr], s=55, color=col,
-                                    marker="v" if sm < 0 else "^",
-                                    zorder=5, edgecolors="white",
-                                    linewidths=0.6, alpha=0.9)
+            if show_markers:
+                axes[0].axhline(rr_mean + spike_thr * rr_sd_v,
+                                color=AMBER, lw=0.6, ls=":", alpha=0.5, zorder=1)
+                axes[0].axhline(rr_mean - spike_thr * rr_sd_v,
+                                color=AMBER, lw=0.6, ls=":", alpha=0.5, zorder=1)
+
+                # Spike markers
+                if len(spike_t):
+                    for st, sr, sm in zip(spike_t, spike_rr, spike_mag):
+                        col = _spike_color(sm)
+                        axes[0].scatter([st], [sr], s=55, color=col,
+                                        marker="^" if sm < 0 else "v",
+                                        zorder=5, edgecolors="white",
+                                        linewidths=0.6, alpha=0.9)
 
             spike_note = (f"  ·  {n_spikes} spike{'s' if n_spikes != 1 else ''} detected"
-                          if n_spikes else "")
+                          if show_markers and n_spikes else "")
             axes[0].set_ylabel("RR (ms)")
             axes[0].set_title(
                 f"RR Intervals  ·  mean {rr_mean:.1f} ms  ·  SD {rr_sd_v:.1f} ms{spike_note}",
-                loc="left", fontsize=9)
-            axes[0].set_title(f"click=navigate  r-click=next spike  ·  {updated_at}",
-                              loc="right", fontsize=7,
-                              color=PLOT.get("muted", "#666"))
+                loc="left", fontsize=8 if compact else 9)
+            # Right-hand hint collides with the left title once this figure
+            # is squeezed into the Summary tab's mirror -- omit it there.
+            if not compact:
+                axes[0].set_title("left-click: go to time  ·  right-click: next spike",
+                                  loc="right", fontsize=7,
+                                  color=PLOT.get("muted", "#666"))
             axes[0].tick_params(labelbottom=False)
 
             # ── HR trace ────────────────────────────────────────
@@ -854,27 +1001,31 @@ class PlotController:
             axes[1].axhline(hr_mean, color=c_hr, ls="--", lw=0.9, alpha=0.5, zorder=1)
 
             # Mirror spikes on HR axis
-            if len(spike_t):
+            if show_markers and len(spike_t):
                 spike_hr = 60_000.0 / np.clip(spike_rr, 1, None)
                 for st, shr, sm in zip(spike_t, spike_hr, spike_mag):
                     col = _spike_color(sm)
                     axes[1].scatter([st], [shr], s=45, color=col,
-                                    marker="v" if sm < 0 else "^",
+                                    marker="^" if sm < 0 else "v",
                                     zorder=5, edgecolors="white",
                                     linewidths=0.6, alpha=0.9)
 
             axes[1].set_ylabel("HR (bpm)")
+            # Compact (Summary mirror) keeps the caption short -- the long
+            # marker-legend form gets clipped at ~1/3 width.
             axes[1].set_xlabel(
-                "Time (s)  —  ▲ sudden acceleration  ▼ sudden deceleration  (threshold ±2.5 SD)")
+                "Time (s)" if compact or not show_markers else
+                "Time (s)  —  ▲ sudden acceleration  ▼ sudden deceleration"
+                "  ·  amber >2.5 SD  ·  red >3.5 SD")
             axes[1].set_title(f"Instantaneous HR  ·  mean {hr_mean:.0f} bpm",
-                              loc="left", fontsize=9)
+                              loc="left", fontsize=8 if compact else 9)
 
         # Capture annotations for closure
         _anns = list(self.app.analysis.annotations)
         _draw_fn_orig = draw_tachogram
 
-        def draw_tachogram_annotated(fig):
-            _draw_fn_orig(fig)
+        def draw_tachogram_annotated(fig, compact: bool = False):
+            _draw_fn_orig(fig, compact=compact)
             axs = fig.axes
             if not axs or not _anns:
                 return
@@ -898,6 +1049,10 @@ class PlotController:
                                       alpha=0.8, lw=0.6))
 
         self.app._slots["rr"].update(draw_tachogram_annotated)
+        # Compact variant reused by plot_summary() to mirror this plot into
+        # the much narrower Summary-tab panel -- see the note there.
+        self.app._slots["rr"]._draw_fn_compact = \
+            lambda fig: draw_tachogram_annotated(fig, compact=True)
 
         # ── Wire click-to-navigate ─────────────────────────────────────────
         if self.app.ui.rr_click_cid is not None:
@@ -906,8 +1061,11 @@ class PlotController:
             except Exception as e:
                 log.debug("mpl_disconnect (rr click) failed: %s", e)
 
-        # Store spike times for right-click navigation
+        # Store spike times for right-click navigation, and on app.ui so the
+        # Detection nav bar's prev/next-spike stepper (app.py) can walk the
+        # same list without recomputing it.
         _spike_times = spike_t.copy() if len(spike_t) else np.array([], dtype=float)
+        self.app.ui.rr_spike_times = _spike_times
 
         def _on_rr_click(event):
             if event.xdata is None or event.inaxes is None:
@@ -1020,13 +1178,46 @@ class PlotController:
     _TD_REF_KEYS = {"MeanNN": "RR_mean", "SDNN": "RR_SDNN",
                      "RMSSD": "RR_RMSSD", "pNN6": "RR_pNN6"}
 
+    # Display (label, unit) for the metrics researchers actually read off
+    # this table -- bare NeuroKit column names carry no unit and don't say
+    # which of ms/%/ratio a given row is. pNN50/pNN20 are flagged "(human)"
+    # because their fixed thresholds (50 ms / 20 ms) are calibrated to human
+    # RR intervals, not the ~120 ms mouse RR this app is built for -- pNN6
+    # is the mouse-equivalent metric NeuroKit doesn't compute by default,
+    # which is why this app adds it as its own column alongside them.
+    _TD_DISPLAY = {
+        "MeanNN":  ("Mean RR", "ms"),
+        "SDNN":    ("SDNN", "ms"),
+        "RMSSD":   ("RMSSD", "ms"),
+        "SDSD":    ("SD of successive diffs", "ms"),
+        "CVNN":    ("CV of RR (SDNN/mean)", ""),
+        "CVSD":    ("CV of successive diffs", ""),
+        "MedianNN":("Median RR", "ms"),
+        "MadNN":   ("Median abs. deviation", "ms"),
+        "MCVNN":   ("Median CV of RR", ""),
+        "IQRNN":   ("Interquartile range", "ms"),
+        "SDRMSSD": ("SDNN / RMSSD", ""),
+        "Prc20NN": ("20th percentile RR", "ms"),
+        "Prc80NN": ("80th percentile RR", "ms"),
+        "pNN50":   ("% RR diff. > 50 ms (human)", "%"),
+        "pNN20":   ("% RR diff. > 20 ms (human)", "%"),
+        "pNN6":    ("% RR diff. > 6 ms (mouse)", "%"),
+        "MinNN":   ("Min RR", "ms"),
+        "MaxNN":   ("Max RR", "ms"),
+        "HTI":     ("Triangular index", ""),
+        "TINN":    ("Triangular interpolation", "ms"),
+    }
+
     def plot_hrv_tables(self, r: dict) -> None:
         """Populate time-domain and frequency-domain HRV text boxes."""
         td_df = r["hrv_time"]
         if td_df is None or td_df.empty:
             self.app._set_textbox(self.app.txt_td, "  (not computed)")
         else:
-            td_lines: list[str] = []
+            td_lines: list[str] = [
+                "  Mouse-specific: read pNN6, not pNN50/pNN20 (human RR thresholds)",
+                "",
+            ]
             for col in td_df.columns:
                 try:
                     v = float(td_df[col].values[0])
@@ -1036,8 +1227,10 @@ class PlotController:
                     log.debug("_plot_hrv_tables td skip '%s': %s", col, exc)
                     continue
                 name = col.replace("HRV_", "")
+                label, unit = self._TD_DISPLAY.get(name, (name, ""))
+                disp = f"{label} ({unit})" if unit else label
                 fmt = f"{v:.1f}" if abs(v) >= 100 else f"{v:.3f}" if abs(v) >= 1 else f"{v:.5f}"
-                dots = "·" * max(2, 30 - len(name))
+                dots = "·" * max(2, 34 - len(disp))
                 ref_note = ""
                 ref_key = self._TD_REF_KEYS.get(name)
                 if ref_key is not None:
@@ -1053,7 +1246,9 @@ class PlotController:
                     else:
                         status = "↑" if v > hi else "↓"
                     ref_note = f"   {status}  (normal {lo:.3g}–{hi:.3g})"
-                td_lines.append(f"  {name} {dots}  {fmt:>10}{ref_note}")
+                elif name not in ("pNN50", "pNN20"):
+                    ref_note = "   (no mouse reference)"
+                td_lines.append(f"  {disp} {dots}  {fmt:>10}{ref_note}")
             self.app._set_textbox(
                 self.app.txt_td, "\n".join(td_lines) or "  (no finite values)",
                 tsv=self.app._df_to_tsv(td_df))
@@ -1191,7 +1386,7 @@ class PlotController:
                  f"VLF  {MouseECG.VLF[0]}–{MouseECG.VLF[1]} Hz", BLUE_DARK),
                 (MouseECG.LF[0],  MouseECG.LF[1],  "LF",
                  f"LF   {MouseECG.LF[0]}–{MouseECG.LF[1]} Hz  (baroreflex)", PURPLE),
-                (MouseECG.HF[0],  MouseECG.HF[1],  "HF", hf_legend, "#1B5E20"),
+                (MouseECG.HF[0],  MouseECG.HF[1],  "HF", hf_legend, GREEN_DARK),
             ]
 
             # Compute per-band power for annotation
@@ -1227,14 +1422,21 @@ class PlotController:
             # Frequency resolution actually achieved
             df = freqs[1] - freqs[0] if len(freqs) > 1 else float("nan")
 
+            # Band colours (BLUE_DARK/PURPLE/GREEN_DARK) are lightened for
+            # dark mode by theme.py's _adapt_for_mode(); at a fixed alpha
+            # that lighter fill reads as pastel on light but noticeably more
+            # saturated against the dark axes background, so tone it down to
+            # match how the light-mode fill reads.
+            band_alpha = 0.24 if THEME.is_dark else 0.35
+
             def draw_psd(fig):
                 ax = fig.add_subplot(111)
                 style_axes(ax)
-                ax.semilogy(freqs, psd, color="#546E7A", lw=1.0, zorder=3)
+                ax.semilogy(freqs, psd, color=PLOT["muted"], lw=1.0, zorder=3)
                 for lo, hi, name, legend_label, color in bands:
                     m = (freqs >= lo) & (freqs <= hi)
                     pct = band_pct.get(name, band_powers[name] / total_power * 100)
-                    ax.fill_between(freqs, psd, where=m, alpha=0.35, color=color,
+                    ax.fill_between(freqs, psd, where=m, alpha=band_alpha, color=color,
                                     label=f"{legend_label}  ({pct:.1f}%)", zorder=2)
                     # Vertical band boundary lines
                     for boundary in (lo, hi):
@@ -1243,7 +1445,7 @@ class PlotController:
                                        alpha=0.6, zorder=1)
                 if hf_peak_hz is not None:
                     ax.plot(hf_peak_hz, float(psd[hf_mask].max()),
-                            marker="v", ms=7, color="#1B5E20", zorder=5)
+                            marker="v", ms=7, color=GREEN_DARK, zorder=5)
                 ax.set_xlabel("Frequency (Hz)")
                 ax.set_ylabel("PSD (ms²/Hz)")
                 ax.set_xlim(0, MouseECG.PSD_XLIM)
@@ -1345,14 +1547,22 @@ class PlotController:
                 ax.set_facecolor(PLOT["axes"])
                 # Shade the reference band itself so "inside the green ring"
                 # has one consistent meaning across every axis.
-                ax.fill(a_closed, [1.0] * (n + 1), color=GREEN, alpha=0.06, zorder=0)
-                ax.plot(a_closed, v_closed, color=RED, lw=2, zorder=3)
-                ax.fill(a_closed, v_closed, color=RED, alpha=0.15, zorder=2)
+                ax.fill(a_closed, [1.0] * (n + 1), color=GREEN, alpha=0.14, zorder=0)
+                ax.plot(a_closed, v_closed, color=BLUE, lw=2, zorder=3)
+                ax.fill(a_closed, v_closed, color=BLUE, alpha=0.15, zorder=2)
                 ax.set_thetagrids(np.degrees(angles), rich_labels, color=PLOT["text"])
                 ax.set_ylim(y_lo, y_hi)
                 ax.set_yticks([0.0, 0.5, 1.0])
+                # Radial (ref lo/mid/hi) labels default to sitting right on
+                # top of a spoke/vertex; park them halfway between two spokes
+                # instead, with a background box, so they stay legible over
+                # the grid and the filled profile.
+                ax.set_rlabel_position(np.degrees(angles[0] + (angles[1] - angles[0]) / 2))
                 ax.set_yticklabels(["ref. lo", "ref. mid", "ref. hi"],
                                    color=PLOT["muted"], fontsize=7)
+                for _tl in ax.get_yticklabels():
+                    _tl.set_bbox(dict(boxstyle="round,pad=0.15",
+                                       fc=PLOT["axes"], ec="none", alpha=0.8))
                 ax.grid(color=PLOT["grid"], alpha=0.5)
                 ax.spines["polar"].set_color(PLOT["border"])
                 ax.set_title("HRV Profile  (0 = ref. low · 1 = ref. high, per metric)",
@@ -1364,8 +1574,10 @@ class PlotController:
 
     def plot_nonlinear(self, r: dict) -> None:
         """Poincaré plot and non-linear HRV metric table."""
-        self.app._set_textbox(self.app.txt_nl, self.app._df_to_text(r["hrv_nonlin"]),
-                          tsv=self.app._df_to_tsv(r["hrv_nonlin"]))
+        self.app._set_textbox(
+            self.app.txt_nl,
+            self.app._df_to_text(r["hrv_nonlin"], display_map=self.app._NL_DISPLAY),
+            tsv=self.app._df_to_tsv(r["hrv_nonlin"]))
 
         rr_ms = r["rr_ms"]
         if len(rr_ms) < 2:
@@ -1409,7 +1621,7 @@ class PlotController:
         mse_point  = attrs.get("mse_point_estimate")
         have_mse   = bool(mse_scales) and bool(mse_values)
 
-        def draw_poincare(fig):
+        def draw_poincare(fig, compact: bool = False):
             from matplotlib.gridspec import GridSpec
             # Same reason as draw_intervals()/draw_rr_timeline(): CanvasSlot's
             # constrained_layout would override explicit row-height margins.
@@ -1417,8 +1629,14 @@ class PlotController:
                 fig.set_layout_engine(None)
             except Exception as exc:
                 log.debug("draw_poincare: set_layout_engine(None) failed: %s", exc)
-            gs = GridSpec(2, 1, figure=fig, height_ratios=[5, 2], hspace=0.35,
-                         left=0.13, right=0.96, top=0.93, bottom=0.09)
+            # Compact (Summary mirror) drops the MSE subplot entirely --
+            # at ~1/3 width its subtitle overlapped the Poincaré axis
+            # label/ticks above it.
+            if compact:
+                gs = GridSpec(1, 1, figure=fig, left=0.16, right=0.96, top=0.90, bottom=0.14)
+            else:
+                gs = GridSpec(2, 1, figure=fig, height_ratios=[5, 2], hspace=0.35,
+                             left=0.13, right=0.96, top=0.93, bottom=0.09)
             ax = fig.add_subplot(gs[0, 0])
             style_axes(ax)
             ax.scatter(rr_a, rr_b, s=3, alpha=0.25, color=BLUE, rasterized=True)
@@ -1432,10 +1650,13 @@ class PlotController:
             ax.set_ylim(lim)
             # Don't use set_aspect("equal") — it creates dead whitespace when
             # the container isn't square. Force equal axes via xlim/ylim instead.
-            ax.set_xlabel("RR_n (ms)")
-            ax.set_ylabel("RR_n+1 (ms)")
+            ax.set_xlabel(r"$RR_n$ (ms)")
+            ax.set_ylabel(r"$RR_{n+1}$ (ms)")
             ax.set_title(f"Poincaré diagram  SD1={sd1}  SD2={sd2}{trunc_note}",
-                         loc="left", fontsize=9)
+                         loc="left", fontsize=8 if compact else 9)
+
+            if compact:
+                return
 
             # Multiscale entropy curve -- see analyse_hrv_nonlinear() for why
             # this needs materially more beats than a single SampEn value and
@@ -1458,6 +1679,10 @@ class PlotController:
                 ax_mse.set_xticks([]); ax_mse.set_yticks([])
 
         self.app._slots["poincare"].update(draw_poincare)
+        # Compact variant reused by plot_summary() to mirror this plot into
+        # the much narrower Summary-tab panel -- see the note there.
+        self.app._slots["poincare"]._draw_fn_compact = \
+            lambda fig: draw_poincare(fig, compact=True)
 
     def plot_intervals(self, r: dict) -> None:
         """Violin + box plot for PR / QRS / QT / QTc intervals."""
@@ -1474,6 +1699,15 @@ class PlotController:
             return
         cols  = [c for c in ["PR_ms", "QRS_ms", "QT_ms", "QTc_ms"]
                  if c in ivl.columns and ivl[c].notna().sum() > 3]
+
+        # Completion stats echoed into the plot title so an exported figure
+        # still carries "measured on 17% of beats" instead of looking like
+        # a clean, complete result (same PR/QRS/QT columns run_intervals()
+        # grades the sidebar status by).
+        _core_cols = [c for c in ["PR_ms", "QRS_ms", "QT_ms"] if c in ivl.columns]
+        n_ok_ivl    = int((~ivl[_core_cols].isna().any(axis=1)).sum()) if _core_cols else 0
+        n_total_ivl = len(ivl)
+        pct_ivl     = 100.0 * n_ok_ivl / n_total_ivl if n_total_ivl else 0.0
 
         if not cols:
             def draw_unavailable(fig):
@@ -1537,6 +1771,11 @@ class PlotController:
             gs = GridSpec(1, n_cols, figure=fig,
                           left=0.10, right=0.97, top=0.88, bottom=0.08,
                           wspace=0.40)
+            title_color = GREEN if pct_ivl >= 90 else ORANGE_DARK if pct_ivl >= 50 else RED
+            fig.suptitle(
+                f"{n_ok_ivl}/{n_total_ivl} beats measured ({pct_ivl:.0f}%)"
+                "  ·  tinted band = reference range for the selected context",
+                color=title_color, fontsize=9, y=0.985)
             for ci, (col, data, color) in enumerate(col_data):
                 ax = fig.add_subplot(gs[0, ci])
                 style_axes(ax)
@@ -1592,13 +1831,36 @@ class PlotController:
                     ax.text(0.5, 0.03, f"dispersion {qt_disp:.1f} ms",
                             ha="center", va="bottom", color=PLOT["muted"],
                             fontsize=7, transform=ax.transAxes)
-                if ci == 0:
-                    ax.set_ylabel("ms", fontsize=8)
+                ax.set_ylabel("ms", fontsize=8)
                 ax.set_xticks([])
-                # Auto-range with padding
+                # Auto-range with padding, extended toward the reference
+                # band when it doesn't overlap the data -- ylim used to
+                # come from the data percentiles alone, so a band outside
+                # that range (e.g. QRS running fast/slow vs. the selected
+                # context) was drawn off-screen and never seen. The
+                # extension is capped at 2x the data's own spread so a
+                # reference band far wider than the data (the opposite
+                # failure this tab also showed -- QTc's band filling the
+                # whole panel) doesn't swallow the distribution either;
+                # past the cap, a small arrow annotation says where the
+                # band actually sits instead of silently clipping it.
                 p2, p98 = np.percentile(finite, [2, 98])
-                pad = max((p98 - p2) * 0.25, 5)
-                ax.set_ylim(p2 - pad, p98 + pad)
+                spread = p98 - p2
+                pad = max(spread * 0.25, 5)
+                ylo, yhi = p2 - pad, p98 + pad
+                if lo_ref is not None:
+                    cap = max(spread * 2.0, pad)
+                    if lo_ref < ylo:
+                        ylo = max(lo_ref - pad, ylo - cap)
+                    if hi_ref > yhi:
+                        yhi = min(hi_ref + pad, yhi + cap)
+                ax.set_ylim(ylo, yhi)
+                if lo_ref is not None and lo_ref < ylo:
+                    ax.text(0.5, 0.01, f"ref {lo_ref:.0f}–{hi_ref:.0f} ↓", ha="center",
+                            va="bottom", color=color, fontsize=6.5, transform=ax.transAxes)
+                elif lo_ref is not None and hi_ref > yhi:
+                    ax.text(0.5, 0.99, f"ref {lo_ref:.0f}–{hi_ref:.0f} ↑", ha="center",
+                            va="top", color=color, fontsize=6.5, transform=ax.transAxes)
 
             if have_qtrr:
                 axr = fig.add_subplot(gs[0, n_cols - 1])
@@ -1702,7 +1964,7 @@ class PlotController:
                         color=BLUE, alpha=0.75, edgecolor="none")
             ax_amp.set_xlabel("R-peak amplitude (norm.)")
             ax_amp.set_ylabel("Count")
-            ax_amp.set_title("Amplitude des peaks R", loc="left")
+            ax_amp.set_title("R-peak amplitude", loc="left")
 
             bins_corr = min(40, max(10, n_beats // 4))
             ax_corr.hist(beat_corr, bins=bins_corr,
@@ -1830,6 +2092,10 @@ class PlotController:
         # Every other Summary plot used to mirror a full-tab draw_fn at ~1/3
         # the size with the same font/legend density -- removed in favour of
         # linking to the full tabs instead (see the "Metrics" section below).
+        # These two are still worth keeping small, so plot_rr()/plot_nonlinear()
+        # stash a "_draw_fn_compact" alongside the normal one (right-hand hint
+        # title, MSE subplot, etc. dropped) -- fall back to the full draw_fn
+        # if a slot hasn't been (re)built with one yet.
         _MIRRORS = [
             ("rr",            "sum_rr"),
             ("poincare",      "sum_poincare"),
@@ -1839,7 +2105,7 @@ class PlotController:
             dst = self.app._slots.get(dst_key)
             if src is None or dst is None:
                 continue
-            fn = getattr(src, "_draw_fn", None)
+            fn = getattr(src, "_draw_fn_compact", None) or getattr(src, "_draw_fn", None)
             if fn is not None:
                 try:
                     dst.update(fn)
@@ -1881,7 +2147,7 @@ class PlotController:
                 vals2 = [_n_dec / _n_tot * 100,
                          n_neu  / _n_tot * 100,
                          _n_acc / _n_tot * 100]
-                colors2 = ["#C62828", "#455A64", BLUE_DARK]
+                colors2 = [RED, GRAY, BLUE_DARK]
                 bars = ax_bar.bar(cats, vals2, color=colors2, alpha=0.80, width=0.5)
                 ax_bar.axhline(50, color=BORDER2, lw=1.2, ls="--", alpha=0.7)
                 ax_bar.set_ylabel("% beats")
@@ -1898,7 +2164,7 @@ class PlotController:
                 ax_hist.hist(_drr_clip[_drr_clip < 0], bins=30,
                              color=BLUE_DARK, alpha=0.70, label="accelerations")
                 ax_hist.hist(_drr_clip[_drr_clip > 0], bins=30,
-                             color="#C62828", alpha=0.70, label="decelerations")
+                             color=RED, alpha=0.70, label="decelerations")
                 ax_hist.axvline(0, color=BORDER2, lw=1.2, ls="--")
                 ax_hist.set_xlabel("ΔRR (ms)")
                 ax_hist.set_ylabel("Beats")
@@ -1917,27 +2183,54 @@ class PlotController:
             # Align: beat_corr has 1 value per accepted beat, first peak has no interval
             _t_bc = _rp[:len(_bc)] if len(_rp) >= len(_bc) else _rp
 
-            # Rolling 50-beat mean
-            _win  = min(50, max(10, len(_bc) // 20))
-            _kern = np.ones(_win) / _win
-            _roll = np.convolve(_bc, _kern, mode="valid")
-            _roll_t = _t_bc[_win - 1: _win - 1 + len(_roll)]
-
             n_pts = min(len(_t_bc), len(_bc))
             _bc_t = _t_bc[:n_pts]
             _bc_v = _bc[:n_pts]
 
+            # Rolling 50-beat mean -- computed over the ALIGNED n_pts-length
+            # slice (_bc_v), not the raw, unclipped _bc. _rp (the windowed
+            # peak-time array) can be shorter than _bc (e.g. right after a
+            # session restore, before the just-restored peak set and the
+            # active analysis window are back in sync) -- using unclipped
+            # _bc there produced a rolling-mean array with more points than
+            # _t_bc had matching times for, crashing ax.plot() with a shape
+            # mismatch ((0,) vs (671,)) instead of just rendering a shorter
+            # (but internally consistent) line.
+            _win = min(50, max(10, n_pts // 20)) if n_pts >= 10 else 0
+            if _win >= 2 and n_pts >= _win:
+                _kern = np.ones(_win) / _win
+                _roll = np.convolve(_bc_v, _kern, mode="valid")
+                _roll_t = _bc_t[_win - 1: _win - 1 + len(_roll)]
+            else:
+                _roll = np.array([])
+                _roll_t = np.array([])
+
             def draw_quality_time(fig):
                 ax = fig.add_subplot(111)
                 style_axes(ax)
+                if len(_bc_v) == 0:
+                    # n_pts came out 0 -- the windowed peak-time array (_rp)
+                    # didn't overlap _bc at all (e.g. right after a session
+                    # restore, before the active analysis window and the
+                    # just-restored peak set are back in sync). Nothing
+                    # valid to plot this frame; the next redraw once state
+                    # settles will have real data.
+                    ax.text(0.5, 0.5, "No quality data for the current window",
+                            transform=ax.transAxes, ha="center", va="center",
+                            fontsize=9, color=PLOT["muted"])
+                    ax.set_xlabel("Time (s)")
+                    ax.set_ylabel("Correlation to template")
+                    ax.set_title("Morphological quality over time", loc="left")
+                    return
                 # Scatter individual beats, coloured by quality
                 if len(_bc_t) != len(_bc_v):
                     log.debug("quality plot length mismatch: %d vs %d",
                               len(_bc_t), len(_bc_v))
-                sc = ax.scatter(_bc_t, _bc_v, s=2, c=_bc_v, cmap="RdYlGn",
+                sc = ax.scatter(_bc_t, _bc_v, s=2, c=_bc_v, cmap="viridis",
                                 vmin=0.7, vmax=1.0, alpha=0.35, rasterized=True, zorder=2)
-                ax.plot(_roll_t, _roll, color=BLUE, lw=1.8, zorder=3,
-                        label=f"rolling mean (n={_win})")
+                if len(_roll_t) and len(_roll):
+                    ax.plot(_roll_t, _roll, color=BLUE, lw=1.8, zorder=3,
+                            label=f"rolling mean (n={_win})")
                 ax.axhline(0.90, color=ORANGE, lw=1.0, ls=":", alpha=0.8,
                            label="threshold 0.90")
                 ax.set_xlabel("Time (s)")
@@ -1947,7 +2240,7 @@ class PlotController:
                 ax.legend(framealpha=0, fontsize=8, loc="lower right")
                 try:
                     fig.colorbar(sc, ax=ax, fraction=0.025, pad=0.02,
-                                 label="corrélation")
+                                 label="correlation")
                 except Exception as e:
                     log.debug("colorbar render failed: %s", e)
 
@@ -2069,9 +2362,9 @@ class PlotController:
         """Reset per-tab status labels and disable action buttons.
 
         Called on new file load so labels from the previous analysis
-        (e.g. "Done LF=42%") don't persist after loading a new file.
+        (e.g. "Done LFn=25.0%") don't persist after loading a new file.
         """
-        _neutral = "  Run Core Analysis first"
+        _neutral = "  Click Analyze first"
         if self.app.lbl_freq_status is not None:
             self.app.lbl_freq_status.configure(text=_neutral, text_color=PLOT["muted"])  # type: ignore[union-attr]
         if self.app.lbl_nonlin_status is not None:
@@ -2081,14 +2374,12 @@ class PlotController:
             lbl_ivl.configure(text=_neutral, text_color=PLOT["muted"])
         lbl_arr = getattr(self.app, "lbl_arrhythmia_status", None)
         if lbl_arr is not None:
-            lbl_arr.configure(text="  Run Core Analysis first", text_color=PLOT["muted"])
+            lbl_arr.configure(text="  Click Analyze first", text_color=PLOT["muted"])
         lbl_roll = getattr(self.app, "lbl_roll_status", None)
         if lbl_roll is not None:
-            lbl_roll.configure(text="  Run Core Analysis first", text_color=PLOT["muted"])
-        for btn_attr in ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl", "btn_run_arrhythmia"):
-            btn = getattr(self.app, btn_attr, None)
-            if btn is not None:
-                btn.configure(state="disabled")
+            lbl_roll.configure(text="  Click Analyze first", text_color=PLOT["muted"])
+        self.app._set_result_btns_enabled(
+            False, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl", "btn_run_arrhythmia"))
 
     def reset_kpis(self) -> None:
         """Reset all KPI labels to dash when results are invalidated."""

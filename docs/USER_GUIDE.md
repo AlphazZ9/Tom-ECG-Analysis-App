@@ -81,9 +81,12 @@ missed or a false one is added, **Edit Peaks** switches into manual
 edit mode — click near a peak to remove it, or in empty space (with
 **Free Placement** on) to add one — with full undo/redo.
 
-The right-hand **Statistics** panel updates live as you work: heart rate,
-RR intervals, HRV (SDNN/RMSSD/pNN6), and a signal-quality score built
-from how closely each beat matches the recording's own beat template.
+The right-hand **Statistics** panel shows heart rate, RR intervals, HRV
+(SDNN/RMSSD/pNN6), and a signal-quality score built from how closely
+each beat matches the recording's own beat template. Excluding, adding,
+or undoing a peak clears the HRV numbers immediately (they'd otherwise
+be describing beats that no longer match what's on screen) — click
+**Analyze** again to recompute them from the corrected peaks.
 
 ---
 
@@ -224,8 +227,8 @@ message to a colleague, without needing the full PDF/Excel export.
 <img src="screenshots/13_parameters_dialog.png" width="420" alt="Parameters dialog, top section">
 <img src="screenshots/13b_parameters_experimental_context.png" width="420" alt="Parameters dialog, Experimental Context section">
 
-Open **Parameters** (gear icon area of the toolbar) for every setting
-that affects analysis: channel/subject metadata, sampling rate override,
+Open **⚙ Parameters** (top toolbar, right side) for every setting that
+affects analysis: channel/subject metadata, sampling rate override,
 filter cutoffs, detection thresholds, and — the section shown on the
 right — **Experimental Context**.
 
@@ -246,10 +249,11 @@ built-in four.
 - **Save Session** (toolbar, or `Ctrl+S`) writes a `.ecgsession` file with
   every result computed so far, so reopening it later restores the exact
   state — no need to re-run detection or analysis.
-- The **Export** menu (toolbar dropdown) covers everything else: a
-  formatted Excel workbook, GraphPad Prism `.pzfx`, a one-page PDF report
-  (signal strip, key metrics, Poincaré diagram, HRV radar, abnormal-events
-  summary), a per-episode annotated PDF for abnormal events, and CSV.
+- The **EXPORTS** section (right panel — it opens automatically the first
+  time an analysis finishes) covers everything else: a formatted Excel
+  workbook, GraphPad Prism `.pzfx`, a one-page PDF report (signal strip,
+  key metrics, Poincaré diagram, HRV radar, abnormal-events summary), a
+  per-episode annotated PDF for abnormal events, and CSV.
 - If you're building a training set for the ML R-peak detector, **Save
   for Training** (right panel, ML Detector Saving section) caches this
   recording's corrected peaks without needing a full session save.

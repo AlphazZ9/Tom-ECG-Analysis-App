@@ -22,7 +22,7 @@ from ecg.core.models import (
 from ecg.core.detection import classify_arrhythmias, correct_rr_artifacts
 from ecg.core.analysis import analyse_core, analyse_hrv_freq, analyse_hrv_nonlinear, analyse_intervals
 from ecg.core.wave_template import WaveTemplate
-from ecg.io.session import load_session
+from ecg.io.session import session_exists
 from ecg.ui.theme import (
     PLOT, RED, RED_MID, RED_LIGHT, AMBER, BLUE, BLUE_DARK, BLUE_MID,
     GREEN, GREEN_DARK, GREEN_MID, ORANGE, ORANGE_DARK, ORANGE_DEEP,
@@ -47,6 +47,22 @@ class AnalysisController:
     # -- an HRV metric from under ~10 intervals is noisy. Shared by both
     # methods so "low confidence" means the same thing in both panels.
     MIN_CONFIDENT_BEATS = 10
+
+    # Single colour axis for an abnormal-event's KIND, shared by every
+    # rendering of it -- the event ribbon, the RR-panel span highlighting,
+    # and each event card's stripe all used to pick their colour from a
+    # different mapping (kind here, severity there), so the same event
+    # could show as one colour in the ribbon and a different one on its
+    # own card. Severity is still shown (as plain text, e.g. "WARNING"),
+    # just no longer double-booked onto the same colour channel as kind.
+    _KIND_COLORS = {
+        "bradycardia":    BLUE_MID,
+        "tachycardia":    RED_MID,
+        "pause":          RED,
+        "esv_run":        AMBER,
+        "irregular_run":  PURPLE,
+        "av_delay":       CYAN_BRIGHT,
+    }
 
     def __init__(self, app: "ECGApp") -> None:
         self.app = app
@@ -81,7 +97,7 @@ class AnalysisController:
 
     def run_arrhythmia_analysis(self) -> None:
         if self.app.detection.rpeaks_ok is None or self.app.signal.fs is None:
-            self.app._set_status("Run Core Analysis first.", RED)
+            self.app._set_status("Click Analyze first.", RED)
             return
 
         rpeaks = self.app._windowed_peaks()
@@ -136,19 +152,10 @@ class AnalysisController:
             self.app.analysis.arrhythmia_events = events
             self.app.analysis.arr_selected_idx  = -1
 
-            sev_colors = {"alert": RED_MID, "warning": AMBER, "info": BLUE_MID}
+            kind_colors = self._KIND_COLORS
             kind_icons = {
                 "bradycardia": "🔵", "tachycardia": "🔴", "pause": "⏸",
                 "esv_run": "⚡", "irregular_run": "〰", "av_delay": "⏳",
-            }
-            # Per-KIND (not per-severity) colors for the event ribbon --
-            # sev_colors above only has 3 buckets (alert/warning/info), so
-            # e.g. "pause" and "esv_run" (both "alert") would be visually
-            # identical on a severity-colored strip; this is what actually
-            # lets event-type clustering be read at a glance.
-            kind_colors = {
-                "bradycardia": BLUE_MID, "tachycardia": RED_MID, "pause": RED,
-                "esv_run": AMBER, "irregular_run": PURPLE, "av_delay": CYAN_BRIGHT,
             }
 
             # ── RR timeline (right panel, initial state) ──────
@@ -201,7 +208,11 @@ class AnalysisController:
                               fontsize=6.5, frameon=False,
                               labelcolor=PLOT.get("text", GRAY_LIGHT))
 
-                ax.plot(t_rr, rr_ms, color=PLOT.get("ecg",CYAN_BRIGHT), lw=0.8, zorder=2)
+                # PLOT has no "ecg" key -- this always fell back to the
+                # literal default (a bright cyan barely visible against the
+                # Light theme's grid). "signal" is the real trace-colour
+                # token every other plot in the app already uses.
+                ax.plot(t_rr, rr_ms, color=PLOT.get("signal", CYAN_BRIGHT), lw=0.8, zorder=2)
                 ax.set_ylabel("RR (ms)"); ax.set_xlabel("Time (s)")
 
                 # Baseline and threshold lines (only if events contain brady/tachy)
@@ -230,19 +241,23 @@ class AnalysisController:
                     ax.axhline(bl_rr, color=GREEN_MID, lw=1.2,
                                ls="--", alpha=0.8, zorder=4,
                                label=f"Baseline {bl_hr:.0f} bpm")
-                    # Brady / tachy threshold lines
-                    ax.axhline(brady_rr, color=AMBER, lw=0.9,
+                    # Brady / tachy threshold lines -- neutral grey, not a
+                    # kind colour: AMBER/BLUE_MID here used to collide with
+                    # esv_run/bradycardia's OWN kind colours below, so the
+                    # same hue meant a different thing depending which line
+                    # on the plot you were looking at.
+                    ax.axhline(brady_rr, color=PLOT.get("muted", MUTED), lw=0.9,
                                ls="--", alpha=0.65, zorder=4,
                                label=f"Brady threshold −{bpct:.0f}%")
-                    ax.axhline(tachy_rr, color=BLUE_MID, lw=0.9,
-                               ls="--", alpha=0.65, zorder=4,
+                    ax.axhline(tachy_rr, color=PLOT.get("muted", MUTED), lw=0.9,
+                               ls=":", alpha=0.65, zorder=4,
                                label=f"Tachy threshold +{bpct:.0f}%")
 
                 ax.set_title(
-                    "RR series — click an episode to zoom",
+                    "RR series — click an event to zoom",
                     loc="left", fontsize=9)
                 for ev in events:
-                    c = sev_colors.get(ev.severity, "#888")
+                    c = kind_colors.get(ev.kind, "#888")
                     ax.axvspan(ev.t_start, max(ev.t_end, ev.t_start + 0.05),
                                alpha=0.20, color=c, zorder=1)
                     ax.axvline(ev.t_start, color=c, lw=0.7, ls="--",
@@ -271,7 +286,7 @@ class AnalysisController:
                 self.app._arr_card_widgets.append(lbl)
             else:
                 for idx, ev in enumerate(events):
-                    self.build_arrhythmia_card(idx, ev, sev_colors, kind_icons)
+                    self.build_arrhythmia_card(idx, ev, kind_icons)
 
             # ── TSV store ─────────────────────────────────────
             tsv_rows = ["Type\tStart_s\tEnd_s\tDuration_s\tHR_bpm\tBaseline_bpm\tDelta_pct\tRR_ms\tSeverity\tDescription"]
@@ -286,11 +301,11 @@ class AnalysisController:
 
             n = len(events)
             self.app.lbl_arrhythmia_status.configure(  # type: ignore[union-attr]
-                text=f"  {n} episode{'s' if n != 1 else ''} — click to explore",
+                text=f"  {n} event{'s' if n != 1 else ''} — click to explore",
                 text_color=RED if any(e.severity=="alert" for e in events)
                            else (ORANGE if n else GREEN),
             )
-            self.app._set_status(f"Abnormal-event classification — {n} episode(s)", GREEN)
+            self.app._set_status(f"Abnormal-event classification — {n} event(s)", GREEN)
             self.app.tabs.set("⚠ Abnormal Events")
 
         if self.app.btn_run_arrhythmia is None:
@@ -299,11 +314,14 @@ class AnalysisController:
             self.app.btn_run_arrhythmia, "Classifying…", _worker, _done)
 
     def build_arrhythmia_card(
-        self, idx: int, ev: "ArrhythmiaEvent",
-        sev_colors: dict, kind_icons: dict,
+        self, idx: int, ev: "ArrhythmiaEvent", kind_icons: dict,
     ) -> None:
-        c_sev = sev_colors.get(ev.severity, MUTED)
-        icon  = kind_icons.get(ev.kind, "·")
+        # Colour is the event's KIND (matches the ribbon and the RR-panel
+        # span highlighting -- see _KIND_COLORS). Severity is shown as
+        # plain text instead of also claiming the colour channel, so it no
+        # longer contradicts kind on cards where the two used to disagree.
+        c_kind = self._KIND_COLORS.get(ev.kind, MUTED)
+        icon   = kind_icons.get(ev.kind, "·")
 
         card = ctk.CTkFrame(
             self.app._arr_event_scroll,
@@ -313,7 +331,7 @@ class AnalysisController:
         card.grid(row=idx, column=0, sticky="ew", padx=SPACE_S, pady=(0, SPACE_S))
         card.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkFrame(card, width=4, fg_color=c_sev,
+        ctk.CTkFrame(card, width=4, fg_color=c_kind,
                      corner_radius=0).grid(row=0, column=0, rowspan=3, sticky="ns")
 
         hdr = ctk.CTkFrame(card, fg_color="transparent")
@@ -323,7 +341,7 @@ class AnalysisController:
                      font=FONT_SIDEBAR_HDR, text_color=TEXT,
                      anchor="w").grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(hdr, text=ev.severity.upper(),
-                     font=FONT_BADGE, text_color=c_sev,
+                     font=FONT_BADGE, text_color=MUTED,
                      anchor="e").grid(row=0, column=1, sticky="e")
 
         ctk.CTkLabel(
@@ -377,7 +395,7 @@ class AnalysisController:
         else:
             self.app.btn_arr_edit.configure(
                 fg_color=BORDER, hover_color=BORDER2,
-                text_color=MUTED, text="Edit Peaks",
+                text_color=MUTED, text="Edit peaks in episode",
             )
             self.app.lbl_arr_edit_hint.pack_forget()
         self.app._draw_arr_detail()
@@ -463,7 +481,7 @@ class AnalysisController:
         self.app._run_detection(float(self.app.sl_thr.get()))  # type: ignore[union-attr]
         self.app._draw_arr_detail()
         self.app._draw_detail(self.app.ui.nav_pos)
-        self.app._set_status(msg + "  — rerun Core Analysis to refresh HRV", ORANGE)
+        self.app._set_status(msg + "  — click Analyze to refresh HRV", ORANGE)
         self.app._update_undo_btns()
 
     def on_arr_scroll(self, event) -> None:
@@ -482,6 +500,21 @@ class AnalysisController:
             self.app.ent_arr_win.insert(0, f"{new_win:.2f}")
         except Exception as e:
             log.debug("ent_arr_win update failed: %s", e)
+        # Debounced (mirrors the Detection tab's on_detail_scroll ->
+        # scroll_sync_after_id) so a burst of scroll ticks during one zoom
+        # gesture triggers one full rebuild once scrolling settles, not one
+        # fig.clear()+rebuild per tick. Unlike the Detection tab this
+        # doesn't also do a cheap immediate set_xlim()+draw_idle() step --
+        # draw_arr_detail() doesn't expose its axes between calls the way
+        # the detail-view one does -- so visual feedback lands with the
+        # debounce delay rather than instantly; still far better than one
+        # full rebuild per tick.
+        if self.app.ui.arr_scroll_after_id is not None:
+            self.app.after_cancel(self.app.ui.arr_scroll_after_id)
+        self.app.ui.arr_scroll_after_id = self.app.after(120, self._flush_arr_scroll)
+
+    def _flush_arr_scroll(self) -> None:
+        self.app.ui.arr_scroll_after_id = None
         self.app._draw_arr_detail()
 
     def copy_arrhythmia_tsv(self) -> None:
@@ -553,7 +586,7 @@ class AnalysisController:
     def compute_rolling_hrv(self) -> None:
         """Compute sliding-window HRV and render the timeline plot."""
         if self.app.detection.rpeaks_ok is None or self.app.signal.fs is None:
-            self.app._set_status("Run Core Analysis first.", RED)
+            self.app._set_status("Click Analyze first.", RED)
             return
 
         try:
@@ -710,14 +743,19 @@ class AnalysisController:
                     if metric in ref_bands:
                         lo, hi = ref_bands[metric]
                         ax.axhspan(lo, hi, alpha=0.10, color=color,
-                                   linewidth=0, zorder=0)
+                                   linewidth=0, zorder=0, label="Ref. range (context)")
                         ax.axhline(lo, color=color, lw=0.6,
                                    ls="--", alpha=0.45, zorder=1)
                         ax.axhline(hi, color=color, lw=0.6,
                                    ls="--", alpha=0.45, zorder=1)
+                        ax.legend(loc="upper right", fontsize=6, framealpha=0)
 
+                    # No fill-to-zero here (fill_between defaults to filling
+                    # down to y=0, which forces the axis to autoscale from 0
+                    # and flattens real HR/HRV swings into a sliver at the
+                    # top of the panel) -- a plain line plus the reference
+                    # band above is enough context.
                     ax.plot(t, y, color=color, lw=1.4, zorder=3)
-                    ax.fill_between(t, y, alpha=0.08, color=color, zorder=2)
                     # Low-confidence windows (< MIN_CONFIDENT_BEATS beats): open,
                     # lighter markers instead of filled ones -- same convention
                     # as compute_epochs' draw_epochs().
@@ -765,7 +803,12 @@ class AnalysisController:
             messagebox.showerror("Missing", "pip install neurokit2")
             return
         if self.app.signal.filtered is None or self.app.detection.rpeaks_ok is None:
-            messagebox.showwarning("Not ready", "Click '\u25b6 Preview Detection' first.")
+            # Run the missing prerequisite step instead of just blocking on a
+            # modal the user has to dismiss and act on by hand -- preview()
+            # opens a file picker first if nothing is loaded yet, then chains
+            # straight back into Analyze once detection succeeds.
+            self.app._set_status("No peaks yet — running Detect Peaks first…", ORANGE)
+            self.app.signal_ctrl.preview(then_analyze=True)
             return
         if len(self.app.detection.rpeaks_ok) < 5:
             messagebox.showwarning(
@@ -792,7 +835,7 @@ class AnalysisController:
         the main thread, preventing races with Tk draw callbacks.
         """
         if self.app.detection.rpeaks_ok is None:
-            raise RuntimeError("No peaks available — run Preview Detection first.")
+            raise RuntimeError("No peaks available — click Detect Peaks first.")
         # Take a snapshot of the peaks at worker-start time.  After this point
         # the worker operates only on local variables — no self writes.
         rp = self.app.detection.rpeaks_ok.copy()
@@ -839,9 +882,9 @@ class AnalysisController:
             if len(rp_windowed) < 5:
                 raise ValueError(
                     f"Analysis window too short: only {len(rp_windowed)} peaks "
-                    f"entre {ana_t0:.1f} s et "
-                    f"{'fin' if ana_t1 == 0 else f'{ana_t1:.1f} s'}.\n"
-                    "Élargir la window ou la réinitialiser (bouton 'Tout').")
+                    f"between {ana_t0:.1f} s and "
+                    f"{'the end' if ana_t1 == 0 else f'{ana_t1:.1f} s'}.\n"
+                    "Widen the window or click Full to reset it.")
             rp = rp_windowed
             log.info("Analysis window applied: %.1f s → %s  (%d / %d peaks)",
                      ana_t0, f"{ana_t1:.1f} s" if ana_t1 > 0 else "end",
@@ -849,7 +892,7 @@ class AnalysisController:
 
         _prog(10, "Core analysis (RR, HR, time-domain HRV, beat template)…")
         if self.app.signal.filtered is None:
-            raise RuntimeError("Signal not loaded — run Preview Detection first.")
+            raise RuntimeError("Signal not loaded — click Detect Peaks first.")
         results = analyse_core(self.app.signal.filtered, rp, self.app.signal.fs,
                                progress_cb=lambda p, m: _prog(10 + int(p * 0.9), m))
 
@@ -876,6 +919,15 @@ class AnalysisController:
         # otherwise show total artifact-corrected count.
         _rp_ok   = self.app.detection.rpeaks_ok
         _rp_used = bundle.get("rpeaks_analysed", _rp_ok)  # windowed subset
+
+        # Re-score signal quality now that beat_corr exists -- update_signal_
+        # quality() falls back to an RR-regularity heuristic when it's None
+        # (i.e. always, at the earlier Detect Peaks-time call), which reads
+        # a genuine bradycardia/pause as "noisy" even on a clean recording.
+        # The gauge otherwise stays pinned to that provisional score forever,
+        # visibly disagreeing with the beat-shape-correlation badge below it.
+        if _rp_ok is not None:
+            self.app.detection_ctrl.update_signal_quality(_rp_ok)
         n_total  = len(_rp_ok)  if _rp_ok   is not None else 0
         n_used   = len(_rp_used) if _rp_used is not None else 0
         n_peaks  = n_used  # use analysed count for status messages
@@ -903,24 +955,37 @@ class AnalysisController:
         self.app._update_kpis()
         self.app._draw_detail()
         # Enable the per-tab buttons now that core results are available
-        for btn_attr in ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl", "btn_run_arrhythmia"):
-            if getattr(self.app, btn_attr, None) is not None:
-                getattr(self.app, btn_attr).configure(state="normal")
-        # Update per-tab status labels
-        if self.app.lbl_freq_status is not None:
-            self.app.lbl_freq_status.configure(  # type: ignore[union-attr]
-                text="  Core done — click to compute LF / HF", text_color=BLUE)
+        self.app._set_result_btns_enabled(
+            True, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl", "btn_run_arrhythmia"))
         if self.app.lbl_nonlin_status is not None:
             self.app.lbl_nonlin_status.configure(  # type: ignore[union-attr]
                 text="  Core done — click to compute SampEn / DFA (slow!)", text_color="#9C27B0")
         if self.app.lbl_ivl_status is not None:
             self.app.lbl_ivl_status.configure(  # type: ignore[union-attr]
                 text="  Core done — click to delineate P/Q/S/T waves", text_color=ORANGE)
+        def _core_results_done():
+            # Frequency-domain HRV runs automatically as part of Analyze
+            # rather than needing its own click -- a Welch PSD over a few
+            # hundred RR intervals is cheap (unlike Non-linear's SampEn/DFA,
+            # which stays opt-in), and it used to be the single most common
+            # "click Analyze, then immediately click Freq HRV too" sequence
+            # in the app.
+            #
+            # Deliberately sequenced AFTER _draw_core_results's own chain
+            # finishes, not launched concurrently with it: both this and
+            # run_freq() drive the same shared progress row/status label
+            # through independent async completion callbacks with no
+            # coordination between them -- running them at the same time let
+            # whichever finished last silently overwrite the other's final
+            # status text and could hide the progress row mid-render.
+            self.app._set_status(
+                f"Core analysis done — {n_used} peaks / {n_valid} valid{art_str}{win_str}  "
+                "| Running Frequency HRV…", GREEN)
+            self.run_freq()
+
         try:
             self.app._draw_core_results(
-                on_complete=lambda: self.app._set_status(
-                    f"Core analysis done — {n_used} peaks / {n_valid} valid{art_str}{win_str}  "
-                    "| Use per-tab buttons for Freq / Non-linear / Intervals", GREEN),
+                on_complete=_core_results_done,
                 auto_epochs=bool(bundle.get("auto_epochs", False)),
             )
         except Exception:
@@ -934,11 +999,11 @@ class AnalysisController:
             if t0 > 0 or t1 > 0:
                 dur_str = f"{t0:.1f} s → {t1:.1f} s" if t1 > 0 else f"{t0:.1f} s → fin"
                 self.app.lbl_analysis_window.configure(  # type: ignore[union-attr]
-                    text=f"✓  Analysed  ·  {n_used}/{n_total} peaks  ·  {dur_str}",
+                    text=f"✓  Analyzed  ·  {n_used}/{n_total} peaks  ·  {dur_str}",
                     text_color=GREEN)
             else:
                 self.app.lbl_analysis_window.configure(  # type: ignore[union-attr]
-                    text=f"✓  Analysed  ·  {n_total} peaks  ·  full signal",
+                    text=f"✓  Analyzed  ·  {n_total} peaks  ·  full signal",
                     text_color=GREEN)
         # Enable Save Session now that we have results
         self.app._update_quality_badge()
@@ -947,12 +1012,20 @@ class AnalysisController:
         self.app.session.dirty = True
         # Update session/template info labels
         self.app._update_session_ui(
-            has_session=bool(self.app.signal.filepath and load_session(self.app.signal.filepath) is not None))
+            has_session=bool(self.app.signal.filepath and session_exists(self.app.signal.filepath)))
+        # Auto-expand EXPORTS the first time analysis produces something to
+        # export -- it's collapsed by default and otherwise has no cue
+        # pointing to it, so exporting was effectively undiscoverable.
+        if not getattr(self.app, "_exports_auto_opened", False):
+            self.app._exports_auto_opened = True
+            sec_exports = getattr(self.app, "sec_exports", None)
+            if sec_exports is not None:
+                sec_exports.open()
 
     def run_freq(self) -> None:
         """Compute frequency-domain HRV in background, then render."""
         if self.app.analysis.results is None or self.app.detection.rpeaks_ok is None:
-            messagebox.showwarning("Not ready", "Run Core Analysis first.")
+            messagebox.showwarning("Not ready", "Click Analyze first.")
             return
         rp = self.app._windowed_peaks()
         if rp is None or len(rp) < 5:
@@ -980,15 +1053,22 @@ class AnalysisController:
                 ("HRV tables (freq)", lambda: self.app._plot_hrv_tables(results)),
                 ("Summary",   lambda: self.app._plot_summary(results)),
             ]
-            n_lf = n_hf = "—"
+            # HRV_LF/HRV_HF are absolute band power (ms^2) -- HRV_LFn/HRV_HFn
+            # are the normalised fractions (of LF+HF power) that the table
+            # and PSD legend both already show, and are what "LF %"/"HF %"
+            # means to a reader. Multiplying the absolute power by 100 (the
+            # previous code here) produced a tiny, meaningless number that
+            # openly contradicted the table two inches below it.
+            n_lf = n_hf = n_lfhf = "—"
             try:
-                n_lf = f"{float(result['HRV_LF'].values[0])*100:.1f}%"
-                n_hf = f"{float(result['HRV_HF'].values[0])*100:.1f}%"
+                n_lf = f"{float(result['HRV_LFn'].values[0])*100:.1f}%"
+                n_hf = f"{float(result['HRV_HFn'].values[0])*100:.1f}%"
+                n_lfhf = f"{float(result['HRV_LFHF'].values[0]):.1f}"
             except Exception as _exc:
                 log.debug("run_freq: LF/HF% formatting failed: %s", _exc, exc_info=True)
             if self.app.lbl_freq_status is not None:
                 self.app.lbl_freq_status.configure(  # type: ignore[union-attr]
-                    text=f"  Done  LF={n_lf}  HF={n_hf}", text_color=GREEN)
+                    text=f"  Done  LFn={n_lf}  HFn={n_hf}  LF/HF={n_lfhf}", text_color=GREEN)
             self.app._run_plot_chain(
                 tasks,
                 on_complete=lambda: self.app._set_status("Frequency HRV done", GREEN))
@@ -998,7 +1078,7 @@ class AnalysisController:
     def run_nonlinear(self) -> None:
         """Compute non-linear HRV in background, then render."""
         if self.app.analysis.results is None or self.app.detection.rpeaks_ok is None:
-            messagebox.showwarning("Not ready", "Run Core Analysis first.")
+            messagebox.showwarning("Not ready", "Click Analyze first.")
             return
         rp = self.app._windowed_peaks()
         if rp is None or len(rp) < 5:
@@ -1060,7 +1140,7 @@ class AnalysisController:
     def run_intervals(self) -> None:
         """Compute interval delineation (PR/QRS/QT/QTc) for every beat."""
         if self.app.analysis.results is None or self.app.signal.filtered is None or self.app.detection.rpeaks_ok is None:
-            messagebox.showwarning("Not ready", "Run Core Analysis first.")
+            messagebox.showwarning("Not ready", "Click Analyze first.")
             return
         rp = self.app._windowed_peaks()
         if rp is None or len(rp) < 5:
@@ -1106,11 +1186,24 @@ class AnalysisController:
             n_total = len(df)
 
             wt        = self.app.analysis.wave_template
-            tmpl_note = f"  template:{wt.source}" if wt else ""
-            note      = f"  {n_ok}/{n_total} complete{tmpl_note}"
-            note_color = GREEN if n_ok > 0 else ORANGE
-            if n_ok == 0 and n_total > 0:
-                note += "  ⚠ check template / filters"
+            tmpl_note = f"  ·  template: {wt.source}" if wt else ""
+            pct       = 100.0 * n_ok / n_total if n_total else 0.0
+            # Graded by completion ratio, not "any beat succeeded" -- a
+            # measurement drawn from a small, possibly-biased subset (wave
+            # delineation tends to fail on exactly the abnormal beats) is a
+            # very different result from a near-complete one, and both used
+            # to render identically as plain green.
+            if pct >= 90:
+                note_color = GREEN
+            elif pct >= 50:
+                note_color = ORANGE
+            else:
+                note_color = RED
+            note = f"  {n_ok}/{n_total} beats measured ({pct:.0f}%){tmpl_note}"
+            if n_ok < n_total:
+                remedy = ("check template / filters" if n_ok == 0
+                          else "try Permissive Bounds or adjust Landmarks")
+                note += f"  — {n_total - n_ok} outside bounds: {remedy}"
             if self.app.lbl_ivl_status is not None:
                 self.app.lbl_ivl_status.configure(text=note, text_color=note_color)  # type: ignore[union-attr]
 
@@ -1123,6 +1216,50 @@ class AnalysisController:
 
         self.app._start_async_result(self.app.btn_run_ivl, "Delineating…", _worker, _done)  # type: ignore[arg-type]
 
+    def refresh_epoch_feasibility(self) -> None:
+        """Proactively warn if the current Epoch (s) value can't fit the
+        recording, instead of only finding out after clicking Compute epochs
+        and getting the inline "too short" message. Called when the Epochs
+        sub-view is shown (see app._on_hrv_view_change) so the warning —
+        and the orange entry border — are visible before the user presses
+        anything. Mirrors compute_epochs()'s own feasibility check below.
+        """
+        if self.app.lbl_epoch_info is None or self.app.ent_epoch is None:
+            return
+        if self.app.detection.rpeaks_ok is None or len(self.app.detection.rpeaks_ok) < 10:
+            return
+        rp = self.app._windowed_peaks()
+        if rp is None or len(rp) < 10 or self.app.signal.time is None:
+            return
+        fs        = self.app.signal.fs
+        t_peaks   = rp / fs
+        dur       = float(t_peaks[-1] - t_peaks[0])
+        epoch_s   = max(MouseECG.EPOCH_MIN_S,
+                        self.app._safe_float(self.app.ent_epoch, MouseECG.EPOCH_DEFAULT_S))
+        overlap_s = max(0.0, self.app._safe_float(self.app.ent_overlap, 0.0))
+        # Mirror compute_epochs()'s own bad-overlap guard: without this, a
+        # step of max(1.0, epoch_s - overlap_s) floors the invalid negative
+        # to 1.0 and reports "feasible" (clear border) for a combination
+        # that compute_epochs() will immediately reject with a blocking
+        # "Bad overlap" modal the moment Compute epochs is clicked.
+        if overlap_s >= epoch_s:
+            self.app.lbl_epoch_info.configure(
+                text=f"Overlap ({overlap_s:.0f}s) must be less than epoch ({epoch_s:.0f}s).",
+                text_color=ORANGE)
+            self.app.ent_epoch.configure(border_color=ORANGE)
+            return
+        step      = max(1.0, epoch_s - overlap_s)
+        n_starts  = len(np.arange(0.0, dur - epoch_s + step * 0.5, step))
+        if n_starts < 2:
+            suggested = max(MouseECG.EPOCH_MIN_S, dur // 3)
+            self.app.lbl_epoch_info.configure(
+                text=(f"Recording too short for {epoch_s:.0f}s epochs "
+                      f"({dur:.0f}s available) — try ~{suggested:.0f}s."),
+                text_color=ORANGE)
+            self.app.ent_epoch.configure(border_color=ORANGE)
+        else:
+            self.app.ent_epoch.configure(border_color=BORDER2)
+
     def compute_epochs(self) -> None:
         """Compute epoch-level HRV in a background thread to keep the UI responsive.
 
@@ -1132,7 +1269,7 @@ class AnalysisController:
         _start_async_result, exactly like _run_freq / _run_nonlinear.
         """
         if self.app.detection.rpeaks_ok is None or len(self.app.detection.rpeaks_ok) < 10:
-            messagebox.showwarning("No data", "Run Preview Detection first.")
+            messagebox.showwarning("No data", "Click Detect Peaks first.")
             return
         if self.app.signal.time is None:
             return
@@ -1158,10 +1295,15 @@ class AnalysisController:
         starts    = np.arange(t_win_start, t_win_start + dur - epoch_s + step * 0.5, step)
         _gen = getattr(self.app, "_generation", 0)  # snapshot — detect file change
         if len(starts) < 2:
-            messagebox.showwarning(
-                "Too few epochs",
-                f"Recording too short for {epoch_s:.0f}s epochs. "
-                f"Try a shorter epoch (e.g. {int(dur // 3)}s).")
+            # Inline, non-blocking: a modal here used to re-fire on every
+            # auto-run (see sw_epoch) without ever applying the suggested
+            # value, forcing a dismiss-retype-retry loop.
+            suggested = max(MouseECG.EPOCH_MIN_S, dur // 3)
+            if self.app.lbl_epoch_info is not None:
+                self.app.lbl_epoch_info.configure(
+                    text=(f"Recording too short for {epoch_s:.0f}s epochs "
+                          f"({dur:.0f}s available) — try ~{suggested:.0f}s."),
+                    text_color=ORANGE)
             return
 
         def _worker():
@@ -1250,11 +1392,14 @@ class AnalysisController:
                     y = df[col].values
                     if col in ref_bands:
                         lo, hi = ref_bands[col]
-                        ax.axhspan(lo, hi, alpha=0.10, color=color, linewidth=0, zorder=0)
+                        ax.axhspan(lo, hi, alpha=0.10, color=color, linewidth=0, zorder=0,
+                                   label="Ref. range (context)")
                         ax.axhline(lo, color=color, lw=0.6, ls="--", alpha=0.45, zorder=1)
                         ax.axhline(hi, color=color, lw=0.6, ls="--", alpha=0.45, zorder=1)
+                        ax.legend(loc="upper right", fontsize=6, framealpha=0)
+                    # No fill-to-zero (see draw_rolling) -- keeps real
+                    # HR/HRV swings from being squashed against the top edge.
                     ax.plot(t_mid, y, color=color, lw=1.5, zorder=3)
-                    ax.fill_between(t_mid, y, alpha=0.10, color=color, zorder=2)
                     # Low-confidence epochs (< MIN_CONFIDENT_BEATS beats): open,
                     # lighter markers instead of filled ones -- same data,
                     # visually distinguished rather than silently identical.
@@ -1282,8 +1427,10 @@ class AnalysisController:
             # Update the label in the Epochs tab header
             self.app.lbl_epoch_count.configure(
                 text=f"{n_ep} epochs × {epoch_s:.0f}s", text_color=BLUE)
-            # Update the label in the Summary tab (shows last-computed epoch info)
             self.app.lbl_epoch_info.configure(
+                text=f"{n_ep} epoch(s) computed", text_color=MUTED)
+            # Update the label in the Summary tab (shows last-computed epoch info)
+            self.app.lbl_summary_epoch_info.configure(
                 text=f"Last epoch run: {n_ep} × {epoch_s:.0f}s", text_color=MUTED)
             self.app.tabs.set("💓 HRV"); self.app.after(50, lambda: self.app._on_hrv_view_change("Epochs"))
             self.app._set_status(f"Epoch analysis done — {n_ep} epochs", GREEN)

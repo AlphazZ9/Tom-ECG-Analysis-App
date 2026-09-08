@@ -24,6 +24,7 @@ from ecg.core.detection import (
 from ecg.core.ml_detector import detect_peaks_ml, MLPeakModel
 from ecg.ui.theme import (
     BLUE, BORDER, BORDER2, GREEN, LIGHT, MUTED, ORANGE, ORANGE_DEEP, RED,
+    SPACE_M, SPACE_S,
 )
 from ecg.ui.widgets import update_quality_gauge
 from ecg.ui.dialogs import MethodAgreementDialog
@@ -39,11 +40,10 @@ class DetectionController:
         self.app = app
 
     def update_undo_btns(self) -> None:
-        """Update all undo/redo button instances (Detection + Abnormal Events tabs)."""
+        """Update the toolbar's undo/redo buttons (single global pair, shared
+        by the Detection and Abnormal Events tabs)."""
         n_u, n_r = len(self.app.detection.edit_undo), len(self.app.detection.edit_redo)
-        for attr, n in [("btn_undo_edit", n_u), ("btn_redo_edit", n_r),
-                        ("btn_arr_undo",  n_u), ("btn_arr_redo",  n_r),
-                        ("btn_toolbar_undo", n_u), ("btn_toolbar_redo", n_r)]:
+        for attr, n in [("btn_toolbar_undo", n_u), ("btn_toolbar_redo", n_r)]:
             try:
                 btn = getattr(self.app, attr)
                 key = "undo" if "undo" in attr else "redo"
@@ -109,12 +109,17 @@ class DetectionController:
         color = GREEN if n > 10 else RED
         self.app.after(0, lambda _n=n, _c=color: self.app.lbl_npeaks.configure(  # type: ignore[union-attr]
             text=f"Peaks detected: {_n}", text_color=_c))
+        # Reflect the resulting normalised amplitude next to the fraction so
+        # "Threshold: 0.50" doesn't look disconnected from the amber line on
+        # the plot -- both now read the same "fraction -> norm. amplitude".
+        if getattr(self.app, "lbl_thr_hint", None) is not None:
+            self.app.after(0, lambda _t=thresh, _a=thresh_amp: self.app.lbl_thr_hint.configure(  # type: ignore[union-attr]
+                text=f"Current: {_t:.2f} → ≈{_a:.2f} norm. of the median R-peak "
+                     "height. Lower = more peaks."))
         # Enable the artifact review button as soon as peaks are available
-        self.app.after(0, lambda: self.app.btn_review_art.configure(  # type: ignore[union-attr]
-            state="normal" if n > 4 else "disabled"))
+        self.app.after(0, lambda: self.app._set_review_artifacts_enabled(n > 4))  # type: ignore[union-attr]
         if self.app.btn_check_agreement is not None:
-            self.app.after(0, lambda: self.app.btn_check_agreement.configure(  # type: ignore[union-attr]
-                state="normal" if n > 4 else "disabled"))
+            self.app.after(0, lambda: self.app._set_check_agreement_enabled(n > 4))  # type: ignore[union-attr]
         self.update_signal_quality(accepted)
         return n
 
@@ -171,12 +176,23 @@ class DetectionController:
 
     def on_det_method_change(self, choice: str) -> None:
         """Show/hide SG options frame based on selected detection method."""
-        if self.app._sg_frame is None:
-            return
-        if "SG" in choice or "Derivative" in choice:
-            self.app._sg_frame.pack(fill="x")
-        else:
-            self.app._sg_frame.pack_forget()
+        if self.app._sg_frame is not None:
+            if "SG" in choice or "Derivative" in choice:
+                self.app._sg_frame.pack(fill="x")
+            else:
+                self.app._sg_frame.pack_forget()
+
+        # ML Detector needs a trained model before it can run, and that
+        # status lives in a right-panel section that starts collapsed on
+        # the opposite side of the window -- surface it inline, right next
+        # to the Method combobox, instead of only in that far-away section.
+        lbl = getattr(self.app, "lbl_ml_inline_status", None)
+        if lbl is not None:
+            if choice == "ML Detector":
+                self.app.refresh_ml_status()
+                lbl.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_S))
+            else:
+                lbl.pack_forget()
 
     def on_filtering_toggle(self) -> None:
         """Grey out (not hide) FILTER SETTINGS -- notch/band-pass/cleaning
@@ -242,6 +258,22 @@ class DetectionController:
         self.app.detection.edit_redo.clear()
         self.update_undo_btns()
 
+    def _invalidate_stale_results(self) -> None:
+        """Call right before actually committing a peak-set change.
+
+        Rather than leaving SDNN/RMSSD/HRV tables/Poincaré/Summary/every
+        export showing the pre-edit numbers until the user remembers to
+        click Analyze again. Must only be called on a code path that is
+        actually about to change the accepted-peak set -- calling it
+        unconditionally on click, before knowing whether the click will hit
+        a peak, wipes results for a no-op click.
+        """
+        if self.app.analysis.results is not None:
+            self.app.analysis.results  = None
+            self.app.analysis.epoch_df = None
+            self.app._reset_kpis()
+            self.app._reset_result_plots()
+
     def undo_edit(self, _event=None) -> None:
         """Ctrl+Z — restore previous peak-edit state."""
         if not self.app.detection.edit_undo:
@@ -273,6 +305,13 @@ class DetectionController:
 
     def apply_edit_state(self) -> None:
         if self.app.signal.filtered is not None and self.app.detection.all_candidates is not None:
+            # Undo/redo change the accepted-peak set just like a direct
+            # edit does -- same stale-HRV invalidation as on_detail_click.
+            if self.app.analysis.results is not None:
+                self.app.analysis.results  = None
+                self.app.analysis.epoch_df = None
+                self.app._reset_kpis()
+                self.app._reset_result_plots()
             self.run_detection(float(self.app.sl_thr.get()))  # type: ignore[union-attr]
             self.app._draw_detail(self.app.ui.nav_pos)
             # Also refresh the arrhythmia ECG viewer if an event is selected
@@ -344,6 +383,8 @@ class DetectionController:
         # Invalidate any previous analysis — peaks have changed
         self.app.analysis.results  = None
         self.app.analysis.epoch_df = None
+        self.app._reset_kpis()
+        self.app._reset_result_plots()
         self.app.detection.rpeaks_manual_excl  = np.array([], dtype=int)
         self.app.detection.rpeaks_manual_added = np.array([], dtype=int)
         if self.app.signal.filtered is not None and self.app.detection.all_candidates is not None:
@@ -424,9 +465,16 @@ class DetectionController:
         self.app.ui.hover_after_id = self.app.after(30, self.flush_hover_redraw)
 
     def flush_hover_redraw(self) -> None:
-        """Execute the throttled hover redraw on the main thread."""
+        """Execute the throttled hover redraw on the main thread.
+
+        full=False -- a hover-preview marker only affects draw_detail()
+        itself (see plot_controller.py's hover_samp usage); the minimap and
+        RR/HR/Quality strip don't read hover state and are unchanged by it,
+        so redrawing them here was three full-figure rebuilds for the price
+        of one, on every ~30ms hover tick while in Edit mode.
+        """
         self.app.ui.hover_after_id = None
-        self.app._draw_detail(self.app.ui.nav_pos)
+        self.app._draw_detail(self.app.ui.nav_pos, full=False)
 
     def on_detail_click(self, event) -> None:
         """Edit-mode click handler for the detail view.
@@ -466,6 +514,11 @@ class DetectionController:
         #  RIGHT-CLICK: add a new peak, or remove an existing manually-added one
         # ──────────────────────────────────────────────────────────────────────
         if is_right:
+            # Every branch below this point commits a change (add/remove/
+            # replace) -- unlike the left-click branch, there's no no-op
+            # path here, so invalidating unconditionally is safe.
+            self._invalidate_stale_results()
+
             # ── FREE PLACEMENT: always add at the exact clicked sample ────────
             # All guards (proximity, remove-nearby, local-max snapping) are
             # bypassed.  The peak lands precisely where the user clicked.
@@ -480,7 +533,7 @@ class DetectionController:
                 self.app._set_status(
                     f"[Free] Added peak at {new_samp / fs:.3f} s  |  "
                     f"Total added: {n_added}  |  Accepted: {n_ok}  "
-                    "— re-run Full Analysis to update HRV.",
+                    "— click Analyze to refresh HRV.",
                     BLUE,
                 )
                 self.app._draw_detail(self.app.ui.nav_pos)
@@ -499,7 +552,7 @@ class DetectionController:
                     n_ok = len(self.app.detection.rpeaks_ok) if self.app.detection.rpeaks_ok is not None else 0
                     self.app._set_status(
                         f"Removed manually added peak at {click_time:.3f} s  |  "
-                        f"Accepted: {n_ok}  — re-run Full Analysis to update HRV.",
+                        f"Accepted: {n_ok}  — click Analyze to refresh HRV.",
                         ORANGE,
                     )
                     self.app._draw_detail(self.app.ui.nav_pos)
@@ -533,7 +586,7 @@ class DetectionController:
                     self.app._set_status(
                         f"Replaced peak {old_peak/fs:.3f} s → {new_samp/fs:.3f} s  "
                         f"({nearest_dist/fs*1000:.1f} ms apart)  |  Accepted: {n_ok}  "
-                        "— re-run Full Analysis to update HRV.",
+                        "— click Analyze to refresh HRV.",
                         ORANGE,
                     )
                     self.app._draw_detail(self.app.ui.nav_pos)
@@ -549,7 +602,7 @@ class DetectionController:
             self.app._set_status(
                 f"Added peak at {new_samp / fs:.3f} s (snapped to local max)  |  "
                 f"Total added: {n_added}  |  Accepted: {n_ok}  "
-                "— re-run Full Analysis to update HRV.",
+                "— click Analyze to refresh HRV.",
                 ORANGE,
             )
             self.app._draw_detail(self.app.ui.nav_pos)
@@ -579,6 +632,12 @@ class DetectionController:
         if distances[nearest_i] > tol_s:
             return   # click not close enough to any peak
 
+        # Past this point the click is guaranteed to toggle a peak's
+        # exclusion -- safe to invalidate now (not unconditionally at the
+        # top of the handler, which would also wipe results for the two
+        # no-op returns above).
+        self._invalidate_stale_results()
+
         peak_idx = int(candidates[nearest_i])
 
         self.push_edit_undo()
@@ -592,7 +651,7 @@ class DetectionController:
         n_excl = len(self.app.detection.manual_excluded)
         self.app._set_status(
             f"Manual exclusions: {n_excl}  |  Accepted peaks: {n_ok}  "
-            "— re-run Full Analysis to update HRV.",
+            "— click Analyze to refresh HRV.",
             ORANGE,
         )
         self.app._draw_detail(self.app.ui.nav_pos)
@@ -605,7 +664,7 @@ class DetectionController:
         not flood the rendering pipeline — especially important for long
         recordings where apply_threshold() + two canvas draws take ~50 ms.
         """
-        self.app.lbl_thr.configure(text=f"Sensitivity:  {value:.3f}")
+        self.app.lbl_thr.configure(text=f"Threshold:  {value:.3f}")
         self.app.ent_thr.delete(0, "end")  # type: ignore[union-attr]
         self.app.ent_thr.insert(0, f"{value:.3f}")  # type: ignore[union-attr]
 
@@ -629,6 +688,7 @@ class DetectionController:
             self.app.analysis.results  = None
             self.app.analysis.epoch_df = None
             self.app._reset_kpis()
+            self.app._reset_result_plots()
         self.run_detection(value)
         self.app._draw_detail(self.app.ui.nav_pos)
 
@@ -640,7 +700,7 @@ class DetectionController:
         try:
             value = max(0.01, min(2.0, float(self.app.ent_thr.get())))  # type: ignore[union-attr]
             self.app.sl_thr.set(value)  # type: ignore[union-attr]
-            self.app.lbl_thr.configure(text=f"Sensitivity:  {value:.3f}")
+            self.app.lbl_thr.configure(text=f"Threshold:  {value:.3f}")
             if self.app.signal.filtered is not None and self.app.detection.all_candidates is not None:
                 self.apply_threshold_ui(value)
         except ValueError:
@@ -690,7 +750,7 @@ class DetectionController:
         """
         if self.app.signal.filtered is None or self.app.detection.rpeaks_ok is None \
                 or len(self.app.detection.rpeaks_ok) == 0:
-            messagebox.showwarning("Not ready", "Run Preview Detection first.")
+            messagebox.showwarning("Not ready", "Click Detect Peaks first.")
             return
 
         # Snapshot on the main thread -- the worker runs in a background

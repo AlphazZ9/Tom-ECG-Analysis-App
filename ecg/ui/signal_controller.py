@@ -127,7 +127,7 @@ class SignalController:
             # user-already-inverted signal first.
             _prog(48, "Polarity correction…")
             sig, inverted, _, _ = fix_polarity(sig, fs, params["min_rr_ms"], force_polarity=force_pol)
-            _prog(50, "CWT — séparation bruit / QRS / J-wave…")
+            _prog(50, "CWT — separating noise / QRS / J-wave…")
             try:
                 peaks_wt, proms_wt, t_amp_wt = detect_peaks_wavelet(
                     sig,
@@ -464,16 +464,17 @@ class SignalController:
                     text_color=ORANGE)
             except Exception as e:
                 log.debug("lbl_fs_source configure failed: %s", e)
+            self._auto_open_signal_section()
 
         if self.app.lbl_npeaks is not None:
             self.app.lbl_npeaks.configure(  # type: ignore[union-attr]
-                text="Peaks detected: — (click Preview Detection)", text_color=MUTED)
+                text="Peaks detected: — (click Detect Peaks)", text_color=MUTED)
         if self.app.btn_review_art is not None:
-            self.app.btn_review_art.configure(state="disabled")  # type: ignore[union-attr]
+            self.app._set_review_artifacts_enabled(False)
         self.app.detection.agreement_disagree_samples = None
         self.app.detection.agreement_summary = ""
         if self.app.btn_check_agreement is not None:
-            self.app.btn_check_agreement.configure(state="disabled")  # type: ignore[union-attr]
+            self.app._set_check_agreement_enabled(False)
         if self.app.lbl_agreement_status is not None:
             self.app.lbl_agreement_status.configure(  # type: ignore[union-attr]
                 text="  Not run yet", text_color=LIGHT)
@@ -481,7 +482,7 @@ class SignalController:
         dur = bundle["dur_s"]
         self.app._set_status(
             f"Raw signal loaded — {dur:.0f} s  |  {fs} Hz  "
-            "→ click '1 ▶ Preview Detection' to filter and detect peaks.", BLUE)
+            "→ click Detect Peaks to filter and find R-peaks.", BLUE)
         self.app.tabs.set("📈 Detection")
         self.app._update_ann_count()
         self.app._update_pacing_count()
@@ -500,10 +501,20 @@ class SignalController:
                 text=f"Raw signal loaded  ·  {dur:.1f} s  ·  not yet analysed",
                 text_color=MUTED)
 
-    def preview(self) -> None:
-        """Load, filter, and detect peaks — fast, no HRV."""
+    def preview(self, then_analyze: bool = False) -> None:
+        """Load, filter, and detect peaks — fast, no HRV.
+
+        then_analyze=True (set by run_analysis() when Analyze is clicked
+        with no peaks yet) chains straight into Core Analysis once
+        detection succeeds, instead of leaving the user to notice peaks
+        are ready and click Analyze again.
+        """
         if not self.app.signal.filepath:
-            messagebox.showwarning("No file", "Open a .mat file first.")
+            # Nothing loaded yet -- open the file picker directly rather
+            # than just telling the user to. then_analyze is dropped here:
+            # the user still has to trigger detection once a file is
+            # chosen, same as clicking Detect Peaks by hand.
+            self.app._open_file()
             return
         # Snapshot widget values on the main thread before spawning background work.
         params = self.app._snapshot_params()
@@ -512,7 +523,7 @@ class SignalController:
         self.app._start_async(
             self.app.btn_preview, "Loading…", "Loading signal…",
             lambda: self.preview_worker(params),
-            self.on_preview_done,
+            lambda bundle: self.on_preview_done(bundle, then_analyze=then_analyze),
             pass_result=True,
         )
 
@@ -592,6 +603,18 @@ class SignalController:
             "recommended_min_rr_ms": None,
         }
 
+    def _auto_open_signal_section(self) -> None:
+        """Expand the sidebar's SIGNAL section the first time fs auto-detect
+        fails -- it's collapsed by default, so the "fs not found" warning
+        (and the fix: set it manually right there) was otherwise invisible.
+        """
+        if getattr(self.app, "_signal_section_auto_opened", False):
+            return
+        self.app._signal_section_auto_opened = True
+        sec_signal = getattr(self.app, "sec_signal", None)
+        if sec_signal is not None:
+            sec_signal.open()
+
     def apply_detected_fs(self, fs: float) -> None:
         """Update the fs entry and source label on the main thread."""
         try:
@@ -603,7 +626,7 @@ class SignalController:
             text=f"✓ Auto-detected from file: {int(fs)} Hz",
             text_color=GREEN)
 
-    def on_preview_done(self, bundle: dict) -> None:
+    def on_preview_done(self, bundle: dict, then_analyze: bool = False) -> None:
         """Atomically write all signal state on the main thread, then draw.
 
         This is the ONLY place that should assign signal/peak instance variables
@@ -634,14 +657,28 @@ class SignalController:
         self.app.detection.thresh_amp          = bundle["thresh_amp"]
         self.app.detection.rpeaks_manual_excl  = np.array([], dtype=int)
         self.app.detection.rpeaks_manual_added = np.array([], dtype=int)
-        # Reset manual peak edits — new file, clean slate
+        # Manual peak edits are indices into a *specific* detection run --
+        # a re-run with different filter/threshold/SG settings can produce
+        # a materially different candidate set, so preserving old indices
+        # against it risks silently excluding/adding the wrong beats. They
+        # ARE always cleared here (correct), but if there was something to
+        # lose, note it below rather than discarding it with no trace.
+        _had_manual_edits = bool(self.app.detection.manual_excluded or
+                                 self.app.detection.manual_added)
         self.app.detection.manual_excluded.clear()
         self.app.detection.manual_added.clear()
         # Invalidate all previous analysis state — new file, clean slate
         self.app.analysis.results       = None
         self.app.analysis.epoch_df      = None
-        self.app.analysis.annotations   = []    # annotations belong to a specific file
-        self.app.analysis.pacing_periods = []   # pacing periods belong to a specific file
+        # Annotations/pacing periods are NOT cleared here -- they're time-
+        # ranges scoped to the recording, not to one detection run, so
+        # they stay valid across a re-detect on the SAME file (changing SG
+        # window, threshold, etc.). The genuine new-file case is already
+        # handled by reset_for_new_file() (called from load_path() before
+        # this ever runs); clearing them here too meant typing an ordinary
+        # space into an annotation's own label field -- which triggers
+        # this same Detect-Peaks pipeline via the global Space shortcut --
+        # silently deleted every annotation and pacing period on the file.
         self.app.analysis.wave_template = None  # template may not suit new signal
         self.app.session.dirty = False
         # Increment generation so any in-flight bg workers discard their results
@@ -685,6 +722,7 @@ class SignalController:
                     text_color=ORANGE)
             except Exception as e:
                 log.debug("lbl_fs_source configure failed: %s", e)
+            self._auto_open_signal_section()
 
         # Update peak count label and quality score
         n = len(self.app.detection.rpeaks_ok)  # type: ignore[union-attr]
@@ -692,19 +730,32 @@ class SignalController:
         if self.app.lbl_npeaks is not None:
             self.app.lbl_npeaks.configure(text=f"Peaks detected: {n}", text_color=color)  # type: ignore[union-attr]
         if self.app.btn_review_art is not None:
-            self.app.btn_review_art.configure(state="normal" if n > 4 else "disabled")  # type: ignore[union-attr]
+            self.app._set_review_artifacts_enabled(n > 4)
         self.app._update_signal_quality(self.app.detection.rpeaks_ok)  # type: ignore[union-attr]
+
+        # Auto-open ARTIFACTS the first time Detect Peaks produces enough
+        # peaks to review -- it was collapsed by default two clicks deep
+        # (scroll, then expand), so artifact review was easy to skip
+        # entirely even though it directly edits the beats behind every
+        # HRV number.
+        if n > 4 and not getattr(self.app, "_artifacts_auto_opened", False):
+            self.app._artifacts_auto_opened = True
+            sec_artifacts = getattr(self.app, "sec_artifacts", None)
+            if sec_artifacts is not None:
+                sec_artifacts.open()
 
         dur = bundle["dur_s"]
         detector_warning = bundle.get("detector_warning")
+        edits_note = ("  ·  previous manual peak edits cleared (re-detected)"
+                      if _had_manual_edits else "")
         if detector_warning:
-            self.app._set_status(detector_warning, ORANGE)
+            self.app._set_status(detector_warning + edits_note, ORANGE)
         else:
             self.app._set_status(
                 f"Signal ready — {n} peaks  |  {dur:.0f} s  |  {fs} Hz  "
-                "→ adjust threshold then Run Full Analysis.", GREEN)
+                f"→ adjust threshold then click Analyze.{edits_note}", GREEN)
         self.app.tabs.set("📈 Detection")
-        self.app._update_ann_count()   # reflect cleared annotations immediately
+        self.app._update_ann_count()   # refresh count (annotations persist across re-detect)
         self.app._update_pacing_count()
         # Sync nav bar
         self.app.ui.nav_pos = 0.0
@@ -721,6 +772,13 @@ class SignalController:
             self.app.lbl_analysis_window.configure(  # type: ignore[union-attr]
                 text=f"Full signal  ·  {n} peaks  ·  {dur:.1f} s",
                 text_color=MUTED)
+
+        # Chain back into Analyze (see run_analysis()'s "no peaks yet" path)
+        # now that detection has produced a usable peak set. Below 5 peaks,
+        # run_analysis()'s own "Too few peaks" guard applies -- let the user
+        # see that dialog and adjust settings instead of looping silently.
+        if then_analyze and n >= 5:
+            self.app.analysis_ctrl.run_analysis()
 
     def windowed_peaks(self) -> "Optional[np.ndarray]":
         """Return a copy of _rpeaks_ok filtered to the current analysis window.
@@ -767,11 +825,11 @@ class SignalController:
 
         # Validate
         if t1 > 0 and t0 >= t1:
-            self.app._set_status("La borne de début doit être inférieure à la borne de fin.", RED)
+            self.app._set_status("Start bound must be less than the end bound.", RED)
             return
         if self.app.signal.time is not None and t1 > float(self.app.signal.time[-1]) + 0.1:
             self.app._set_status(
-                f"La borne de fin dépasse la durée du signal ({self.app.signal.time[-1]:.1f} s).", ORANGE)
+                f"End bound exceeds the signal duration ({self.app.signal.time[-1]:.1f} s).", ORANGE)
 
         self.app.analysis.t_start = t0
         self.app.analysis.t_end   = t1
@@ -798,7 +856,7 @@ class SignalController:
                 text=label_txt, text_color=color)
 
         self.app._set_status(
-            "Analysis window updated — re-run Core Analysis.", BLUE)
+            "Analysis window updated — click Analyze to refresh.", BLUE)
 
     def reset_analysis_window(self) -> None:
         """Reset analysis window to full signal."""
@@ -928,9 +986,11 @@ class SignalController:
         self.app.lbl_file.configure(text=os.path.basename(path), text_color=GREEN)  # type: ignore[union-attr]
         self.app._add_recent(path)
         # ── Try to restore a previously saved session ───────────────
-        if self.app._try_restore_session(path):
-            return   # session restored — skip raw load
-        self.load_raw_only()
+        # Fully async now (including the session-file check itself) --
+        # try_restore_session decides on its own, once the check completes,
+        # whether to restore or fall through to load_raw_only(); there's no
+        # synchronous answer to branch on here any more.
+        self.app._try_restore_session(path)
 
     def reset_for_new_file(self) -> None:
         """Reset ALL analysis state and UI to the startup blank slate.
@@ -1025,31 +1085,29 @@ class SignalController:
                 text="Run detection", text_color=MUTED)
 
         # ── 6. Disable per-tab on-demand buttons ─────────────────────────
-        for btn_attr in ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl",
-                         "btn_run_arrhythmia", "btn_save_session"):
-            w = getattr(self.app, btn_attr, None)
-            if w is not None:
-                try:
-                    w.configure(state="disabled")
-                except Exception as e:
-                    log.debug("widget disable failed: %s", e)
+        try:
+            self.app._set_result_btns_enabled(
+                False, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl",
+                        "btn_run_arrhythmia", "btn_save_session"))
+        except Exception as e:
+            log.debug("widget disable failed: %s", e)
 
         # ── 7. Per-tab status labels ──────────────────────────────────────
         if self.app.lbl_freq_status is not None:
             self.app.lbl_freq_status.configure(  # type: ignore[union-attr]
-                text="  Run Core Analysis first", text_color=MUTED)
+                text="  Click Analyze first", text_color=MUTED)
         if self.app.lbl_nonlin_status is not None:
             self.app.lbl_nonlin_status.configure(  # type: ignore[union-attr]
-                text="  Run Core Analysis first", text_color=MUTED)
+                text="  Click Analyze first", text_color=MUTED)
         if self.app.lbl_ivl_status is not None:
             self.app.lbl_ivl_status.configure(  # type: ignore[union-attr]
-                text="  Run Core Analysis first", text_color=MUTED)
+                text="  Click Analyze first", text_color=MUTED)
         if self.app.lbl_arrhythmia_status is not None:
             self.app.lbl_arrhythmia_status.configure(  # type: ignore[union-attr]
-                text="  Run Core Analysis first", text_color=MUTED)
+                text="  Click Analyze first", text_color=MUTED)
         if self.app.lbl_roll_status is not None:
             self.app.lbl_roll_status.configure(  # type: ignore[union-attr]
-                text="  Run Core Analysis first", text_color=MUTED)
+                text="  Click Analyze first", text_color=MUTED)
 
         # ── 8. Textboxes ──────────────────────────────────────────────────
         for tb_attr in ("txt_rr", "txt_td", "txt_fd"):
@@ -1071,7 +1129,7 @@ class SignalController:
         if self.app.lbl_arr_event_title is not None:
             try:
                 self.app.lbl_arr_event_title.configure(  # type: ignore[union-attr]
-                    text="← Click on an episode", text_color=MUTED)
+                    text="← Click on an event", text_color=MUTED)
             except Exception as e:
                 log.debug("lbl_arr_event_title reset failed: %s", e)
 

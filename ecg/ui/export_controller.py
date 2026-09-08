@@ -48,7 +48,7 @@ class ExportController:
         """
         app = self.app
         if app.analysis.results is None:
-            messagebox.showwarning("No results", "Run Core Analysis first.")
+            messagebox.showwarning("No results", "Click Analyze first.")
             return
 
         folder = filedialog.askdirectory(title="Choose export folder for figures")
@@ -149,10 +149,10 @@ class ExportController:
                 log.warning("Could not save '%s': %s", stem, exc)
                 skipped += 1
 
-        msg = (f"Saved {saved} figures to:\n{out_dir}"
-               + (f"\n({skipped} skipped — not yet computed)" if skipped else ""))
-        app._set_status(f"Figures exported — {saved} PNG files  ✓", GREEN)
-        messagebox.showinfo("Figures exported", msg)
+        skip_note = f" ({skipped} skipped)" if skipped else ""
+        app._set_status(
+            f"Figures exported — {saved} PNG files{skip_note} → "
+            f"{_os.path.basename(out_dir)}  ✓", GREEN)
 
     def build_excel_workbook(self) -> "Workbook":
         """Build a formatted openpyxl Workbook from the current results."""
@@ -197,8 +197,7 @@ class ExportController:
         except Exception as exc:
             messagebox.showerror("Export failed", str(exc))
             return
-        app._set_status("Excel saved", GREEN)
-        messagebox.showinfo("Saved", path)
+        app._set_status(f"Excel saved — {os.path.basename(path)}  ✓", GREEN)
 
     def export_zip(self) -> None:
         app = self.app
@@ -247,14 +246,13 @@ class ExportController:
             messagebox.showerror("ZIP export failed", str(exc))
             return
 
-        app._set_status("ZIP saved", GREEN)
-        messagebox.showinfo("Saved", path)
+        app._set_status(f"ZIP saved — {os.path.basename(path)}  ✓", GREEN)
 
     def export_pdf_report(self) -> None:
         """Generate a one-page PDF summary: ECG strip + KPI table + interpretation."""
         app = self.app
         if app.analysis.results is None:
-            messagebox.showwarning("No results", "Run Core Analysis first.")
+            messagebox.showwarning("No results", "Click Analyze first.")
             return
         try:
             import matplotlib.backends.backend_pdf as _pdf_backend
@@ -381,7 +379,7 @@ class ExportController:
             i0, i1 = int(t0 * fs), int(t1 * fs)
             t_seg   = app.signal.time[i0:i1]
             sig_seg = app.signal.filtered[i0:i1]
-            ax_ecg.plot(t_seg, sig_seg, color=PLOT.get("ecg",CYAN_BRIGHT), lw=0.7)
+            ax_ecg.plot(t_seg, sig_seg, color=PLOT.get("signal", CYAN_BRIGHT), lw=0.7)
             # Overlay R-peaks in the window
             if app.detection.rpeaks_ok is not None:
                 rp = app.detection.rpeaks_ok
@@ -435,7 +433,7 @@ class ExportController:
             rr_vals = rdf["RR_ms"].dropna().values
             if len(rr_vals) > 2:
                 ax_rr.scatter(rr_vals[:-1], rr_vals[1:],
-                              alpha=0.35, s=4, c=PLOT.get("ecg",CYAN_BRIGHT))
+                              alpha=0.35, s=4, c=PLOT.get("signal", CYAN_BRIGHT))
                 lo = min(rr_vals.min(), rr_vals.min()) * 0.97
                 hi = max(rr_vals.max(), rr_vals.max()) * 1.03
                 ax_rr.plot([lo, hi], [lo, hi], "--", color=mut, lw=0.6)
@@ -520,7 +518,7 @@ class ExportController:
             for ev in events:
                 by_kind[ev.kind] = by_kind.get(ev.kind, 0) + 1
             y = 0.92
-            ax_arr.text(0.0, y, f"{len(events)} episode(s) total",
+            ax_arr.text(0.0, y, f"{len(events)} event(s) total",
                         fontsize=8, color=fg, fontweight="bold",
                         transform=ax_arr.transAxes, va="top")
             y -= 0.16
@@ -565,7 +563,6 @@ class ExportController:
             return
 
         app._set_status(f"PDF report saved — {os.path.basename(path)}", GREEN)
-        messagebox.showinfo("PDF saved", path)
 
     def export_prism(self) -> None:
         """Export all analysis results to a GraphPad Prism .pzfx file.
@@ -585,7 +582,7 @@ class ExportController:
         if app.analysis.results is None:
             messagebox.showwarning(
                 "No results",
-                "Run Full Analysis before exporting to Prism.")
+                "Click Analyze before exporting to Prism.")
             return
 
         sub  = app.ent_subject.get().strip() or "subject"
@@ -631,8 +628,6 @@ class ExportController:
 
         app._set_status(
             f"Prism: {n_tables} tables → {os.path.basename(path)}", GREEN)
-        messagebox.showinfo("Prism export complete",
-                            f"{n_tables} tables saved to:\n{path}")
 
     def copy_summary(self) -> None:
         app = self.app
@@ -664,7 +659,7 @@ class ExportController:
         """Export RR intervals to a lightweight CSV (no Excel dependency)."""
         app = self.app
         if app.analysis.results is None:
-            messagebox.showwarning("No results", "Run Core Analysis first.")
+            messagebox.showwarning("No results", "Click Analyze first.")
             return
         rdf = app.analysis.results.get("rr_df")
         if rdf is None or rdf.empty:
