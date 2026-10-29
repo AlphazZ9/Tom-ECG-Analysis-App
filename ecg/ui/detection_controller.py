@@ -9,6 +9,7 @@ signal-quality scoring.
 from __future__ import annotations
 
 import logging
+import threading
 from tkinter import messagebox
 from typing import TYPE_CHECKING
 
@@ -100,10 +101,24 @@ class DetectionController:
         else:
             self.app.detection.rpeaks_manual_added = np.array([], dtype=int)
 
+        prev_ok = self.app.detection.rpeaks_ok
         self.app.detection.rpeaks_ok  = accepted
         self.app.detection.rpeaks_rej = rejected
         self.app.detection.thresh_amp = thresh_amp
         n = len(accepted)
+
+        # A changed peak set makes the Autonomic result stale. The edit
+        # paths drop it explicitly before re-detecting, like the core
+        # results; this catches every other caller (e.g. the Abnormal
+        # Events viewer's edit mode). Widget work stays on the main thread.
+        actrl = getattr(self.app, "analysis_ctrl", None)
+        if (actrl is not None
+                and getattr(self.app.analysis, "autonomic_result", None) is not None
+                and not actrl._same_peaks(prev_ok, accepted)):
+            if threading.current_thread() is threading.main_thread():
+                actrl.invalidate_autonomic()
+            else:
+                self.app.after(0, actrl.invalidate_autonomic)
 
         # Widget writes: always on main thread via after(0, ...)
         color = GREEN if n > 10 else RED
@@ -120,6 +135,11 @@ class DetectionController:
         self.app.after(0, lambda: self.app._set_review_artifacts_enabled(n > 4))  # type: ignore[union-attr]
         if self.app.btn_check_agreement is not None:
             self.app.after(0, lambda: self.app._set_check_agreement_enabled(n > 4))  # type: ignore[union-attr]
+        # Keep the HRV tab's RR/HR tachogram live -- same "no Core Analysis
+        # dependency" idea as the Detection tab's own RR/HR/Quality mini-
+        # strip, so adding/removing a peak (or a threshold change) doesn't
+        # blank it until the next Analyze click.
+        self.app.after(0, self.app.plot_ctrl.refresh_live_rr)
         self.update_signal_quality(accepted)
         return n
 
@@ -273,6 +293,9 @@ class DetectionController:
             self.app.analysis.epoch_df = None
             self.app._reset_kpis()
             self.app._reset_result_plots()
+        # Outside the guard: the Autonomic view needs only peaks, so its
+        # result can exist without core results.
+        self.app.analysis_ctrl.invalidate_autonomic()
 
     def undo_edit(self, _event=None) -> None:
         """Ctrl+Z — restore previous peak-edit state."""
@@ -312,6 +335,7 @@ class DetectionController:
                 self.app.analysis.epoch_df = None
                 self.app._reset_kpis()
                 self.app._reset_result_plots()
+            self.app.analysis_ctrl.invalidate_autonomic()
             self.run_detection(float(self.app.sl_thr.get()))  # type: ignore[union-attr]
             self.app._draw_detail(self.app.ui.nav_pos)
             # Also refresh the arrhythmia ECG viewer if an event is selected
@@ -385,6 +409,7 @@ class DetectionController:
         self.app.analysis.epoch_df = None
         self.app._reset_kpis()
         self.app._reset_result_plots()
+        self.app.analysis_ctrl.invalidate_autonomic()
         self.app.detection.rpeaks_manual_excl  = np.array([], dtype=int)
         self.app.detection.rpeaks_manual_added = np.array([], dtype=int)
         if self.app.signal.filtered is not None and self.app.detection.all_candidates is not None:
@@ -689,6 +714,7 @@ class DetectionController:
             self.app.analysis.epoch_df = None
             self.app._reset_kpis()
             self.app._reset_result_plots()
+        self.app.analysis_ctrl.invalidate_autonomic()
         self.run_detection(value)
         self.app._draw_detail(self.app.ui.nav_pos)
 

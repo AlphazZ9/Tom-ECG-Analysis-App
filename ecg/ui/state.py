@@ -101,6 +101,37 @@ class AnalysisState:
     results: Optional[dict] = None
     epoch_df: Optional[pd.DataFrame] = None
     rolling_hrv_df: Optional[pd.DataFrame] = None
+    # HRV > Autonomic (core.autonomic, Candia-Rivera et al. 2025): the
+    # time-resolved CSI / CPI of the accepted peaks (an AutonomicResult)
+    # and, when requested, the SPWVD LF / HF (core.spwvd.spwvd_lf_hf()'s
+    # dict, or {"error": reason} when it could not be computed). Derived
+    # from the peaks, so invalidated with every other peak-derived result
+    # (AnalysisController.invalidate_autonomic); recomputed, not saved.
+    autonomic_result: Optional[Any] = None
+    autonomic_spwvd: Optional[dict] = None
+    # The Autonomic view's parameters (window_s, method, ks, kp, lf_hf,
+    # min_pairs) -- app state rather than only widget values, so a UI
+    # rebuild (theme toggle) shows them again; saved with the session.
+    # Empty = defaults (ecg.ui.autonomic_view.normalise_autonomic_params).
+    autonomic_params: dict = field(default_factory=dict)
+    # Why the Autonomic / event-locked result was dropped ("Peaks changed —
+    # ..."): the status labels show it until the next compute, and a UI
+    # rebuild shows it again instead of the idle hint. None = nothing stale.
+    autonomic_stale_note: Optional[str] = None
+    event_locked_stale: Optional[str] = None
+    # Per-event pre/post table derived from autonomic_result
+    # (core.event_locked.event_window_means); dropped with it.
+    event_locked_df: Optional[pd.DataFrame] = None
+    # HRV > Autonomic > Event-locked: the full result behind that table
+    # (ecg.ui.event_locked_view.EventLockedResult -- table, traces, the
+    # events and configuration it was built from); dropped with
+    # autonomic_result and when the annotations it was locked to change.
+    event_locked: Optional[Any] = None
+    # The Event-locked panel's parameters (label filter, pre_s, post_s,
+    # zscore) -- app state like autonomic_params, so a UI rebuild shows
+    # them again; saved with the session. Empty = defaults
+    # (ecg.ui.event_locked_view.normalise_event_params).
+    event_locked_params: dict = field(default_factory=dict)
     arrhythmia_events: list = field(default_factory=list)
     arrhythmia_tsv: str = ""
     arr_selected_idx: int = -1                  # index into arrhythmia_events
@@ -109,6 +140,11 @@ class AnalysisState:
     arr_edit_mode: bool = False                 # edit mode specific to arrhythmia tab
     last_seg_a: Optional[dict] = None           # last Compare A result
     last_seg_b: Optional[dict] = None           # last Compare B result
+    # Cumulative artifact report (merge_artifact_reports): "removed_samples"
+    # / "removed_types" are every removal still in effect (re-applied after
+    # a session restore re-detects the peaks), "break_samples" the subset
+    # that removed a real beat -- the HRV breaks every HRV path passes on
+    # (AnalysisController.hrv_breaks). Persisted with the session.
     artifact_report: Optional[dict] = None
     # Full edited candidate list from the last Artifact Review pass (schema:
     # {index, sample, type, rr_prev_ms, rr_next_ms, rr_ref_ms, deviation,
@@ -116,13 +152,14 @@ class AnalysisState:
     # that were removed. Overwritten (not appended) on every review, exactly
     # like artifact_report above; only the latest pass's markers are shown.
     artifact_candidates: list[dict] = field(default_factory=list)
-    # Experimental context -- key into EXPERIMENTAL_CONTEXTS
-    exp_context: str = "telemetry_awake"
 
     # Analysis window (independent from signal crop) -- restricts HRV analysis
     # to a sub-range of the already-detected signal. 0.0 = "use full signal".
     t_start: float = 0.0
     t_end: float = 0.0
+    # (t_start, t_end) the current results were computed on -- t_start/t_end
+    # above can be edited afterwards; the result labels describe these.
+    analysed_window: Optional[tuple] = None
 
     # Time annotations: list of dicts {t_start, t_end, label, color}
     annotations: list[dict] = field(default_factory=list)
@@ -131,6 +168,13 @@ class AnalysisState:
     # decision) -- fixed render color, no per-item color choice.
     pacing_periods: list[dict] = field(default_factory=list)
     wave_template: Optional[WaveTemplate] = None
+    # QTc formula key (QTC_FORMULA_LABELS) the stored intervals' QTc_ms
+    # column is computed with -- the Intervals-tab selector's value, kept
+    # here rather than only on the widget so it survives a UI rebuild
+    # (theme toggle), which recreates the combobox at its default. Read by
+    # the exports and session save; set by the selector, Intervals and
+    # session restore.
+    qtc_formula: str = "mitchell"
 
 
 @dataclass
@@ -162,6 +206,9 @@ class UIState:
     rr_click_cid: Optional[int] = None           # mpl event connection id for RR click-to-navigate
     rr_spike_times: Optional[np.ndarray] = None  # cached spike times from the last plot_rr(), for the Detection-tab stepper
     hrv_current_view: str = "RR / HR"
+    # HRV > Autonomic's own sub-view toggle ("Time series" / "Event-locked"),
+    # kept across a UI rebuild.
+    autonomic_subview: str = "Time series"
     ctx_keys: list = field(default_factory=list)
     operation_start_time: Optional[float] = None
     ui_update_batch: list[tuple] = field(default_factory=list)

@@ -23,7 +23,7 @@ setup(
         "openpyxl",
         "Pillow",
         "scikit-learn",
-        "joblib",
+        "skops",
     ],
     extras_require={
         "h5": ["h5py"],

@@ -4,7 +4,8 @@ ecg.ui.dialogs
 --------------
 All CTk dialog/toplevel classes:
   ThemeDialog, ArtifactReviewDialog,
-  AnnotationDialog, AnnotationManagerDialog.
+  AnnotationDialog, AnnotationManagerDialog, ..., CalibrationDialog
+  (cohort ks / kp calibration of the Autonomic CSI / CPI).
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from typing import Any, Callable, Optional, TYPE_CHECKING
 
 import customtkinter as ctk  # type: ignore[import-untyped]
 import tkinter as tk
-from tkinter import colorchooser, messagebox
+from tkinter import colorchooser, filedialog, messagebox
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
@@ -32,17 +33,25 @@ from ecg.ui.theme import (
     FONT_TITLE, FONT_SECTION_HDR, FONT_LABEL, FONT_SMALL,
     FONT_BODY, FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR,
     FONT_HINT, FONT_KPI_LABEL, FONT_CARD_TITLE, FONT_SUBSECTION,
-    FONT_DIALOG_TITLE,
+    FONT_DIALOG_TITLE, FONT_MONO,
 )
-from ecg.core.models import (
-    MouseECG, ContextRanges, EXPERIMENTAL_CONTEXTS, save_custom_context,
-)
+from ecg.core.models import MouseECG
 from ecg.core.ml_detector import (
     training_data_summary, list_training_files, delete_training_sample,
     train_model, MLPeakModel,
 )
-from ecg.io.db import _DB_AVAILABLE, verified_recordings, set_verified
+from ecg.io.db import (
+    _DB_AVAILABLE, verified_recordings, set_verified,
+    export_event_rows_csv, list_event_labels, list_event_rows,
+)
 from ecg.io.export import ANNOTATION_COLORS
+from ecg.ui.event_locked_view import (
+    AGGREGATIONS, CALIBRATION_RULE_NOTE, DEFAULT_AGGREGATION, IN_SAMPLE_NOTE,
+    PSEUDO_REPLICATION_NOTE, apply_caveats, apply_plan, calibration_text,
+    cohort_calibration, config_label, config_of, config_options,
+    default_calibration_label, draw_calibration, in_sample, registry_frame,
+    row_config, tests_frame,
+)
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
@@ -322,7 +331,7 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
 
     _TYPE_LABEL = {
         "nonphysio": "Non-physiological (outside HR bounds)",
-        "ectopic":   "Ectopic beat (RR deviation from local median)",
+        "ectopic":   "Ectopic beat (premature: RR shorter than local median)",
         "duplicate": "Duplicate / sub-minimum interval",
     }
 
@@ -1437,166 +1446,6 @@ class MLTrainingDialog(ctk.CTkToplevel):
         self._refresh_stats()
 
 
-class CustomContextDialog(ctk.CTkToplevel):
-    """Modal dialog: define/edit a user-owned "custom" experimental context.
-
-    EXPERIMENTAL_CONTEXTS (ecg.core.models) ships 4 fixed mouse contexts
-    with no user-editable option -- e.g. for a specific strain/substrain
-    whose normal ranges differ from those 4 presets. Saving here plugs the
-    result into that same dict under the "custom" key, so every panel that
-    already reads reference ranges via app._current_ref() picks it up with
-    no further wiring once "Custom" is selected in the Parameters dialog.
-    """
-
-    FIELDS = [
-        ("hr",   "Heart rate",        "bpm"),
-        ("rr",   "RR interval",       "ms"),
-        ("sdnn", "SDNN",              "ms"),
-        ("rmssd","RMSSD",             "ms"),
-        ("pnn6", "pNN6",              "%"),
-        ("lf",   "LF power",          "%"),
-        ("hf",   "HF power",          "%"),
-        ("lfhf", "LF/HF ratio",       ""),
-        ("sd1",  "Poincaré SD1",      "ms"),
-        ("sd2",  "Poincaré SD2",      "ms"),
-        ("pr",   "PR interval",       "ms"),
-        ("qrs",  "QRS duration",      "ms"),
-        ("qt",   "QT interval",       "ms"),
-        ("qtc",  "QTc (corrected)",   "ms"),
-    ]
-
-    def __init__(self, parent, on_saved: "Optional[Callable[[], None]]" = None):
-        super().__init__(parent)
-        self._on_saved = on_saved
-        self.title("🧪  Custom Experimental Context")
-        self.geometry("480x680")
-        self.minsize(420, 400)
-        self.resizable(True, True)
-        self.configure(fg_color=BG)
-        self.grab_set()
-        self.focus_force()
-
-        # Start from whatever "custom" context already exists (a previous
-        # save), else from telemetry_awake as a reasonable starting point --
-        # never fabricated from nothing.
-        base = EXPERIMENTAL_CONTEXTS.get("custom") or EXPERIMENTAL_CONTEXTS["telemetry_awake"]
-
-        ctk.CTkLabel(self, text="🧪  Custom Experimental Context", font=FONT_TITLE,
-                     text_color=TEXT, anchor="w").pack(fill="x", padx=20, pady=(20, 4))
-        ctk.CTkLabel(
-            self, text="Define your own reference ranges (e.g. for a specific "
-                       "strain). Once saved, select \"Custom\" in the Parameters "
-                       "dialog to use these bounds everywhere the app shows a "
-                       "reference band.",
-            font=FONT_SMALL, text_color=MUTED, anchor="w", justify="left",
-            wraplength=430).pack(fill="x", padx=20, pady=(0, 10))
-
-        name_row = ctk.CTkFrame(self, fg_color="transparent")
-        name_row.pack(fill="x", padx=20, pady=(0, 10))
-        name_row.columnconfigure(1, weight=1)
-        ctk.CTkLabel(name_row, text="Name", font=FONT_SMALL, text_color=MUTED,
-                     width=110, anchor="w").grid(row=0, column=0, sticky="w")
-        self._ent_name = ctk.CTkEntry(name_row, font=FONT_LABEL, height=28,
-                                      fg_color=CARD, border_color=BORDER2, text_color=TEXT)
-        self._ent_name.insert(0, base.label if base.label != "Telemetry — awake mouse" else "Custom")
-        self._ent_name.grid(row=0, column=1, sticky="ew", padx=(8, 0))
-
-        scroll = ctk.CTkScrollableFrame(self, fg_color=CARD, corner_radius=8,
-                                        scrollbar_button_color=BORDER,
-                                        scrollbar_button_hover_color=BORDER2)
-        scroll.pack(fill="both", expand=True, padx=20, pady=(0, 10))
-        scroll.columnconfigure(1, weight=1)
-        scroll.columnconfigure(2, weight=1)
-
-        hdr = ctk.CTkFrame(scroll, fg_color="transparent")
-        hdr.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(2, 6))
-        hdr.columnconfigure(1, weight=1); hdr.columnconfigure(2, weight=1)
-        ctk.CTkLabel(hdr, text="", width=118).grid(row=0, column=0)
-        ctk.CTkLabel(hdr, text="Low", font=FONT_HINT, text_color=MUTED).grid(row=0, column=1)
-        ctk.CTkLabel(hdr, text="High", font=FONT_HINT, text_color=MUTED).grid(row=0, column=2)
-
-        self._entries: "dict[str, tuple[ctk.CTkEntry, ctk.CTkEntry]]" = {}
-        for i, (attr, label, unit) in enumerate(self.FIELDS, start=1):
-            lbl_txt = f"{label}  ({unit})" if unit else label
-            ctk.CTkLabel(scroll, text=lbl_txt, font=FONT_SMALL, text_color=TEXT,
-                        anchor="w", width=140, wraplength=138, justify="left"
-                        ).grid(row=i, column=0, sticky="w", padx=(4, 4), pady=3)
-            e_lo = ctk.CTkEntry(scroll, font=FONT_LABEL, height=26,
-                                fg_color=BG, border_color=BORDER2, text_color=TEXT)
-            e_lo.insert(0, str(getattr(base, f"{attr}_lo")))
-            e_lo.grid(row=i, column=1, sticky="ew", padx=3, pady=3)
-            e_hi = ctk.CTkEntry(scroll, font=FONT_LABEL, height=26,
-                                fg_color=BG, border_color=BORDER2, text_color=TEXT)
-            e_hi.insert(0, str(getattr(base, f"{attr}_hi")))
-            e_hi.grid(row=i, column=2, sticky="ew", padx=3, pady=3)
-            self._entries[attr] = (e_lo, e_hi)
-
-        self._lbl_error = ctk.CTkLabel(self, text="", font=FONT_SMALL,
-                                       text_color=ORANGE, anchor="w",
-                                       wraplength=430, justify="left")
-        self._lbl_error.pack(fill="x", padx=20, pady=(0, 4))
-
-        btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.pack(fill="x", padx=20, pady=(0, 20))
-        ctk.CTkButton(btn_row, text="Cancel", command=self.destroy,
-                     fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                     font=FONT_BTN_SEC, height=32, corner_radius=8
-                     ).pack(side="left", fill="x", expand=True, padx=(0, 6))
-        ctk.CTkButton(btn_row, text="✔  Save", command=self._save,
-                     fg_color=GREEN, hover_color=GREEN_DARK, text_color="white",
-                     font=FONT_BTN_PRIMARY, height=32, corner_radius=8
-                     ).pack(side="left", fill="x", expand=True, padx=(6, 0))
-
-    def _save(self) -> None:
-        values: "dict[str, float]" = {}
-        bad_labels: "list[str]" = []
-        for attr, label, _unit in self.FIELDS:
-            e_lo, e_hi = self._entries[attr]
-            try:
-                lo = float(e_lo.get()); hi = float(e_hi.get())
-            except ValueError:
-                bad_labels.append(f"{label} (not numeric)")
-                continue
-            if lo >= hi:
-                bad_labels.append(f"{label} (low ≥ high)")
-                continue
-            values[f"{attr}_lo"] = lo
-            values[f"{attr}_hi"] = hi
-
-        if bad_labels:
-            # Collect every failing row in one pass so a user with several
-            # mistakes sees all of them at once instead of fix-and-resave.
-            self._lbl_error.configure(text=f"⚠ Fix: {', '.join(bad_labels)}.")
-            return
-
-        name = self._ent_name.get().strip() or "Custom"
-
-        # There is only ever one "custom" slot on disk (see class docstring)
-        # -- the Name field looks like it defines a distinct, named preset,
-        # so warn before silently destroying a differently-named one.
-        existing = EXPERIMENTAL_CONTEXTS.get("custom")
-        if existing is not None and existing.label != name:
-            if not messagebox.askyesno(
-                "Replace custom context",
-                f"There is only one custom context slot. Saving “{name}” "
-                f"will replace the existing one, “{existing.label}”, which "
-                f"will be lost. Continue?",
-                parent=self):
-                return
-
-        ctx = ContextRanges(label=name, description="User-defined custom context.",
-                            **values)
-        try:
-            save_custom_context(ctx)
-        except Exception as exc:
-            self._lbl_error.configure(text=f"⚠ Could not save: {exc}")
-            return
-        EXPERIMENTAL_CONTEXTS["custom"] = ctx
-        if self._on_saved is not None:
-            self._on_saved()
-        self.destroy()
-
-
 class MethodAgreementDialog(ctk.CTkToplevel):
     """Non-modal report window for a cross-method agreement check.
 
@@ -1876,4 +1725,305 @@ class CohortTrendsDialog(ctk.CTkToplevel):
 
         axes[-1].set_xlabel("Saved at", color=PLOT["muted"], fontsize=9)
         fig.autofmt_xdate(rotation=25)
+
+
+class CalibrationDialog(ctk.CTkToplevel):
+    """Cohort calibration of the CSI / CPI gains ks / kp (HRV > Autonomic >
+    Event-locked > Calibrate ks/kp...), after Candia-Rivera et al.,
+    J Physiol 2025.
+
+    Reads the event-locked rows saved to the cohort registry (label and
+    project filters, one method / window configuration at a time), and
+    shows, per event or per subject mean: the paired Wilcoxon Z(k) of CSI
+    (from ΔD and ΔSD2) and of CPI (from ΔD and ΔSD1) for k = 1..20 with
+    the knee marked, the counts, and the pre vs post tests of CSI and CPI
+    at the CURRENT gains (Bonferroni over the two indices). The label
+    filter opens on the label with the most events (one condition
+    contrast, as the paper's rest vs dobutamine); "All labels" pools them
+    and says so. "Apply" writes the knees into the Autonomic view's
+    entries -- after a confirmation when a knee sits on a reversed Z(k)
+    stretch or labels are pooled -- and nothing is recomputed until
+    ⟳ Compute is pressed there; the tests at gains chosen on these events
+    are then marked in-sample. All statistics are pure helpers in
+    ecg.ui.event_locked_view; this window only reads its widgets and
+    draws. Non-modal, so the main window stays usable.
+    """
+
+    ALL = "All labels"
+
+    def __init__(self, parent, ks: float, kp: float,
+                 config: "Optional[tuple]" = None, project: str = "",
+                 on_apply: "Optional[Callable[[float, float], None]]" = None) -> None:
+        super().__init__(parent)
+        self.title("Calibrate ks / kp — cohort registry")
+        self.geometry("1080x860")
+        self.minsize(820, 620)
+        self.resizable(True, True)
+        self.configure(fg_color=PANEL)
+        self.lift()
+        self.focus_force()
+        self._app = parent
+        self._ks, self._kp = float(ks), float(kp)
+        self._on_apply = on_apply
+        self._want_config = (config_of(config[0], config[1])
+                             if config is not None else None)
+        self._rows: "list[dict]" = []
+        self._frame = registry_frame([])
+        self._configs: "dict[str, tuple]" = {}
+        self._cal = None
+        self._apply_values: "tuple[float, float]" = (self._ks, self._kp)
+        self._build(project)
+        self._reload()
+
+    # ── UI ───────────────────────────────────────────────────────────────
+
+    def _build(self, project: str) -> None:
+        ctk.CTkLabel(self, text="⚖  Calibrate ks / kp on the cohort registry",
+                     font=FONT_BTN_PRIMARY, text_color=TEXT, anchor="w"
+                     ).pack(fill="x", padx=16, pady=(14, 2))
+        ctk.CTkLabel(
+            self, text=CALIBRATION_RULE_NOTE + "  " + PSEUDO_REPLICATION_NOTE,
+            font=FONT_SMALL, text_color=MUTED, anchor="w", justify="left",
+            wraplength=1020).pack(fill="x", padx=16, pady=(0, 8))
+
+        # ── Filters ──
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=16, pady=(0, 4))
+        ctk.CTkLabel(bar, text="Label:", font=FONT_SMALL, text_color=MUTED).pack(side="left")
+        self._cb_label = ctk.CTkComboBox(
+            bar, width=180, height=28, font=FONT_LABEL, fg_color=BG,
+            border_color=BORDER2, button_color=BORDER2, text_color=TEXT,
+            dropdown_fg_color=BG, dropdown_text_color=TEXT, state="readonly",
+            values=[self.ALL] + list_event_labels(),
+            command=lambda _v: self._reload())
+        self._cb_label.set(self._default_label(project))
+        self._cb_label.pack(side="left", padx=(6, 14))
+        ctk.CTkLabel(bar, text="Project:", font=FONT_SMALL, text_color=MUTED).pack(side="left")
+        self._ent_project = ctk.CTkEntry(bar, width=160, height=28, font=FONT_LABEL,
+                                         fg_color=BG, border_color=BORDER2, text_color=TEXT,
+                                         placeholder_text="(all projects)")
+        if project:
+            self._ent_project.insert(0, project)
+        self._ent_project.pack(side="left", padx=(6, 4))
+        self._ent_project.bind("<Return>", lambda _e: self._reload())
+        ctk.CTkButton(bar, text="↻ Load", width=70, height=28, font=FONT_SMALL,
+                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+                      command=self._reload).pack(side="left", padx=(0, 14))
+        ctk.CTkLabel(bar, text="Configuration:", font=FONT_SMALL,
+                     text_color=MUTED).pack(side="left")
+        self._cb_config = ctk.CTkComboBox(
+            bar, width=230, height=28, font=FONT_LABEL, fg_color=BG,
+            border_color=BORDER2, button_color=BORDER2, text_color=TEXT,
+            dropdown_fg_color=BG, dropdown_text_color=TEXT, state="readonly",
+            values=["—"], command=lambda _v: self._recompute())
+        self._cb_config.pack(side="left", padx=(6, 0))
+
+        agg = ctk.CTkFrame(self, fg_color="transparent")
+        agg.pack(fill="x", padx=16, pady=(2, 4))
+        ctk.CTkLabel(agg, text="Aggregation:", font=FONT_SMALL,
+                     text_color=MUTED).pack(side="left")
+        self._agg_var = tk.StringVar(value=DEFAULT_AGGREGATION)
+        for key, label in AGGREGATIONS.items():
+            ctk.CTkRadioButton(agg, text=label, value=key, variable=self._agg_var,
+                               font=FONT_SMALL, command=self._recompute
+                               ).pack(side="left", padx=(10, 0))
+        self._lbl_counts = ctk.CTkLabel(agg, text="", font=FONT_SMALL,
+                                        text_color=TEXT, anchor="e")
+        self._lbl_counts.pack(side="right")
+        # Valid events per label of the project (the label filter's choices).
+        self._lbl_labels = ctk.CTkLabel(self, text="", font=FONT_HINT,
+                                        text_color=MUTED, anchor="w", justify="left",
+                                        wraplength=1020)
+        self._lbl_labels.pack(fill="x", padx=16, pady=(0, 2))
+
+        # ── Bottom bar (packed before the flexible middle, so it always shows) ──
+        bottom = ctk.CTkFrame(self, fg_color="transparent")
+        bottom.pack(side="bottom", fill="x", padx=16, pady=(4, 14))
+        self._btn_apply = ctk.CTkButton(
+            bottom, text="Apply", command=self._apply, height=32,
+            fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
+            font=FONT_BTN_SEC, corner_radius=8)
+        self._btn_apply.pack(side="left")
+        ctk.CTkButton(bottom, text="📋  Copy results", command=self._copy, height=32,
+                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+                      font=FONT_BTN_SEC, corner_radius=8).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(bottom, text="Export cohort CSV…", command=self._export, height=32,
+                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+                      font=FONT_BTN_SEC, corner_radius=8).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(bottom, text="Close", command=self.destroy, height=32,
+                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+                      font=FONT_BTN_SEC, corner_radius=8, width=90).pack(side="right")
+        # Copy / export feedback (the Apply note below stays visible).
+        self._lbl_status = ctk.CTkLabel(bottom, text="", font=FONT_HINT,
+                                        text_color=GREEN, anchor="w")
+        self._lbl_status.pack(side="left", padx=(12, 0))
+        self._lbl_apply = ctk.CTkLabel(
+            self, text=("Apply writes the knee values into the Autonomic view's ks / kp "
+                        "entries; it does not recompute anything until you press "
+                        "⟳ Compute there (and then ⟳ Compute event-locked)."),
+            font=FONT_HINT, text_color=MUTED, anchor="w", justify="left", wraplength=1020)
+        self._lbl_apply.pack(side="bottom", fill="x", padx=16)
+
+        # ── Z(k) plot + results ──
+        plot_card = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=6)
+        plot_card.pack(fill="both", expand=True, padx=16, pady=(4, 4))
+        self._fig = Figure(figsize=(9.6, 3.6), dpi=96, facecolor=PLOT["bg"],
+                           layout="constrained")
+        self._canvas = FigureCanvasTkAgg(self._fig, master=plot_card)
+        self._canvas.get_tk_widget().pack(fill="both", expand=True, padx=4, pady=4)
+        self._txt = ctk.CTkTextbox(self, font=FONT_MONO, fg_color=CARD, text_color=TEXT,
+                                   border_width=0, height=250, wrap="none")
+        self._txt.pack(fill="x", padx=16, pady=(0, 4))
+
+    # ── data ─────────────────────────────────────────────────────────────
+
+    def _filters(self) -> "tuple[Optional[str], Optional[str]]":
+        lab = self._cb_label.get()
+        proj = self._ent_project.get().strip()
+        return (None if lab == self.ALL else lab), (proj or None)
+
+    def _reload(self) -> None:
+        """Read the registry with the label / project filters, list its
+        configurations, then recompute."""
+        label, project = self._filters()
+        self._rows = list_event_rows(label=label, project_name=project, valid_only=True)
+        self._frame = registry_frame(self._rows)
+        counts = self._label_counts(project)
+        self._lbl_labels.configure(
+            text=("Valid events per label: "
+                  + ", ".join(f"{lab} ({n})" for lab, n in counts.items())
+                  + ("   ⚠ “All labels” pools different condition contrasts — the "
+                     "paper calibrated on one (rest vs dobutamine)."
+                     if label is None and len(counts) > 1 else ""))
+            if counts else "",
+            text_color=ORANGE if (label is None and len(counts) > 1) else MUTED)
+        opts = config_options(self._frame)
+        self._configs = {f"{config_label(cfg)}   ({n} events)": cfg for cfg, n in opts}
+        names = list(self._configs) or ["—"]
+        current = self._configs.get(self._cb_config.get())
+        pick = next((n for n, c in self._configs.items() if c == current), None)
+        if pick is None and self._want_config is not None:
+            pick = next((n for n, c in self._configs.items() if c == self._want_config), None)
+        self._cb_config.configure(values=names)
+        self._cb_config.set(pick or names[0])
+        try:                                    # labels saved since the dialog opened
+            self._cb_label.configure(values=[self.ALL] + list_event_labels())
+        except Exception as exc:
+            log.debug("CalibrationDialog: label list: %s", exc)
+        self._recompute()
+
+    def _recompute(self) -> None:
+        cfg = self._configs.get(self._cb_config.get())
+        agg = self._agg_var.get()
+        try:
+            cal = cohort_calibration(self._frame, self._ks, self._kp,
+                                     aggregation=agg, config=cfg)
+        except Exception as exc:
+            log.exception("CalibrationDialog: calibration failed")
+            self._set_text(f"  Calibration failed: {exc}")
+            return
+        self._cal = cal
+        c = cal.counts
+        self._lbl_counts.configure(
+            text=(f"n events = {c['n_events']}  ·  n subjects = {c['n_subjects']}  ·  "
+                  f"n recordings = {c['n_recordings']}"),
+            text_color=TEXT if c["n_events"] else ORANGE)
+        self._fig.clear()
+        self._fig.patch.set_facecolor(PLOT["bg"])
+        draw_calibration(self._fig, cal)
+        self._canvas.draw_idle()
+        if not self._rows:
+            label, project = self._filters()
+            filt = " matching the filters" if (label or project) else ""
+            self._set_text(
+                f"  No valid event-locked row in the cohort registry{filt}.\n\n"
+                "  For each recording: HRV > Autonomic > ⟳ Compute, then Event-locked > "
+                "⟳ Compute event-locked, then 💾 Save to cohort registry (with the "
+                "Subject ID and Project name set in the sidebar).")
+        else:
+            self._set_text(calibration_text(cal))
+        ks, kp, text, enabled = apply_plan(cal)
+        self._apply_values = (ks, kp)
+        self._btn_apply.configure(text=text, state="normal" if enabled else "disabled")
+
+    def _set_text(self, text: str) -> None:
+        self._txt.configure(state="normal")
+        self._txt.delete("1.0", "end")
+        self._txt.insert("1.0", text)
+        self._txt.configure(state="disabled")
+
+    # ── actions ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _label_counts(project: "Optional[str]") -> "dict[str, int]":
+        """Valid registry events per label (of *project*, None = all), most
+        first."""
+        from ecg.ui.event_locked_view import label_counts
+        try:
+            return label_counts(registry_frame(
+                list_event_rows(project_name=project or None, valid_only=True)))
+        except Exception as exc:
+            log.debug("CalibrationDialog: label counts: %s", exc)
+            return {}
+
+    def _default_label(self, project: str) -> str:
+        """The label with the most valid events (one contrast), else All."""
+        lab = default_calibration_label(self._label_counts(project.strip() or None))
+        return lab if lab is not None else self.ALL
+
+    def _apply(self) -> None:
+        if self._cal is not None:
+            caveats = apply_caveats(self._cal)
+            if caveats and not messagebox.askyesno(
+                    "Apply these gains?",
+                    "\n\n".join(caveats)
+                    + "\n\nWrite them into the Autonomic view anyway?",
+                    icon="warning", parent=self):
+                return
+        ks, kp = self._apply_values
+        if self._on_apply is not None:
+            self._on_apply(ks, kp)
+        self._ks, self._kp = float(ks), float(kp)
+        self._recompute()
+        ins = in_sample(self._cal) if self._cal is not None else {}
+        self._lbl_apply.configure(
+            text=(f"✓ ks = {ks:g}, kp = {kp:g} written to the Autonomic view — not "
+                  "applied yet: press ⟳ Compute there to recompute CSI / CPI. The "
+                  "tests below are now at these gains"
+                  + (" — IN-SAMPLE (chosen on these same events, so their p-values "
+                     "are optimistic): select another project or label to test them."
+                     if any(ins.values()) else ".")),
+            text_color=ORANGE if any(ins.values()) else GREEN)
+
+    def _copy(self) -> None:
+        if self._cal is None:
+            return
+        df = tests_frame(self._cal)
+        tsv = self._app._df_to_tsv(df) if hasattr(self._app, "_df_to_tsv") else df.to_csv(sep="\t", index=False)
+        knees = "\t".join(f"knee_{k}\t{v:g}" for k, v in self._cal.knees.items())
+        self.clipboard_clear()
+        self.clipboard_append(tsv + "\n" + knees)
+        self._lbl_status.configure(text="Results copied as TSV — paste into Excel ✓")
+
+    def _export(self) -> None:
+        cfg = self._configs.get(self._cb_config.get())
+        rows = [r for r in self._rows if cfg is None or row_config(r) == cfg]
+        if not rows:
+            messagebox.showinfo("Nothing to export", "No registry row matches the filters.",
+                                parent=self)
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = filedialog.asksaveasfilename(
+            parent=self, defaultextension=".csv",
+            initialfile=f"event_locked_cohort_{ts}.csv",
+            filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
+            title="Export the cohort's event-locked rows as CSV")
+        if not path:
+            return
+        try:
+            n = export_event_rows_csv(path, rows)
+        except OSError as exc:
+            messagebox.showerror("Export failed", str(exc), parent=self)
+            return
+        self._lbl_status.configure(text=f"Exported {n} row(s) → {Path(path).name} ✓")
 

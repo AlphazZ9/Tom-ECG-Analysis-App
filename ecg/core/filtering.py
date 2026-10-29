@@ -110,6 +110,79 @@ def downsample_for_display(arr: np.ndarray, max_points: int = 6_000,
     return out
 
 
+def downsample_xy_for_display(
+    x: np.ndarray,
+    y: np.ndarray,
+    max_points: int = 6_000,
+) -> "tuple[np.ndarray, np.ndarray]":
+    """Gap-preserving counterpart of ``downsample_for_display`` for an
+    (x, y) line whose NaN entries are gaps -- e.g. a tachogram with its
+    excluded RR intervals set to NaN so matplotlib breaks the line there.
+
+    Each bucket emits its finite min and max at their own x (in x order),
+    plus a NaN point before, between or after them wherever the bucket has a
+    gap, so the drawn line still breaks at every gap. (downsample_for_display
+    on y alone returns the NaN itself as the bucket's extreme and drops the
+    bucket's values, and decimating x and y separately pairs extremes with
+    the wrong x.) Inputs of at most *max_points* come back unchanged; the
+    last, partial bucket is kept as is.
+    """
+    x = np.asarray(x, dtype=np.float64).flatten()
+    y = np.asarray(y, dtype=np.float64).flatten()
+    n = len(y)
+    if n <= max_points or len(x) != n:
+        return x, y
+    bucket = max(1, n // max(1, max_points // 3))
+    n_b    = n // bucket
+    n_trim = n_b * bucket
+    Y   = y[:n_trim].reshape(n_b, bucket)
+    X   = x[:n_trim].reshape(n_b, bucket)
+    gap = np.isnan(Y)
+    i_min  = np.where(gap, np.inf, Y).argmin(axis=1)
+    i_max  = np.where(gap, -np.inf, Y).argmax(axis=1)
+    first  = np.minimum(i_min, i_max)
+    second = np.maximum(i_min, i_max)
+    rows   = np.arange(n_b)
+    col    = np.arange(bucket)[None, :]
+    before  = (gap & (col < first[:, None])).any(axis=1)
+    between = (gap & (col > first[:, None]) & (col < second[:, None])).any(axis=1)
+    after   = (gap & (col > second[:, None])).any(axis=1)
+    x1, y1 = X[rows, first],  Y[rows, first]
+    x2, y2 = X[rows, second], Y[rows, second]
+    nan = np.full(n_b, np.nan)
+    # Five slots per bucket: [gap?] first [gap?] second [gap?]
+    xs = np.column_stack([x1, x1, x2, x2, x2])
+    ys = np.column_stack([nan, y1, nan, y2, nan])
+    keep = np.column_stack([before, np.ones(n_b, bool), between, second != first, after])
+    x_out = np.concatenate([xs[keep], x[n_trim:]])
+    y_out = np.concatenate([ys[keep], y[n_trim:]])
+    return x_out, y_out
+
+
+def break_line_at_gaps(
+    x:        np.ndarray,
+    y:        np.ndarray,
+    max_step: float,
+) -> "tuple[np.ndarray, np.ndarray]":
+    """(x, y) with a NaN point inserted wherever two consecutive x values
+    are more than *max_step* apart, so matplotlib breaks the line there
+    instead of drawing a straight segment across the hole -- e.g. the
+    rolling/epoch HRV timelines, whose skipped windows (too few valid RR
+    intervals) leave no row. The inserted x is the midpoint of the gap.
+    Unchanged when nothing is farther apart than *max_step*.
+    """
+    x = np.asarray(x, dtype=np.float64).flatten()
+    y = np.asarray(y, dtype=np.float64).flatten()
+    if len(x) < 2 or len(x) != len(y):
+        return x, y
+    gaps = np.flatnonzero(np.diff(x) > max_step)
+    if len(gaps) == 0:
+        return x, y
+    x_mid = (x[gaps] + x[gaps + 1]) / 2.0
+    return (np.insert(x, gaps + 1, x_mid),
+            np.insert(y, gaps + 1, np.full(len(gaps), np.nan)))
+
+
 def downsample_signal(
     signal: np.ndarray,
     fs_in: float,

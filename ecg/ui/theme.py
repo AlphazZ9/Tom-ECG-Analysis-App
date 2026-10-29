@@ -17,7 +17,6 @@ import dataclasses
 import functools
 import json
 import logging
-import pickle
 import sys
 import types as _types
 from pathlib import Path
@@ -147,9 +146,8 @@ class ThemeConfig:
     def load(cls) -> "ThemeConfig":
         """Load theme from ``THEME_PATH`` (JSON).
 
-        Falls back to defaults on any error.  If only a legacy ``.pkl`` file
-        exists (Python upgrade scenario), it is migrated to JSON on first run
-        and then deleted so the warning never appears again.
+        Falls back to defaults on any error. Legacy pickle themes are not
+        deserialised because pickle can execute arbitrary code during loading.
         """
         obj = cls()
 
@@ -182,17 +180,11 @@ class ThemeConfig:
                     "Delete %s to suppress this message.", exc, THEME_PATH)
                 return obj
 
-        # ── Fallback: migrate legacy pickle on first run after upgrade ──────
+        # Preserve old data but never execute pickle payloads during startup.
         if _THEME_PATH_LEGACY.exists():
-            try:
-                with open(_THEME_PATH_LEGACY, "rb") as fh:
-                    data = pickle.load(fh)
-                obj.__dict__.update(data)
-                obj.save()                    # write JSON
-                _THEME_PATH_LEGACY.unlink()   # remove old pickle
-                log.info("Theme migrated from pickle → JSON (%s)", THEME_PATH)
-            except Exception as exc:
-                log.warning("Legacy theme migration failed (%s) — using defaults", exc)
+            log.warning(
+                "Ignoring legacy pickle theme at %s; set the theme again to "
+                "save it in JSON", _THEME_PATH_LEGACY)
 
         return obj
 

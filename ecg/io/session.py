@@ -10,7 +10,6 @@ import hashlib
 import json
 import logging
 import os
-import pickle
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -134,7 +133,8 @@ def load_session(filepath: str) -> "Optional[dict]":
     • the schema version is outdated
     • the file is corrupt / unreadable
 
-    Transparently migrates v4 pickle sessions to v5 JSON on first run.
+    Legacy pickle sessions are quarantined without deserialisation because
+    pickle can execute arbitrary code during loading.
     """
     sp = _session_path(filepath)
     if not sp.exists():
@@ -162,35 +162,12 @@ def load_session(filepath: str) -> "Optional[dict]":
         log.info("Session loaded ← %s  (saved %s)", sp, payload.get("saved_at", "?"))
         return payload["state"]
     except (json.JSONDecodeError, UnicodeDecodeError):
-        pass   # not JSON — try legacy pickle migration below
+        _quarantine(sp, "legacy pickle loading disabled for security")
+        log.warning("Ignoring non-JSON session %s; legacy pickle is not loaded", sp)
+        return None
     except Exception as exc:
         log.warning("load_session: failed to read %s: %s", sp, exc)
         return None
-
-    # ── Fallback: migrate v4 pickle session (one-time) ──────────────────
-    try:
-        with open(sp, "rb") as fh:
-            payload = pickle.load(fh)
-        if payload.get("version") not in (3, 4):
-            log.info("load_session: legacy pickle version %s — ignoring",
-                     payload.get("version"))
-            _quarantine(sp, f"legacy pickle version {payload.get('version')}")
-            return None
-        if payload.get("fingerprint") != _file_fingerprint(filepath):
-            log.info("load_session: legacy fingerprint mismatch — ignoring")
-            _quarantine(sp, "legacy fingerprint mismatch")
-            return None
-        state = payload["state"]
-        # Re-save as v5 JSON so the migration only happens once
-        save_session(filepath, state)
-        log.info("load_session: migrated v%s pickle → v%d JSON",
-                 payload.get("version"), SESSION_VERSION)
-        return state
-    except Exception as exc:
-        log.warning("load_session: legacy pickle migration failed for %s: %s", sp, exc)
-        _quarantine(sp, f"unreadable as JSON or pickle: {exc}")
-        return None
-
 
 def session_exists(filepath: str) -> bool:
     """Cheap existence check for callers that only need a yes/no (e.g. a UI

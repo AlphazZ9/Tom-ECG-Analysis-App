@@ -18,11 +18,9 @@ report results:
     3. A trained scikit-learn classifier scores each candidate; accepted
        candidates become the returned R-peaks.
 
-Model persistence mirrors ecg.core.wave_template.WaveTemplate's save()/load()
-pattern: a small JSON metadata sidecar (source/training-set size/hold-out
-accuracy) plus a binary artifact (joblib, since a JSON-only format can't hold
-a fitted sklearn estimator). load() never raises -- any missing or corrupt
-file is treated as "no model trained yet", not an error.
+Model persistence uses a small JSON metadata sidecar plus a skops artifact.
+Only the expected RandomForestClassifier and its tree type are trusted while
+loading. load() never raises -- missing or corrupt files mean "no model yet".
 
 Training data itself is never a raw signal on disk: marking a file "verified"
 extracts features+labels for it immediately (signal and accepted R-peaks are
@@ -48,13 +46,15 @@ from ecg.core.detection import (
 
 log = logging.getLogger("ecg")
 
-MODEL_PATH: Path = Path.home() / ".ecg_ml_detector.joblib"
+MODEL_PATH: Path = Path.home() / ".ecg_ml_detector.skops"
 META_PATH:  Path = Path.home() / ".ecg_ml_detector.json"
+LEGACY_MODEL_PATH: Path = Path.home() / ".ecg_ml_detector.joblib"
 # One-deep rollback copy of whatever was deployed before the last retrain --
 # see MLPeakModel.save().
-MODEL_BACKUP_PATH: Path = Path.home() / ".ecg_ml_detector.joblib.bak"
+MODEL_BACKUP_PATH: Path = Path.home() / ".ecg_ml_detector.skops.bak"
 META_BACKUP_PATH:  Path = Path.home() / ".ecg_ml_detector.json.bak"
 TRAINING_DATA_DIR: Path = SESSION_DIR / "ml_training"
+_TRUSTED_SKOPS_TYPES = {"sklearn.tree._tree.Tree"}
 
 # In-process cache for MLPeakModel.load(), keyed on MODEL_PATH's mtime.
 # Without this, every refresh_ml_status() call -- fired on the ML Detector
@@ -217,7 +217,8 @@ class MLPeakModel:
         self.meta = meta
 
     def save(self) -> None:
-        import joblib
+        import skops.io as sio
+
         MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
         # Keep whatever was previously deployed as a one-deep backup before
         # overwriting it, so a regression from a bad retrain isn't a total
@@ -228,7 +229,7 @@ class MLPeakModel:
             META_PATH.replace(META_BACKUP_PATH)
             backed_up = True
         try:
-            joblib.dump(self.estimator, MODEL_PATH)
+            sio.dump(self.estimator, MODEL_PATH)
             with open(META_PATH, "w", encoding="utf-8") as fh:
                 json.dump(self.meta, fh, indent=2)
         except Exception:
@@ -251,13 +252,26 @@ class MLPeakModel:
         if not MODEL_PATH.exists() or not META_PATH.exists():
             _model_cache["mtime"] = None
             _model_cache["model"] = None
+            if LEGACY_MODEL_PATH.exists():
+                log.warning(
+                    "Ignoring legacy joblib model at %s; retrain to save it in "
+                    "the safe skops format", LEGACY_MODEL_PATH)
             return None
         try:
             mtime = MODEL_PATH.stat().st_mtime
             if _model_cache["model"] is not None and _model_cache["mtime"] == mtime:
                 return _model_cache["model"]
-            import joblib
-            estimator = joblib.load(MODEL_PATH)
+            import skops.io as sio
+
+            untrusted_types = set(sio.get_untrusted_types(file=MODEL_PATH))
+            unexpected_types = untrusted_types - _TRUSTED_SKOPS_TYPES
+            if unexpected_types:
+                raise ValueError(
+                    f"Model contains unsupported types: {sorted(unexpected_types)}")
+            estimator = sio.load(file=MODEL_PATH, trusted=sorted(untrusted_types))
+            from sklearn.ensemble import RandomForestClassifier
+            if type(estimator) is not RandomForestClassifier:
+                raise ValueError("Stored ML model is not a RandomForestClassifier")
             with open(META_PATH, "r", encoding="utf-8") as fh:
                 meta = json.load(fh)
             model = cls(estimator, meta)
@@ -446,6 +460,24 @@ def list_training_files() -> "list[dict]":
 #  TRAINING
 # ════════════════════════════════════════════════════════════
 
+def _grouped_holdout_indices(
+    labels: np.ndarray,
+    groups: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Split whole recordings while keeping both classes in each partition."""
+    from sklearn.model_selection import GroupShuffleSplit
+
+    if len(np.unique(groups)) < 2:
+        raise ValueError("At least two verified recordings are required for hold-out validation.")
+
+    splitter = GroupShuffleSplit(n_splits=100, test_size=0.2, random_state=0)
+    for train_idx, test_idx in splitter.split(np.zeros(len(labels)), labels, groups):
+        if len(np.unique(labels[train_idx])) == 2 and len(np.unique(labels[test_idx])) == 2:
+            return train_idx, test_idx
+    raise ValueError(
+        "Could not create a recording-level hold-out set containing both classes. "
+        "Verify more recordings with positive and negative candidates.")
+
 def train_model(min_samples: int = 50) -> dict:
     """Train (or retrain) the classifier from every cached verified file.
 
@@ -461,11 +493,17 @@ def train_model(min_samples: int = 50) -> dict:
 
     X_parts: "list[np.ndarray]" = []
     y_parts: "list[np.ndarray]" = []
+    group_parts: "list[np.ndarray]" = []
     for f in files:
         try:
             with np.load(f) as data:
-                X_parts.append(data["features"])
-                y_parts.append(data["labels"])
+                features = data["features"]
+                labels = data["labels"]
+                if len(features) != len(labels):
+                    raise ValueError("feature and label counts differ")
+                X_parts.append(features)
+                y_parts.append(labels)
+                group_parts.append(np.full(len(labels), f.stem))
         except Exception as exc:
             log.warning("train_model: skipping unreadable %s: %s", f, exc)
     if not X_parts:
@@ -473,6 +511,8 @@ def train_model(min_samples: int = 50) -> dict:
 
     X = np.nan_to_num(np.concatenate(X_parts, axis=0), nan=0.0, posinf=0.0, neginf=0.0)
     y = np.concatenate(y_parts, axis=0)
+    groups = np.concatenate(group_parts, axis=0)
+    n_training_files = len(np.unique(groups))
 
     if len(y) < min_samples:
         return {"ok": False, "message":
@@ -485,11 +525,15 @@ def train_model(min_samples: int = 50) -> dict:
 
     try:
         from sklearn.ensemble import RandomForestClassifier
-        from sklearn.model_selection import train_test_split
         from sklearn.metrics import (accuracy_score, f1_score, confusion_matrix,
                                       precision_score, recall_score)
     except ImportError:
-        return {"ok": False, "message": "scikit-learn is required -- pip install scikit-learn joblib"}
+        return {"ok": False, "message": "scikit-learn is required -- pip install scikit-learn skops"}
+
+    try:
+        train_idx, test_idx = _grouped_holdout_indices(y, groups)
+    except ValueError as exc:
+        return {"ok": False, "message": str(exc)}
 
     # Snapshot the currently-deployed model's hold-out stats (if any) before
     # this run's .save() overwrites them, so the caller can show a
@@ -499,8 +543,8 @@ def train_model(min_samples: int = 50) -> dict:
     prev_accuracy = prev_model.meta.get("holdout_accuracy") if prev_model else None
     prev_f1 = prev_model.meta.get("holdout_f1") if prev_model else None
 
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=0, stratify=y)
+    X_train, X_test = X[train_idx], X[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
 
     def _make_clf() -> "RandomForestClassifier":
         return RandomForestClassifier(
@@ -519,14 +563,14 @@ def train_model(min_samples: int = 50) -> dict:
     # cm[actual][predicted] without checking clf.classes_ itself.
     cm = confusion_matrix(y_test, y_pred, labels=[0, 1]).tolist()
 
-    # Hold-out split above is only to report an honest accuracy/F1 estimate;
-    # the deployed model is refit on all available labeled data.
+    # Recording-level hold-out metrics estimate generalization to unseen files;
+    # the deployed model is then refit on all available labeled data.
     clf_final = _make_clf()
     clf_final.fit(X, y)
 
     meta = {
         "trained_at": datetime.now().isoformat(),
-        "n_training_files": len(files),
+        "n_training_files": n_training_files,
         "n_training_samples": int(len(y)),
         "n_positive": int(y.sum()),
         "feature_names": FEATURE_NAMES,
@@ -542,8 +586,8 @@ def train_model(min_samples: int = 50) -> dict:
 
     result = {
         "ok": True,
-        "message": f"Trained on {len(y)} labeled candidates from {len(files)} file(s).",
-        "n_files": len(files), "n_samples": int(len(y)),
+        "message": f"Trained on {len(y)} labeled candidates from {n_training_files} file(s).",
+        "n_files": n_training_files, "n_samples": int(len(y)),
         "accuracy": accuracy, "f1": f1,
         "precision": precision, "recall": recall,
         "confusion_matrix": cm, "n_test": int(len(y_test)),

@@ -34,9 +34,14 @@ from scipy.signal import welch as _scipy_welch
 # before PlotController is ever instantiated.
 _trapz = getattr(np, "trapz", None) or getattr(np, "trapezoid", None)
 
-from ecg.core.models import MouseECG
-from ecg.core.filtering import downsample_for_display
-from ecg.core.analysis import compute_beat_correlation
+from ecg.core.models import MouseECG, QTC_FORMULA_LABELS, normalize_qtc_formula
+from ecg.core.filtering import downsample_xy_for_display
+from ecg.core.analysis import (
+    compute_beat_correlation, hrv_freq_withheld_reason, rr_bounds_label,
+    rr_disclosure_rows, rr_exclusion_report, rr_exclusion_text,
+    rr_interval_series, rr_timeseries, rr_valid_mask,
+    spectral_withheld_reason, successive_valid_pairs,
+)
 from ecg.ui.plots import style_axes
 from ecg.ui.wave_editor import WaveTemplateEditor
 from ecg.ui.theme import (
@@ -58,6 +63,35 @@ class PlotController:
         self.app = app
         # draw_overview()'s artist-mutation cache -- see that method.
         self._ov_cache: "Optional[dict]" = None
+
+    # ── Gap-aware RR helpers ──────────────────────────────────────────
+    # analyse_core keeps every RR interval in r["rr_ms"] and marks the ones
+    # used for HRV in r["rr_valid"] (inside the RR bounds, not spanning a
+    # beat removed by artifact correction); HRV is computed on the valid
+    # ones only, never bridging an excluded interval. Results restored from
+    # a session saved before rr_valid existed (and the pre-Analyze live
+    # tachogram) fall back to recomputing the mask from the bounds.
+    @staticmethod
+    def _rr_valid(r: dict) -> np.ndarray:
+        rr    = np.asarray(r.get("rr_ms", np.array([])), dtype=float)
+        valid = r.get("rr_valid")
+        if valid is not None:
+            valid = np.asarray(valid, dtype=bool)
+            if len(valid) == len(rr):
+                return valid
+        hr = r.get("hr") or {}
+        return rr_valid_mask(rr, float(hr.get("rr_min_ms", MouseECG.RR_MIN_MS)),
+                             float(hr.get("rr_max_ms", MouseECG.RR_MAX_MS)))
+
+    @classmethod
+    def _rr_exclusion(cls, r: dict) -> "tuple[int, float]":
+        """(n excluded RR intervals, % of all intervals) for result dict *r*."""
+        hr = r.get("hr") or {}
+        if "n_excluded" in hr:
+            return int(hr["n_excluded"]), float(hr.get("excluded_pct", 0.0))
+        valid = cls._rr_valid(r)
+        n_ex  = int((~valid).sum())
+        return n_ex, (100.0 * n_ex / len(valid) if len(valid) else 0.0)
 
     def draw_arr_detail(self) -> None:
         """Draw ECG strip for the selected arrhythmia event, with editable R peaks."""
@@ -677,7 +711,10 @@ class PlotController:
             d.beat_corr = d.beat_corr_peaks = None
             d._beat_corr_for = d.rpeaks_ok
         else:
-            r = compute_beat_correlation(sig_flt, d.rpeaks_ok, fs)
+            # Beat window sized from the shortest interval inside the user's
+            # RR bounds -- the same ones Analyze's beat template uses.
+            rr_lo, rr_hi = self.app.analysis_ctrl.hrv_rr_bounds(quiet=True)
+            r = compute_beat_correlation(sig_flt, d.rpeaks_ok, fs, rr_lo, rr_hi)
             d.beat_corr = r["beat_corr"]
             d.beat_corr_peaks = r["valid_rp"]
             d._beat_corr_for = d.rpeaks_ok
@@ -801,8 +838,19 @@ class PlotController:
         on_complete: "Optional[Callable[[], None]]" = None,
         auto_epochs: bool = False,
     ) -> None:
-        """Run a list of (label, fn) plot tasks sequentially via after() chain."""
+        """Run a list of (label, fn) plot tasks sequentially via after() chain.
+
+        *auto_epochs* starts the epoch computation afterwards, once no other
+        async job is running: *on_complete* may itself start one (Analyze's
+        run_freq), and a second _start_async is refused while it runs."""
         total = len(tasks)
+
+        def _epochs_when_idle(tries: int = 0) -> None:
+            # ~60 s at most, then give up rather than poll forever
+            if getattr(self.app, "_async_busy", False) and tries < 300:
+                self.app.after(200, lambda: _epochs_when_idle(tries + 1))
+                return
+            self.app._compute_epochs()
 
         def _run_next(idx: int) -> None:
             if idx >= total:
@@ -810,7 +858,7 @@ class PlotController:
                 if on_complete:
                     on_complete()
                 if auto_epochs:
-                    self.app.after(200, self.app._compute_epochs)
+                    self.app.after(200, _epochs_when_idle)
                 return
             label, fn = tasks[idx]
             pct = int(100 * (idx + 1) / total)
@@ -871,74 +919,180 @@ class PlotController:
             ("HRV tables",            lambda: self.plot_hrv_tables(results)),
             ("Poincaré / non-linear", lambda: self.plot_nonlinear(results)),
             ("PSD",                   lambda: self.plot_psd(results)),
-            ("HRV radar",             lambda: self.plot_radar(results)),
             ("ECG intervals",         lambda: self.plot_intervals(results)),
             ("Beat template",         lambda: self.plot_beat_template(results)),
             ("Summary",               lambda: self.plot_summary(results)),
         ]
         self.run_plot_chain(tasks, on_complete=on_complete, auto_epochs=auto_epochs)
 
+    def refresh_live_rr(self) -> None:
+        """Redraw the HRV tab's RR/HR tachogram + histogram straight from
+        the current accepted peaks, without needing a full Core Analysis
+        run.
+
+        Mirrors draw_detail_rrhr()'s "no Core Analysis dependency" RR/HR
+        computation (rp/fs only, same np.diff(rp)/fs*1000 arithmetic) --
+        the Detection tab's own RR/HR/Quality mini-strip already updates
+        live on every peak add/remove/threshold change; this brings the
+        HRV tab's full tachogram in line instead of it going blank
+        ("Run analysis to display") until the next Analyze click.
+        Deliberately narrow in scope: only RR/HR/the histogram refresh
+        this way -- SDNN/RMSSD/frequency-domain/etc. still require
+        Analyze, since those are materially more expensive to recompute
+        on every single edit. Called from DetectionController.run_detection
+        (the one place rpeaks_ok is ever reassigned), deferred via
+        after(0, ...) there since run_detection can run on a background
+        thread and this does real Tkinter/matplotlib work.
+        """
+        rp = self.app._windowed_peaks()
+        fs = self.app.signal.fs
+        if rp is None or fs is None or len(rp) < 3:
+            return
+        # Same validity rule Analyze will apply (sidebar RR bounds, beats
+        # removed by artifact correction as breaks), so an out-of-range
+        # interval is already marked as excluded before Analyze.
+        rr_lo, rr_hi = self.app.analysis_ctrl.hrv_rr_bounds(quiet=True)
+        try:
+            ser = rr_interval_series(rp, fs, rr_lo, rr_hi,
+                                     breaks=self.app.analysis_ctrl.hrv_breaks(rp))
+        except ValueError as exc:
+            log.debug("refresh_live_rr: %s", exc)
+            return
+        self.plot_rr({"rr_df": pd.DataFrame(), "rr_ms": ser["rr_ms"],
+                      "rr_valid": ser["valid"], "rr_t_s": ser["t_s"],
+                      "hr": {"rr_min_ms": rr_lo, "rr_max_ms": rr_hi}})
+
+    def _plot_rr_all_excluded(self, ts: "pd.DataFrame", r: dict) -> None:
+        """plot_rr() when no interval is valid for HRV: every interval as an
+        excluded marker, and why, instead of a stale or blank tachogram."""
+        t  = ts["Time_s"].to_numpy(dtype=float)
+        rr = ts["RR_ms"].to_numpy(dtype=float)
+        ok = np.isfinite(rr)
+        if not ok.any():
+            return
+        t, rr = t[ok], rr[ok]
+        note = (f"all {len(rr)} RR intervals excluded from HRV "
+                f"(bounds {rr_bounds_label(r.get('hr'))}) — widen Max RR "
+                f"if the heart rate is genuinely slow")
+
+        def draw_all_excluded(fig, compact: bool = False):
+            ax = fig.add_subplot(111)
+            style_axes(ax)
+            ax.plot(t, rr, "o", ls="none", ms=3.5, mfc="none", mec=RED, mew=1.0)
+            ax.set_ylabel("RR (ms)")
+            ax.set_xlabel("Time (s)")
+            ax.set_title(f"RR Intervals  ·  {note}", loc="left",
+                         fontsize=8 if compact else 9)
+
+        def draw_no_histogram(fig):
+            ax = fig.add_subplot(111)
+            style_axes(ax)
+            ax.text(0.5, 0.5, "No valid RR interval", ha="center", va="center",
+                    color=PLOT["muted"], transform=ax.transAxes)
+            ax.set_axis_off()
+
+        self.app._slots["rr"].update(draw_all_excluded)
+        self.app._slots["rr"]._draw_fn_compact = \
+            lambda fig: draw_all_excluded(fig, compact=True)
+        self.app._slots["rr_hist"].update(draw_no_histogram)
+        self.app.ui.rr_spike_times = np.array([], dtype=float)
+        if self.app.ui.rr_click_cid is not None:   # stale spike list
+            try:
+                self.app._slots["rr"].canvas.mpl_disconnect(self.app.ui.rr_click_cid)
+            except Exception as e:
+                log.debug("mpl_disconnect (rr click) failed: %s", e)
+            self.app.ui.rr_click_cid = None
+        self.app._set_textbox(self.app.txt_rr, f"  {note}")
+
     def plot_rr(self, r: dict) -> None:
         """Plot RR tachogram, HR trace, and RR distribution histogram.
 
+        Every RR interval is drawn (core.analysis.rr_timeseries): the valid
+        ones -- used for HRV -- as the line, the excluded ones (outside the
+        RR bounds, or spanning a beat removed by artifact correction) as
+        hollow red markers with the line broken around them, so a pause
+        stays visible after Analyze instead of being joined over. Mean/SD,
+        spike detection and the histogram use the valid intervals only.
+
         Drastic RR changes are detected and shown as orange/red markers on
         the tachogram.  Clicking any point navigates to that beat in Detection.
-        Right-clicking jumps specifically to the nearest spike.
+        Right-clicking jumps specifically to the nearest spike or excluded
+        interval.
         """
-        rdf       = r["rr_df"]
-        rr_ms_raw = r.get("rr_ms", np.array([]))
-
-        # Fall back to raw RR data if filtered dataframe is empty
-        if rdf.empty and len(rr_ms_raw) > 1 and self.app.detection.rpeaks_ok is not None:
-            _wp_rr = self.app._windowed_peaks()
-            rdf = pd.DataFrame({
-                "Time_s": (_wp_rr if _wp_rr is not None else self.app.detection.rpeaks_ok)[1:len(rr_ms_raw) + 1] / self.app.signal.fs,
-                "RR_ms":  rr_ms_raw,
-                "HR_bpm": 60_000.0 / np.clip(rr_ms_raw, 1, None),
-            })
-        if rdf.empty:
-            log.warning("_plot_rr: empty rdf — skipping")
+        ts = rr_timeseries(r)
+        if len(ts) == 0:
+            log.warning("_plot_rr: no RR interval — skipping")
+            return
+        if not ts["valid"].any():
+            # e.g. the live (pre-Analyze) view of an anaesthetised mouse
+            # slower than Max RR: still show the intervals, all as excluded.
+            self._plot_rr_all_excluded(ts, r)
             return
 
-        t_all  = np.asarray(rdf["Time_s"].values, dtype=float)
-        rr_all = np.asarray(rdf["RR_ms"].values,  dtype=float)
-        hr_all = np.asarray(rdf["HR_bpm"].values,  dtype=float)
+        t_all  = ts["Time_s"].to_numpy(dtype=float)
+        rr_all = ts["RR_ms"].to_numpy(dtype=float)
+        hr_all = ts["HR_bpm"].to_numpy(dtype=float)
+        valid  = ts["valid"].to_numpy(dtype=bool)
+        idx_v  = np.flatnonzero(valid)
+        t_v, rr_v, hr_v = t_all[idx_v], rr_all[idx_v], hr_all[idx_v]
+        excl   = ~valid & np.isfinite(rr_all)
+        n_excl = int((~valid).sum())
 
         # ── Detect drastic RR changes ──────────────────────────────────────
         # A beat is a "spike" if its RR deviates more than spike_thr standard
         # deviations from the local rolling median (window = 15 beats).
+        # Valid intervals only; the consecutive-jump test only compares two
+        # ADJACENT valid intervals, never across an excluded one.
         spike_thr  = 2.5   # SD threshold
         spike_idx  = np.array([], dtype=int)
         spike_t    = np.array([], dtype=float)
         spike_rr   = np.array([], dtype=float)
         spike_mag  = np.array([], dtype=float)  # delta-RR in ms
 
-        if len(rr_all) >= 10:
+        if len(rr_v) >= 10:
             # Rolling median via scipy — O(n·log(w)) au lieu de O(n·w)
             from scipy.ndimage import median_filter as _median_filter
-            win = min(15, len(rr_all) // 2)
-            roll_med = _median_filter(rr_all.astype(float), size=win, mode="nearest")
-            delta = rr_all - roll_med
+            win = min(15, len(rr_v) // 2)
+            roll_med = _median_filter(rr_v.astype(float), size=win, mode="nearest")
+            delta = rr_v - roll_med
             # Also flag beats where consecutive delta-RR is extreme
-            drr = np.diff(rr_all)
-            drr_padded = np.concatenate([[0], drr])
-            rr_sd = max(float(rr_all.std()), 1.0)
+            prev_adjacent = np.r_[False, valid[:-1]][idx_v]
+            drr_padded = np.where(prev_adjacent,
+                                  rr_all[idx_v] - rr_all[np.maximum(idx_v - 1, 0)], 0.0)
+            rr_sd = max(float(rr_v.std()), 1.0)
             # Spike = large deviation from local median OR large consecutive jump
             spike_mask = (np.abs(delta) > spike_thr * rr_sd) | \
                          (np.abs(drr_padded) > spike_thr * rr_sd * 1.2)
             spike_idx = np.where(spike_mask)[0]
             if len(spike_idx):
-                spike_t   = t_all[spike_idx]
-                spike_rr  = rr_all[spike_idx]
+                spike_t   = t_v[spike_idx]
+                spike_rr  = rr_v[spike_idx]
                 spike_mag = delta[spike_idx]
 
-        # Downsample for display
-        t_ds   = downsample_for_display(t_all)
-        rr_ds  = downsample_for_display(rr_all)
-        hr_ds  = downsample_for_display(hr_all)
-        rr_mean = float(rr_all.mean())
-        hr_mean = float(hr_all.mean())
-        rr_sd_v = float(rr_all.std())
+        # Downsample for display -- excluded intervals are NaN in the line
+        # arrays so the line breaks there (the gap-preserving decimation
+        # keeps those breaks on long recordings).
+        t_ds,    rr_ds = downsample_xy_for_display(t_all, np.where(valid, rr_all, np.nan))
+        t_ds_hr, hr_ds = downsample_xy_for_display(t_all, np.where(valid, hr_all, np.nan))
+        rr_mean = float(rr_v.mean())
+        hr_mean = float(hr_v.mean())
+        rr_sd_v = float(rr_v.std())
+
+        # Excluded intervals: hollow red markers at their true value, except
+        # far-off ones (a detection dropout of several seconds, a 0-ms
+        # duplicate) which are drawn at the edge of a range derived from the
+        # valid ones, so they cannot squash the valid trace into a line.
+        rr_hi_bound = float((r.get("hr") or {}).get("rr_max_ms", MouseECG.RR_MAX_MS))
+        ex_hi = max(2.0 * float(rr_v.max()), 1.5 * rr_hi_bound)
+        ex_lo = 0.5 * float(rr_v.min())
+        t_ex      = t_all[excl]
+        rr_ex_raw = rr_all[excl]
+        rr_ex     = np.clip(rr_ex_raw, ex_lo, ex_hi)
+        hr_ex     = 60_000.0 / rr_ex
+        n_off     = int(((rr_ex_raw > ex_hi) | (rr_ex_raw < ex_lo)).sum())
+        ex_label  = f"excluded ({n_excl})"
+        if n_off:
+            ex_label += f" · {n_off} off-scale at edge"
         # BLUE_MID/ORANGE_DARK match the right-panel STATISTICS accents for
         # "RR Intervals" and "Heart Rate" respectively (app.py) -- these were
         # a hardcoded, non-theme-adaptive green that didn't match either.
@@ -962,6 +1116,11 @@ class PlotController:
             # ── RR tachogram ────────────────────────────────────
             axes[0].plot(t_ds, rr_ds, color=c_rr, lw=0.8, zorder=2)
             axes[0].axhline(rr_mean, color=c_rr, ls="--", lw=0.9, alpha=0.5, zorder=1)
+            if len(t_ex):
+                axes[0].plot(t_ex, rr_ex, "o", ls="none", ms=4.5, mfc="none",
+                             mec=RED, mew=1.1, zorder=6, label=ex_label)
+                axes[0].legend(loc="upper right", fontsize=7, framealpha=0,
+                               labelcolor=PLOT.get("text", GRAY_LIGHT))
 
             # ±1 SD reference band
             axes[0].axhspan(rr_mean - rr_sd_v, rr_mean + rr_sd_v,
@@ -997,8 +1156,11 @@ class PlotController:
             axes[0].tick_params(labelbottom=False)
 
             # ── HR trace ────────────────────────────────────────
-            axes[1].plot(t_ds, hr_ds, color=c_hr, lw=0.8, zorder=2)
+            axes[1].plot(t_ds_hr, hr_ds, color=c_hr, lw=0.8, zorder=2)
             axes[1].axhline(hr_mean, color=c_hr, ls="--", lw=0.9, alpha=0.5, zorder=1)
+            if len(t_ex):
+                axes[1].plot(t_ex, hr_ex, "o", ls="none", ms=4.0, mfc="none",
+                             mec=RED, mew=1.0, zorder=6)
 
             # Mirror spikes on HR axis
             if show_markers and len(spike_t):
@@ -1061,10 +1223,12 @@ class PlotController:
             except Exception as e:
                 log.debug("mpl_disconnect (rr click) failed: %s", e)
 
-        # Store spike times for right-click navigation, and on app.ui so the
-        # Detection nav bar's prev/next-spike stepper (app.py) can walk the
-        # same list without recomputing it.
-        _spike_times = spike_t.copy() if len(spike_t) else np.array([], dtype=float)
+        # Store spike times -- and the excluded intervals, equally worth a
+        # look (a pause, a missed beat) -- for right-click navigation, and
+        # on app.ui so the Detection nav bar's prev/next-spike stepper
+        # (app.py) can walk the same list without recomputing it.
+        _spike_times = np.sort(np.concatenate([spike_t, t_ex])).astype(float)
+        _excl_times  = set(np.round(t_ex, 6).tolist())
         self.app.ui.rr_spike_times = _spike_times
 
         def _on_rr_click(event):
@@ -1073,11 +1237,13 @@ class PlotController:
             t_clicked = float(event.xdata)
 
             if event.button == 3 and len(_spike_times):
-                # Right-click: jump to the nearest spike
+                # Right-click: jump to the nearest spike / excluded interval
                 dists = np.abs(_spike_times - t_clicked)
                 nearest_spike_t = float(_spike_times[int(np.argmin(dists))])
                 t_nav = nearest_spike_t
-                spike_info = f"spike at {nearest_spike_t:.3f} s"
+                what = ("excluded RR" if round(nearest_spike_t, 6) in _excl_times
+                        else "spike")
+                spike_info = f"{what} at {nearest_spike_t:.3f} s"
             elif event.button == 1:
                 # Left-click: navigate to clicked time
                 t_nav = t_clicked
@@ -1103,14 +1269,25 @@ class PlotController:
 
         self.app.ui.rr_click_cid = self.app._slots["rr"].canvas.mpl_connect(
             "button_press_event", _on_rr_click)
-        _rr_desc = rdf["RR_ms"].describe()
+        # Statistics of the valid intervals (the ones HRV used), plus how
+        # many were excluded.
+        _rr_desc = pd.Series(rr_v).describe()
+        _rr_desc["excluded"] = float(n_excl)
         _rr_tsv  = "Metric\tRR_ms\n" + "\n".join(
             f"{k}\t{v:.5g}" for k, v in _rr_desc.items())
         self.app._set_textbox(self.app.txt_rr,
             "\n".join(f"  {k:<14} {v:>10.2f}" for k, v in _rr_desc.items()),
             tsv=_rr_tsv)
 
-        rr_clipped = rdf["RR_ms"].clip(MouseECG.RR_MIN_MS, MouseECG.RR_MAX_MS).values
+        # Valid intervals only (already inside the RR bounds the analysis
+        # used); the clip only guards results from older sessions.
+        _hr_b = r.get("hr") or {}
+        rr_clipped = np.clip(
+            rr_v,
+            float(_hr_b.get("rr_min_ms", MouseECG.RR_MIN_MS)),
+            float(_hr_b.get("rr_max_ms", MouseECG.RR_MAX_MS)))
+        hist_title = ("RR Distribution" if not n_excl else
+                      f"RR Distribution  ·  valid only — {n_excl} excluded")
 
         # HRV Triangular Index / TINN -- already computed by nk.hrv_time()
         # and shown as bare numbers in the Time Domain table, with no visual
@@ -1135,7 +1312,7 @@ class PlotController:
                     edgecolor="white", lw=0.3)
             ax.set_xlabel("RR (ms)")
             ax.set_ylabel("Count")
-            ax.set_title("RR Distribution", loc="left")
+            ax.set_title(hist_title, loc="left")
             # A fixed 1 ms tick spacing only looks reasonable for a narrow RR
             # range (e.g. a quiet anesthetized recording). Any recording with
             # real variability -- an awake mouse, or one containing a
@@ -1171,12 +1348,6 @@ class PlotController:
                                       fc=PLOT["axes"], ec="none", alpha=0.8))
 
         self.app._slots["rr_hist"].update(draw_histogram)
-
-    # HRV time-domain column name -> _CONTEXT_FIELD_MAP key (ecg/core/models.py)
-    # -- the subset of hrv_time metrics this app has experimental-context
-    # reference ranges for.
-    _TD_REF_KEYS = {"MeanNN": "RR_mean", "SDNN": "RR_SDNN",
-                     "RMSSD": "RR_RMSSD", "pNN6": "RR_pNN6"}
 
     # Display (label, unit) for the metrics researchers actually read off
     # this table -- bare NeuroKit column names carry no unit and don't say
@@ -1216,8 +1387,15 @@ class PlotController:
         else:
             td_lines: list[str] = [
                 "  Mouse-specific: read pNN6, not pNN50/pNN20 (human RR thresholds)",
-                "",
             ]
+            n_excl, _ = self._rr_exclusion(r)
+            if n_excl:
+                # Bounds actually used (hr); older results lacking the counts
+                # fall back to the recomputed mask's count and the defaults.
+                excl_src = dict(r.get("hr") or {})
+                excl_src.setdefault("n_excluded", n_excl)
+                td_lines.append(f"  {rr_exclusion_text(excl_src)} — not bridged")
+            td_lines.append("")
             for col in td_df.columns:
                 try:
                     v = float(td_df[col].values[0])
@@ -1231,31 +1409,17 @@ class PlotController:
                 disp = f"{label} ({unit})" if unit else label
                 fmt = f"{v:.1f}" if abs(v) >= 100 else f"{v:.3f}" if abs(v) >= 1 else f"{v:.5f}"
                 dots = "·" * max(2, 34 - len(disp))
-                ref_note = ""
-                ref_key = self._TD_REF_KEYS.get(name)
-                if ref_key is not None:
-                    # Same ✓/~/↑/↓ convention as the PDF report's _row()
-                    # (export_controller.py) -- ±15% of the range counts as
-                    # "borderline" rather than a hard in/out cutoff.
-                    lo, hi = self.app._current_ref(ref_key)
-                    margin = (hi - lo) * 0.15
-                    if lo <= v <= hi:
-                        status = "✓"
-                    elif lo - margin <= v <= hi + margin:
-                        status = "~"
-                    else:
-                        status = "↑" if v > hi else "↓"
-                    ref_note = f"   {status}  (normal {lo:.3g}–{hi:.3g})"
-                elif name not in ("pNN50", "pNN20"):
-                    ref_note = "   (no mouse reference)"
-                td_lines.append(f"  {disp} {dots}  {fmt:>10}{ref_note}")
+                td_lines.append(f"  {disp} {dots}  {fmt:>10}")
             self.app._set_textbox(
                 self.app.txt_td, "\n".join(td_lines) or "  (no finite values)",
                 tsv=self.app._df_to_tsv(td_df))
 
         fd_df = r["hrv_freq"]
         if fd_df is None or fd_df.empty:
-            self.app._set_textbox(self.app.txt_fd, "  (not computed)")
+            withheld = getattr(fd_df, "attrs", {}).get("withheld_reason") if fd_df is not None else None
+            self.app._set_textbox(
+                self.app.txt_fd,
+                f"  Spectrum withheld — {withheld}" if withheld else "  (not computed)")
             return
 
         lines: list[str] = []
@@ -1315,17 +1479,43 @@ class PlotController:
           e.g. 20 / 0.02 = 1000, so for long recordings nperseg = 1000.
         • noverlap: 75 % of nperseg (Welch variance reduction)
         • Window: Hann (default scipy) — good sidelobe suppression
+        • Only valid RR intervals (inside the physiological bounds) are
+          splined, at their TRUE times (each interval's end) -- a
+          np.cumsum() of the kept intervals would shift every sample after
+          an excluded interval (e.g. a pause) earlier by its duration.
+        • The spectrum is WITHHELD (panel shows why) under the same rule as
+          analyse_hrv_freq (core.analysis.spectral_withheld_reason): a run
+          of excluded intervals longer than MouseECG.SPECTRAL_MAX_GAP_S, or
+          excluded time above MouseECG.SPECTRAL_MAX_EXCLUDED_FRAC of the
+          span -- the spline would otherwise invent RR values across it.
         """
-        rr_ms = r["rr_ms"]
+        rdf = r.get("rr_df")
+        if rdf is not None and not rdf.empty and {"Time_s", "RR_ms"} <= set(rdf.columns):
+            # analyse_core's rr_df: valid intervals with their end times
+            ts    = np.asarray(rdf["Time_s"].values, dtype=float)
+            rr_ms = np.asarray(rdf["RR_ms"].values, dtype=float)
+        else:
+            rr_all = np.asarray(r["rr_ms"], dtype=float)
+            valid  = self._rr_valid(r)
+            ts     = (np.cumsum(rr_all) / 1000.0)[valid]   # cumsum over ALL = true times
+            rr_ms  = rr_all[valid]
         MIN_BEATS = 60
+        withheld_msg = None
         if len(rr_ms) < MIN_BEATS:
-            log.warning("_plot_psd: too few RR intervals (%d, need ≥ %d)", len(rr_ms), MIN_BEATS)
-            def draw_warn(fig):
+            log.warning("_plot_psd: too few valid RR intervals (%d, need ≥ %d)", len(rr_ms), MIN_BEATS)
+            withheld_msg = (f"Spectral HRV requires ≥ {MIN_BEATS} valid RR intervals\n"
+                            f"(recording has {len(rr_ms)})")
+        elif r.get("rr_ms") is not None:
+            reason = spectral_withheld_reason(np.asarray(r["rr_ms"], dtype=float),
+                                              self._rr_valid(r))
+            if reason:
+                log.warning("_plot_psd: spectrum withheld — %s", reason)
+                withheld_msg = "Spectrum withheld\n" + reason.replace(" — ", "\n")
+        if withheld_msg:
+            def draw_warn(fig, _msg=withheld_msg):
                 ax = fig.add_subplot(111)
                 style_axes(ax)
-                ax.text(0.5, 0.5,
-                        f"Spectral HRV requires ≥ {MIN_BEATS} beats\n"
-                        f"(recording has {len(rr_ms)})",
+                ax.text(0.5, 0.5, _msg,
                         ha="center", va="center", color=PLOT["muted"],
                         transform=ax.transAxes, fontsize=11)
                 ax.set_axis_off()
@@ -1333,7 +1523,6 @@ class PlotController:
             return
         try:
             # Build a uniformly sampled RR series via cubic spline
-            ts    = np.cumsum(rr_ms) / 1000.0          # cumulative time in seconds
             dt    = 1.0 / MouseECG.PSD_INTERP_FS
             t_uni = np.arange(ts[0], ts[-1], dt)
             if len(t_uni) < 32:
@@ -1463,115 +1652,6 @@ class PlotController:
         except Exception as exc:
             log.warning("_plot_psd failed: %s", exc)
 
-    # SampEn has no per-experimental-context range (not a ContextRanges field,
-    # ecg/core/models.py) -- this fixed range matches PARAM_INFO["SampEn"] in
-    # ecg/io/export.py (ref_lo=0.5, ref_hi=2.5), the same number this app's
-    # PDF report already uses to call SampEn "normal".
-    _RADAR_SAMPEN_RANGE = (0.5, 2.5)
-
-    # (radar label, source df key in `r`, HRV column, _current_ref() key or
-    # None for the fixed SampEn range above). LF/HF deliberately read the
-    # *normalised* HRV_LFn/HRV_HFn columns (fraction of total power), not
-    # raw HRV_LF/HRV_HF (absolute power in ms^2/Hz) -- the LF_pct/HF_pct
-    # reference bounds are percentages, so comparing raw power against them
-    # would silently misjudge every recording as "low".
-    _RADAR_SPECS = [
-        ("SDNN",   "hrv_time",   "HRV_SDNN",   "RR_SDNN"),
-        ("RMSSD",  "hrv_time",   "HRV_RMSSD",  "RR_RMSSD"),
-        ("pNN6",   "hrv_time",   "HRV_pNN6",   "RR_pNN6"),
-        ("LF",     "hrv_freq",   "HRV_LFn",    "LF_pct"),
-        ("HF",     "hrv_freq",   "HRV_HFn",    "HF_pct"),
-        ("LF/HF",  "hrv_freq",   "HRV_LFHF",   "LFHF"),
-        ("SD1",    "hrv_nonlin", "HRV_SD1",    "SD1"),
-        ("SD2",    "hrv_nonlin", "HRV_SD2",    "SD2"),
-        ("SampEn", "hrv_nonlin", "HRV_SampEn", None),
-    ]
-
-    def plot_radar(self, r: dict) -> None:
-        """Normalised HRV spider / radar chart.
-
-        Each axis is normalised against ITS OWN physiological reference
-        range (the same experimental-context bounds the Time Domain panel
-        and the PDF report use), not against the other metrics on the same
-        chart. The previous version min-max normalised all 9 raw values
-        (ms, %, a unitless ratio, ms^2/Hz power, and entropy) against EACH
-        OTHER -- whichever metric happened to have the largest raw magnitude
-        was stretched to 100% regardless of whether that value was actually
-        high for that metric, so the "profile" didn't mean anything
-        physiologically. Here, 0 = bottom of the reference range, 1 = top;
-        an axis can go outside [0, 1] when a value is genuinely outside its
-        reference range, and the plot widens to show that rather than
-        clipping it.
-        """
-        try:
-            labels: "list[str]" = []
-            raw_values: "list[float]" = []
-            norm_values: "list[float]" = []
-            for label, df_key, col, ref_key in self._RADAR_SPECS:
-                df = r.get(df_key)
-                if df is None or df.empty or col not in df.columns:
-                    continue
-                try:
-                    v = float(df[col].values[0])
-                except Exception as exc:
-                    log.debug("_plot_radar skip '%s': %s", col, exc)
-                    continue
-                if not np.isfinite(v):
-                    continue
-                if col in ("HRV_LFn", "HRV_HFn"):
-                    v *= 100.0  # fraction -> percent, matches LF_pct/HF_pct's scale
-                lo, hi = (self.app._current_ref(ref_key) if ref_key is not None
-                          else self._RADAR_SAMPEN_RANGE)
-                span = (hi - lo) or 1e-9
-                labels.append(label)
-                raw_values.append(v)
-                norm_values.append((v - lo) / span)
-
-            if len(labels) < 3:
-                return
-
-            n        = len(labels)
-            angles   = np.linspace(0, 2 * np.pi, n, endpoint=False).tolist()
-            v_closed = norm_values + [norm_values[0]]
-            a_closed = angles + angles[:1]
-            # Axes always show at least the [0,1] reference band; widen only
-            # if a metric actually falls outside its own reference range.
-            y_lo = min(0.0, min(norm_values) - 0.05)
-            y_hi = max(1.0, max(norm_values) + 0.05)
-
-            # Rich labels: name + raw value — placed by thetagrids (stays inside bounds)
-            rich_labels = [f"{lbl}\n{val:.3g}" for lbl, val in zip(labels, raw_values)]
-
-            def draw_radar(fig):
-                ax = fig.add_subplot(111, polar=True)
-                ax.set_facecolor(PLOT["axes"])
-                # Shade the reference band itself so "inside the green ring"
-                # has one consistent meaning across every axis.
-                ax.fill(a_closed, [1.0] * (n + 1), color=GREEN, alpha=0.14, zorder=0)
-                ax.plot(a_closed, v_closed, color=BLUE, lw=2, zorder=3)
-                ax.fill(a_closed, v_closed, color=BLUE, alpha=0.15, zorder=2)
-                ax.set_thetagrids(np.degrees(angles), rich_labels, color=PLOT["text"])
-                ax.set_ylim(y_lo, y_hi)
-                ax.set_yticks([0.0, 0.5, 1.0])
-                # Radial (ref lo/mid/hi) labels default to sitting right on
-                # top of a spoke/vertex; park them halfway between two spokes
-                # instead, with a background box, so they stay legible over
-                # the grid and the filled profile.
-                ax.set_rlabel_position(np.degrees(angles[0] + (angles[1] - angles[0]) / 2))
-                ax.set_yticklabels(["ref. lo", "ref. mid", "ref. hi"],
-                                   color=PLOT["muted"], fontsize=7)
-                for _tl in ax.get_yticklabels():
-                    _tl.set_bbox(dict(boxstyle="round,pad=0.15",
-                                       fc=PLOT["axes"], ec="none", alpha=0.8))
-                ax.grid(color=PLOT["grid"], alpha=0.5)
-                ax.spines["polar"].set_color(PLOT["border"])
-                ax.set_title("HRV Profile  (0 = ref. low · 1 = ref. high, per metric)",
-                             pad=8, color=PLOT["text"], fontsize=9)
-
-            self.app._slots["radar"].update(draw_radar)
-        except Exception as exc:
-            log.warning("_plot_radar failed: %s", exc)
-
     def plot_nonlinear(self, r: dict) -> None:
         """Poincaré plot and non-linear HRV metric table."""
         self.app._set_textbox(
@@ -1579,9 +1659,15 @@ class PlotController:
             self.app._df_to_text(r["hrv_nonlin"], display_map=self.app._NL_DISPLAY),
             tsv=self.app._df_to_tsv(r["hrv_nonlin"]))
 
-        rr_ms = r["rr_ms"]
-        if len(rr_ms) < 2:
+        rr_ms = np.asarray(r["rr_ms"], dtype=float)
+        valid = self._rr_valid(r)
+        # Successive VALID pairs only -- same pairs nk.hrv_nonlinear() used
+        # for SD1/SD2: a pair straddling an excluded interval (e.g. a pause)
+        # is dropped rather than plotted as an outlier point.
+        rr_a, rr_b = successive_valid_pairs(rr_ms, valid)
+        if len(rr_a) < 1:
             return
+        rr_v = rr_ms[valid]
 
         nl   = r["hrv_nonlin"]
         sd1  = self.app._safe_df_val(nl, "HRV_SD1", 1)
@@ -1610,11 +1696,10 @@ class PlotController:
         except Exception as exc:
             log.debug("_plot_nonlinear: SD1/SD2 ellipse skipped: %s", exc)
             have_ellipse = False
-        center = float(rr_ms.mean())
+        center = float(rr_v.mean())
 
-        rr_a = rr_ms[:-1]
-        rr_b = rr_ms[1:]
-        lim  = [float(rr_ms.min()) - 20, float(rr_ms.max()) + 20]
+        lim  = [float(min(rr_a.min(), rr_b.min())) - 20,
+                float(max(rr_a.max(), rr_b.max())) + 20]
 
         mse_scales = attrs.get("mse_scales") or []
         mse_values = attrs.get("mse_values") or []
@@ -1673,7 +1758,7 @@ class PlotController:
                 ax_mse.set_xticks(mse_scales)
             else:
                 ax_mse.set_title("Multiscale entropy", loc="left", fontsize=8)
-                ax_mse.text(0.5, 0.5, f"Needs ≥60 beats (have {len(rr_ms)})",
+                ax_mse.text(0.5, 0.5, f"Needs ≥60 valid RR intervals (have {len(rr_v)})",
                            ha="center", va="center", color=PLOT["muted"],
                            fontsize=8, transform=ax_mse.transAxes)
                 ax_mse.set_xticks([]); ax_mse.set_yticks([])
@@ -1729,15 +1814,14 @@ class PlotController:
         col_data = [(col, ivl[col].dropna().values, color)
                     for col, color in zip(cols, palette)]
 
-        # Reference ranges for drawing expected-value bands -- from the
-        # currently selected experimental context (same _current_ref()
-        # mechanism as Time Domain / radar / Epochs / Rolling), not the
-        # fixed MouseECG.*_NORMAL constants this used to read.
-        _ref = {key: self.app._current_ref(key)
-                for key in ("PR_ms", "QRS_ms", "QT_ms", "QTc_ms")}
+        # No reference bands (the experimental-context selector they came
+        # from was removed) -- every _ref.get(col, ...) below falls
+        # through to (None, None), which the drawing code already treats
+        # as "no band to draw".
+        _ref: "dict[str, tuple[float, float]]" = {}
 
         # QT-RR regression diagnostic: whether the currently selected QTc
-        # formula (Mitchell/Bazett/Hodges) actually removed rate-dependence.
+        # formula (Mitchell/Bazett/Fridericia) actually removed rate-dependence.
         # A well-corrected QTc should be roughly flat against RR; a nonzero
         # slope means the correction under/over-compensates at this
         # recording's heart-rate range -- exactly the check the rodent QTc
@@ -1773,8 +1857,7 @@ class PlotController:
                           wspace=0.40)
             title_color = GREEN if pct_ivl >= 90 else ORANGE_DARK if pct_ivl >= 50 else RED
             fig.suptitle(
-                f"{n_ok_ivl}/{n_total_ivl} beats measured ({pct_ivl:.0f}%)"
-                "  ·  tinted band = reference range for the selected context",
+                f"{n_ok_ivl}/{n_total_ivl} beats measured ({pct_ivl:.0f}%)",
                 color=title_color, fontsize=9, y=0.985)
             for ci, (col, data, color) in enumerate(col_data):
                 ax = fig.add_subplot(gs[0, ci])
@@ -2116,9 +2199,14 @@ class PlotController:
         # Porta index P0: fraction of beats with RR_n+1 < RR_n  (sym → 50 %)
         # Guzik index GI: contribution of decelerations to total variation
         # Both are markers of autonomic nervous system balance asymmetry.
-        if len(rr_ms) > 8:
-            rr_a = rr_ms[:-1].astype(float)
-            rr_b = rr_ms[1:].astype(float)
+        # Successive VALID differences only: a ΔRR across an excluded
+        # interval (e.g. into/out of a pause) is dropped, not counted.
+        rr_a_v, rr_b_v = successive_valid_pairs(
+            np.asarray(rr_ms, dtype=float), self._rr_valid(r))
+        have_asym = len(rr_a_v) >= 8
+        if have_asym:
+            rr_a = rr_a_v
+            rr_b = rr_b_v
             diff = rr_b - rr_a
             n_dec = int(np.sum(diff > 0))    # decelerations (RR lengthens)
             n_acc = int(np.sum(diff < 0))    # accelerations (RR shortens)
@@ -2276,9 +2364,16 @@ class PlotController:
         else:
             art_lines = ["", "  ARTIFACT CORRECTION", "    Not applied"]
 
+        # RR intervals used for HRV and the ones excluded (outside the bounds
+        # used, or spanning a removed beat) -- same rows as the Excel Cover
+        # sheet and the Prism notes.
+        rr_lines = [f"    {label:<16} {value}"
+                    for label, value in rr_disclosure_rows(rr_exclusion_report(r))]
+        freq_withheld = hrv_freq_withheld_reason(r)
+
         # ── asymmetry metrics for report ──────────────────────────────────────
         asym_lines: list[str] = []
-        if len(rr_ms) > 8:
+        if have_asym:
             asym_lines = [
                 "", "  RR ASYMMETRY (autonomic system)",
                 f"    Porta index (acc.)   {porta_pct:.1f} %  (symétrie → 50 %)",
@@ -2300,7 +2395,8 @@ class PlotController:
             f"    Min  (2e %ile)   {hr['min']:.1f} bpm",
             f"    Max  (98e %ile)  {hr['max']:.1f} bpm",
             f"    SD               {hr['std']:.2f} bpm",
-            f"    N battements     {hr['n']}", "",
+            f"    N battements     {hr['n']}",
+            *rr_lines, "",
             "  HRV — TIME DOMAIN",
             f"    MeanNN   {val(td, 'HRV_MeanNN')} ms",
             f"    SDNN     {val(td, 'HRV_SDNN')} ms",
@@ -2311,7 +2407,9 @@ class PlotController:
             f"    VLF      {val(fd, 'HRV_VLF')} n.u.",
             f"    LF       {val(fd, 'HRV_LF')} n.u.",
             f"    HF       {val(fd, 'HRV_HF')} n.u.",
-            f"    LF/HF    {val(fd, 'HRV_LFHF')}", "",
+            f"    LF/HF    {val(fd, 'HRV_LFHF')}",
+            # A withheld spectrum says why rather than a column of "—".
+            *([f"    Withheld — {freq_withheld}"] if freq_withheld else []), "",
             "  HRV — NON-LINEAR",
             f"    SD1      {val(nl, 'HRV_SD1')} ms",
             f"    SD2      {val(nl, 'HRV_SD2')} ms",
@@ -2330,6 +2428,10 @@ class PlotController:
                             f"    {col:<16} {data.median():.1f} ± {data.std():.1f} ms")
             if len(_qt) > 3:
                 lines.append(f"    QT dispersion    {qt_disp:.1f} ms")
+            # The QTc values above differ ~3× between formulas: name the one used.
+            lines.append(f"    QTc formula      "
+                         f"{QTC_FORMULA_LABELS[normalize_qtc_formula(self.app._qtc_formula())]}"
+                         f"  (read uncorrected QT alongside)")
         lines += asym_lines
         lines += art_lines
         lines += ["", "═" * 62]
@@ -2343,10 +2445,10 @@ class PlotController:
         """
         result_slots = (
             "rr", "rr_hist",
-            "poincare", "psd", "radar",
+            "poincare", "psd",
             "intervals",
             "beat", "beat_dist",
-            "epochs", "rolling_hrv",
+            "epochs", "rolling_hrv", "autonomic", "event_locked",
             "arr_detail",
             # Summary tab: kept mirrors + its own unique panels
             "sum_rr", "sum_poincare",
@@ -2378,6 +2480,10 @@ class PlotController:
         lbl_roll = getattr(self.app, "lbl_roll_status", None)
         if lbl_roll is not None:
             lbl_roll.configure(text="  Click Analyze first", text_color=PLOT["muted"])
+        lbl_auto = getattr(self.app, "lbl_auto_status", None)
+        if lbl_auto is not None:
+            lbl_auto.configure(text=self.app.analysis_ctrl.AUTONOMIC_IDLE_TEXT,
+                               text_color=PLOT["muted"])
         self.app._set_result_btns_enabled(
             False, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl", "btn_run_arrhythmia"))
 
@@ -2416,7 +2522,8 @@ class PlotController:
         self.app._kpi["hr_mean"].configure(text=f"{hr['mean']:.0f}")
         self.app._kpi["hr_range"].configure(text=f"{hr['min']:.0f}–{hr['max']:.0f}")
         try:
-            rr_mean = float(np.nanmean(r["rr_ms"]))
+            # Valid intervals only -- same set as HR mean and HRV_MeanNN
+            rr_mean = float(np.nanmean(np.asarray(r["rr_ms"], dtype=float)[self._rr_valid(r)]))
             self.app._kpi["rr_mean"].configure(text=f"{rr_mean:.0f}")
         except Exception:
             self.app._kpi["rr_mean"].configure(text="—")

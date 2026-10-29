@@ -5,8 +5,7 @@ Package layout
 --------------
 ecg/
   core/
-    models.py        — physiology constants, experimental-context reference
-                       ranges, dataclasses, typed dicts
+    models.py        — physiology constants, dataclasses, typed dicts
     filtering.py     — bandpass, notch, normalise, downsample helpers
     detection.py     — peak detection, RR artifact handling, rhythm /
                        abnormal-event classification
