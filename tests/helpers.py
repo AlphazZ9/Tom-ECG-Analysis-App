@@ -50,6 +50,7 @@ def add_qrs_pulse(sig: np.ndarray, center: int, fs: float,
 def make_synth_ecg(n_beats: int = 40, fs: float = 2000.0, rr_ms: float = 120.0,
                     qrs_width_ms: float = 8.0, amp: float = 1.0,
                     noise_sd: float = 0.02, seed: int = 0,
+                    p_amp: float = 0.0,
                     ) -> "tuple[np.ndarray, float, np.ndarray]":
     """A crude but sharp-upstroke synthetic mouse-ECG-like train: one
     QRS-shaped pulse per beat at a uniform RR interval, plus Gaussian noise.
@@ -58,6 +59,8 @@ def make_synth_ecg(n_beats: int = 40, fs: float = 2000.0, rr_ms: float = 120.0,
     is checked with a small (~5 ms) tolerance in the tests, not exact
     equality -- every detector snaps to its own notion of "the peak sample",
     which can land a sample or two off the pulse's mathematical centre.
+    *p_amp* > 0 adds a Gaussian P wave (SD 4 ms) 42 ms before each R; there
+    is none by default, so PR is NaN (no P wave is invented from noise).
     """
     rng = np.random.default_rng(seed)
     rr_samp = int(round(rr_ms / 1000.0 * fs))
@@ -68,6 +71,10 @@ def make_synth_ecg(n_beats: int = 40, fs: float = 2000.0, rr_ms: float = 120.0,
         center = b * rr_samp
         true_peaks.append(center)
         add_qrs_pulse(sig, center, fs, amp=amp, qrs_width_ms=qrs_width_ms)
+        if p_amp:
+            lo, hi = center - int(0.06 * fs), center - int(0.024 * fs)
+            tt = (np.arange(lo, hi) - center) / fs * 1000.0
+            sig[lo:hi] += p_amp * np.exp(-0.5 * ((tt + 42.0) / 4.0) ** 2)
     sig += rng.normal(0, noise_sd, n)
     return sig, fs, np.array(true_peaks, dtype=int)
 

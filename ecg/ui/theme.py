@@ -569,6 +569,61 @@ FONT_SUBSECTION   = make_font(10, bold=True)  # en-tête de sous-bloc (sous FONT
 FONT_CARD_TITLE   = make_font(12, bold=True)  # titre de carte (alias sémantique de FONT_SECTION_HDR)
 FONT_DIALOG_TITLE = make_font(18, bold=True)  # en-tête de dialogue pleine page (ex. Appearance Settings)
 
+_SYNC_COLOUR_NAMES = (
+    "BG", "PANEL", "CARD", "BORDER", "BORDER2",
+    "RED", "BLUE", "GREEN", "ORANGE", "MUTED", "LIGHT", "TEXT", "PLOT",
+    "BLUE_DARK", "BLUE_HOVER", "BLUE_MID", "BLUE_DEEP",
+    "PURPLE", "PURPLE_DARK", "PURPLE_LIGHT", "PINK", "TEAL", "TEAL_DARK", "CYAN", "CYAN_BRIGHT",
+    "GREEN_DARK", "GREEN_MID", "ORANGE_DARK", "ORANGE_DEEP",
+    "AMBER", "AMBER_DARK", "RED_DARK", "RED_MID", "RED_LIGHT",
+    "CORAL", "NAVY", "GRAY", "GRAY_LIGHT",
+    # Semantic action-colour tokens (rationalised palette, UI redesign)
+    "COLOR_PRIMARY", "COLOR_PRIMARY_HOVER", "COLOR_SUCCESS", "COLOR_SUCCESS_HOVER",
+    "COLOR_WARNING", "COLOR_WARNING_HOVER", "COLOR_DANGER", "COLOR_DANGER_HOVER",
+    "COLOR_SECONDARY", "COLOR_SECONDARY_HOVER",
+    "ARTIFACT_TYPE_COLOR",
+)
+_SYNC_FONT_NAMES = (
+    "FONT_TITLE", "FONT_SECTION_HDR", "FONT_LABEL", "FONT_SMALL",
+    "FONT_BODY", "FONT_MONO", "FONT_KPI_VALUE", "FONT_KPI_LABEL", "FONT_KPI_HERO",
+    "FONT_BTN_PRIMARY", "FONT_BTN_SEC", "FONT_SIDEBAR_HDR",
+    "FONT_MICRO", "FONT_HINT", "FONT_BADGE", "FONT_SUBSECTION", "FONT_CARD_TITLE",
+    "FONT_DIALOG_TITLE",
+)
+# Every module below does `from ecg.ui.theme import BG, PANEL, ...` at
+# import time, which copies the value once -- when apply_theme_config()
+# rebinds these globals here, those copies go stale unless re-synced.
+# Names are the fully-qualified dotted paths under the ecg.* package
+# (matching sys.modules keys) since the reorg out of the old flat
+# module layout; a bare "sidebar" or "app" would no longer match
+# anything in sys.modules and this loop would silently become a no-op
+# again (that exact bug -- a stale pre-package-move name list -- is why
+# this function was a no-op for a while before the reorg too).
+_SYNC_MODULES = (
+    "ecg.ui.app", "ecg.ui.sidebar", "ecg.ui.plots", "ecg.ui.dialogs",
+    "ecg.io.export", "ecg.core.models", "ecg.core.detection",
+    "ecg.io.loaders", "ecg.core.analysis", "ecg.ui.wave_editor",
+    # Controller modules extracted from app.py -- each imports its own
+    # subset of colour/font names at module scope, so each needs the
+    # same re-sync or its colours freeze at whatever theme was active
+    # when it was first imported (the same bug this function exists to
+    # fix, just introduced by any new sibling module going forward).
+    "ecg.ui.navigation_controller", "ecg.ui.export_controller",
+    "ecg.ui.plot_controller", "ecg.ui.session_controller",
+    "ecg.ui.detection_controller", "ecg.ui.signal_controller",
+    "ecg.ui.analysis_controller",
+    # New in the UI redesign (Phase 0) -- same requirement as every
+    # module above: it imports colour/font names at module scope.
+    "ecg.ui.widgets",
+    # The mixin modules ecg.ui.app was split into -- same requirement.
+    "ecg.ui.app_state_props", "ecg.ui.app_sidebar", "ecg.ui.app_toolbar",
+    "ecg.ui.app_right_panel", "ecg.ui.app_async", "ecg.ui.app_helpers",
+    "ecg.ui.app_delegates", "ecg.ui.params_dialog", "ecg.ui.compare_segments",
+    "ecg.ui.tab_detection", "ecg.ui.tab_hrv", "ecg.ui.tab_events",
+    "ecg.ui.tab_morphology", "ecg.ui.tab_summary",
+)
+
+
 def _sync_to_submodules() -> None:
     """Push updated colour/font globals into all already-imported ecg.ui.* modules.
 
@@ -578,57 +633,10 @@ def _sync_to_submodules() -> None:
     copied names so every submodule always sees the current theme without
     needing a full reimport.
     """
-    _colour_names = (
-        "BG", "PANEL", "CARD", "BORDER", "BORDER2",
-        "RED", "BLUE", "GREEN", "ORANGE", "MUTED", "LIGHT", "TEXT", "PLOT",
-        "BLUE_DARK", "BLUE_HOVER", "BLUE_MID", "BLUE_DEEP",
-        "PURPLE", "PURPLE_DARK", "PURPLE_LIGHT", "PINK", "TEAL", "TEAL_DARK", "CYAN", "CYAN_BRIGHT",
-        "GREEN_DARK", "GREEN_MID", "ORANGE_DARK", "ORANGE_DEEP",
-        "AMBER", "AMBER_DARK", "RED_DARK", "RED_MID", "RED_LIGHT",
-        "CORAL", "NAVY", "GRAY", "GRAY_LIGHT",
-        # Semantic action-colour tokens (rationalised palette, UI redesign)
-        "COLOR_PRIMARY", "COLOR_PRIMARY_HOVER", "COLOR_SUCCESS", "COLOR_SUCCESS_HOVER",
-        "COLOR_WARNING", "COLOR_WARNING_HOVER", "COLOR_DANGER", "COLOR_DANGER_HOVER",
-        "COLOR_SECONDARY", "COLOR_SECONDARY_HOVER",
-        "ARTIFACT_TYPE_COLOR",
-    )
-    _font_names = (
-        "FONT_TITLE", "FONT_SECTION_HDR", "FONT_LABEL", "FONT_SMALL",
-        "FONT_BODY", "FONT_MONO", "FONT_KPI_VALUE", "FONT_KPI_LABEL", "FONT_KPI_HERO",
-        "FONT_BTN_PRIMARY", "FONT_BTN_SEC", "FONT_SIDEBAR_HDR",
-        "FONT_MICRO", "FONT_HINT", "FONT_BADGE", "FONT_SUBSECTION", "FONT_CARD_TITLE",
-        "FONT_DIALOG_TITLE",
-    )
-    # Every module below does `from ecg.ui.theme import BG, PANEL, ...` at
-    # import time, which copies the value once -- when apply_theme_config()
-    # rebinds these globals here, those copies go stale unless re-synced.
-    # Names are the fully-qualified dotted paths under the ecg.* package
-    # (matching sys.modules keys) since the reorg out of the old flat
-    # module layout; a bare "sidebar" or "app" would no longer match
-    # anything in sys.modules and this loop would silently become a no-op
-    # again (that exact bug -- a stale pre-package-move name list -- is why
-    # this function was a no-op for a while before the reorg too).
-    _submodule_names = (
-        "ecg.ui.app", "ecg.ui.sidebar", "ecg.ui.plots", "ecg.ui.dialogs",
-        "ecg.io.export", "ecg.core.models", "ecg.core.detection",
-        "ecg.io.loaders", "ecg.core.analysis", "ecg.ui.wave_editor",
-        # Controller modules extracted from app.py -- each imports its own
-        # subset of colour/font names at module scope, so each needs the
-        # same re-sync or its colours freeze at whatever theme was active
-        # when it was first imported (the same bug this function exists to
-        # fix, just introduced by any new sibling module going forward).
-        "ecg.ui.navigation_controller", "ecg.ui.export_controller",
-        "ecg.ui.plot_controller", "ecg.ui.session_controller",
-        "ecg.ui.detection_controller", "ecg.ui.signal_controller",
-        "ecg.ui.analysis_controller",
-        # New in the UI redesign (Phase 0) -- same requirement as every
-        # module above: it imports colour/font names at module scope.
-        "ecg.ui.widgets",
-    )
     _this = sys.modules[__name__]
-    _all  = _colour_names + _font_names
+    _all  = _SYNC_COLOUR_NAMES + _SYNC_FONT_NAMES
     for mod_name, mod in list(sys.modules.items()):
-        if mod_name in _submodule_names and mod is not _this and isinstance(mod, type(sys)):
+        if mod_name in _SYNC_MODULES and mod is not _this and isinstance(mod, type(sys)):
             for name in _all:
                 if hasattr(mod, name) and hasattr(_this, name):
                     try:

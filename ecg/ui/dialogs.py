@@ -52,6 +52,7 @@ from ecg.ui.event_locked_view import (
     default_calibration_label, draw_calibration, in_sample, registry_frame,
     row_config, tests_frame,
 )
+from ecg.ui.tab_keys import TAB_DETECTION
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
@@ -305,13 +306,9 @@ class ThemeDialog(ctk.CTkToplevel):
         self._apply()   # destroys self; no widget access after this line
 
 
-# ════════════════════════════════════════════════════════════
-#  USER WAVE TEMPLATE  (P/Q/R/S/T landmark definitions)
-# ════════════════════════════════════════════════════════════
-
-WAVE_TEMPLATE_PATH:        Path = Path.home() / ".ecg_wave_template.json"
-_WAVE_TEMPLATE_PATH_LEGACY: Path = Path.home() / ".ecg_wave_template.pkl"
-
+# The wave template's file paths live in ecg.core.wave_template only
+# (WAVE_TEMPLATE_PATH): one place to monkeypatch, one writer (the explicit
+# "Save as default template").
 
 
 class ArtifactReviewDialog(ctk.CTkToplevel):
@@ -1591,7 +1588,7 @@ class MethodAgreementDialog(ctk.CTkToplevel):
             app.ui.nav_pos = max(0.0, min(t - win / 2, max(0.0, sig_dur - win)))
             app._sync_nav_pos_entry()
             try:
-                app.tabs.set("📈 Detection")
+                app.tabs.set(TAB_DETECTION)
             except Exception as e:
                 log.debug("tabs.set Detection failed: %s", e)
             app._draw_detail()

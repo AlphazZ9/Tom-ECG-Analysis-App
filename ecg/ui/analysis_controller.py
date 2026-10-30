@@ -19,15 +19,19 @@ import pandas as pd
 
 from ecg.core.models import (
     MouseECG, ArrhythmiaEvent, QTC_FORMULA_LABELS, normalize_qtc_formula,
+    PREMATURE_KINDS, event_kind_label,
 )
 from ecg.core.detection import (
     active_removed_samples, arrhythmia_baseline_info, classify_arrhythmias,
     correct_rr_artifacts, drop_removed_peaks, merge_artifact_reports,
+    premature_beat_summary, premature_summary_rows,
+    removed_beats_for_classification,
 )
 from ecg.core.analysis import (
     POINCARE_MIN_PAIRS, align_interval_column_to_peaks, analyse_core,
     analyse_hrv_freq, analyse_hrv_nonlinear, analyse_intervals,
     compute_poincare_metrics, hrv_freq_withheld_reason, hrv_time_domain,
+    mean_hr_bpm, poincare_sd1_sd2,
     recompute_qtc_column, rr_bounds_label, rr_exclusion_text,
     rr_interval_series, successive_valid_pairs,
 )
@@ -50,7 +54,9 @@ from ecg.ui.theme import (
     FONT_SMALL,
     SPACE_XS, SPACE_S, SPACE_L,
 )
+from ecg.ui.freshness import recorded_rr_bounds
 from ecg.ui.plots import style_axes
+from ecg.ui.tab_keys import TAB_HRV, TAB_EVENTS
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
@@ -83,10 +89,26 @@ class AnalysisController:
         "bradycardia":    BLUE_MID,
         "tachycardia":    RED_MID,
         "pause":          RED,
-        "esv_run":        AMBER,
+        # Premature beats (RR-based; "esv_run" in older versions): one hue
+        # family, darker for longer groups.
+        "premature_beat":    AMBER,
+        "premature_couplet": ORANGE,
+        "premature_run":     ORANGE_DEEP,
         "irregular_run":  PURPLE,
         "av_delay":       CYAN_BRIGHT,
     }
+
+    _KIND_ICONS = {
+        "bradycardia": "🔵", "tachycardia": "🔴", "pause": "⏸",
+        "premature_beat": "•", "premature_couplet": "⚡", "premature_run": "⚡",
+        "irregular_run": "〰", "av_delay": "⏳",
+    }
+
+    # Event cards are Tk frames: a recording with thousands of isolated
+    # premature beats would take minutes to build them all. Past this many
+    # the list stops with a note; the counts, ribbon, RR panel and exports
+    # still cover every event.
+    MAX_EVENT_CARDS = 400
 
     def __init__(self, app: "ECGApp") -> None:
         self.app = app
@@ -206,6 +228,16 @@ class AnalysisController:
         text = rr_exclusion_text(hr)
         return f"  |  {text}" if text else ""
 
+    # ── Freshness: what a job ran on, captured at its start (ecg.ui.freshness) ──
+    def _capture_basis(self, **kw: Any) -> "dict | None":
+        svc = getattr(self.app, "freshness", None)
+        return svc.capture(**kw) if svc is not None else None
+
+    def _stamp_basis(self, module: str, basis: "dict | None") -> None:
+        svc = getattr(self.app, "freshness", None)
+        if svc is not None and basis is not None:
+            svc.stamp(module, basis)
+
     # ── Persistent result labels ──────────────────────────────────────
     # The sidebar analysis-window label (with its orange RR-exclusion line)
     # and the Frequency / Non-linear tab status labels are the disclosures
@@ -278,14 +310,19 @@ class AnalysisController:
             sampen = f"{float(nl['HRV_SampEn'].values[0]):.3f}"
         except Exception as _exc:
             log.debug("non-linear status: SampEn formatting failed: %s", _exc, exc_info=True)
-        # Disclose beat-count truncation (analyse_hrv_nonlinear caps at
-        # max_beats=1000 for runtime -- on a long recording that's only the
-        # opening minutes, and there was previously no on-screen sign of
-        # this at all, only a log line).
+        # Disclose which RR intervals were used: Poincaré/DFA use the whole
+        # window, only the entropy block may be capped for runtime (its
+        # count and time span are shown); results from an older version
+        # used the first 1000 beats for everything.
         note = ""
-        if nl.attrs.get("truncated"):
+        if nl.attrs.get("entropy_capped"):
+            note = (f"  ·  entropy from {int(nl.attrs.get('entropy_n_rr', 0)):,} of "
+                    f"{int(nl.attrs.get('n_rr_valid', 0)):,} RR "
+                    f"({float(nl.attrs.get('entropy_t_start_s', 0.0)):.0f}–"
+                    f"{float(nl.attrs.get('entropy_t_end_s', 0.0)):.0f} s)")
+        elif nl.attrs.get("truncated"):
             note = (f"  ·  first {int(nl.attrs.get('n_beats_used', 0)):,} of "
-                    f"{int(nl.attrs.get('n_beats_total', 0)):,} beats")
+                    f"{int(nl.attrs.get('n_beats_total', 0)):,} beats (older analysis)")
         # NeuroKit paired intervals across an excluded one: its
         # asymmetry/fragmentation indices were withheld (core analysis).
         if nl.attrs.get("pair_metrics_withheld"):
@@ -355,8 +392,8 @@ class AnalysisController:
 
         # AV conduction-delay detection needs per-beat PR data from Interval
         # delineation, which is a separate, optional analysis step. Its
-        # DataFrame is never one row per peak (edge beats and the last beat
-        # have no row), so PR is matched to these windowed rpeaks by sample
+        # DataFrame is not one row per peak (edge beats have no row), so PR
+        # (P onset -> QRS onset) is matched to these windowed rpeaks by sample
         # index, NaN where a peak has no row (e.g. peaks edited since). The
         # check only runs when at least half the peaks got a PR -- Intervals
         # run on another analysis window leaves most peaks unmatched, and a
@@ -375,6 +412,14 @@ class AnalysisController:
                 # bounds, so re-running Intervals as-is would not help.
                 av_note = "AV-delay check skipped — PR measured on < 50% of beats"
 
+        # Real beats automatic / reviewed artifact correction removed
+        # (ectopic, and very premature ones removed as duplicate /
+        # non-physiological) are put back for the premature-beat
+        # classification, so they are still counted (classify_arrhythmias
+        # keeps only those inside the analysed span).
+        removed_ect, removal_info = self.arrhythmia_removed_beats(fs)
+        basis = {"peaks": np.asarray(rpeaks).copy(), "removed": removed_ect.copy()}
+
         def _worker():
             def _prog(p, m):
                 self.app.after(0, lambda pp=p, mm=m: self.app._set_progress(pp, mm))
@@ -385,6 +430,7 @@ class AnalysisController:
                 min_brady_beats=min_beats,
                 progress_cb=_prog,
                 pr_ms=pr_ms,
+                removed_beats=removed_ect if len(removed_ect) else None,
             )
 
         def _done(events: "list[ArrhythmiaEvent]"):
@@ -392,13 +438,18 @@ class AnalysisController:
                 log.info("run_arrhythmia_analysis: stale result discarded (file changed)")
                 return
             self.app.analysis.arrhythmia_events = events
+            self.app.analysis.arrhythmia_basis  = basis
             self.app.analysis.arr_selected_idx  = -1
+            # Counts and per-hour rates of the premature beats over the
+            # analysed span (first to last analysed peak).
+            summary = premature_beat_summary(
+                events, bl_info["span_s"], removal_info,
+                t_start=float(rpeaks[0]) / fs, t_end=float(rpeaks[-1]) / fs)
+            self.app.analysis.premature_summary = summary
+            self.refresh_premature_label()
 
             kind_colors = self._KIND_COLORS
-            kind_icons = {
-                "bradycardia": "🔵", "tachycardia": "🔴", "pause": "⏸",
-                "esv_run": "⚡", "irregular_run": "〰", "av_delay": "⏳",
-            }
+            kind_icons = self._KIND_ICONS
 
             # ── RR timeline (right panel, initial state) ──────
             t_peaks = rpeaks / fs
@@ -445,7 +496,7 @@ class AnalysisController:
                 if by_kind:
                     from matplotlib.lines import Line2D
                     handles = [Line2D([0], [0], color=kind_colors.get(k, MUTED),
-                                      lw=5, label=k.replace("_", " ").title())
+                                      lw=5, label=event_kind_label(k))
                                for k in by_kind]
                     # top=0.80 above reserves real figure-level margin for
                     # this -- fig.legend() (figure-relative 0-1 coords) is
@@ -490,7 +541,7 @@ class AnalysisController:
                                label=f"Baseline {bl_hr:.0f} bpm")
                     # Brady / tachy threshold lines -- neutral grey, not a
                     # kind colour: AMBER/BLUE_MID here used to collide with
-                    # esv_run/bradycardia's OWN kind colours below, so the
+                    # premature-beat/bradycardia's OWN kind colours below, so the
                     # same hue meant a different thing depending which line
                     # on the plot you were looking at.
                     ax.axhline(brady_rr, color=PLOT.get("muted", MUTED), lw=0.9,
@@ -532,27 +583,30 @@ class AnalysisController:
                 lbl.grid(row=0, column=0, pady=SPACE_L)
                 self.app._arr_card_widgets.append(lbl)
             else:
-                for idx, ev in enumerate(events):
+                for idx, ev in enumerate(events[:self.MAX_EVENT_CARDS]):
                     self.build_arrhythmia_card(idx, ev, kind_icons)
+                if len(events) > self.MAX_EVENT_CARDS:
+                    lbl = ctk.CTkLabel(
+                        self.app._arr_event_scroll,
+                        text=(f"… {len(events) - self.MAX_EVENT_CARDS} more events not "
+                              f"listed — they are in the counts, the ribbon and the exports."),
+                        font=FONT_HINT, text_color=MUTED, justify="left", wraplength=230,
+                    )
+                    lbl.grid(row=self.MAX_EVENT_CARDS, column=0, sticky="ew", pady=SPACE_S)
+                    self.app._arr_card_widgets.append(lbl)
 
             # ── TSV store ─────────────────────────────────────
-            tsv_rows = ["Type\tStart_s\tEnd_s\tDuration_s\tHR_bpm\tBaseline_bpm\tDelta_pct\tRR_ms\tSeverity\tDescription"]
-            for ev in events:
-                tsv_rows.append(
-                    f"{ev.kind}\t{ev.t_start:.2f}\t{ev.t_end:.2f}\t"
-                    f"{ev.duration_s:.2f}\t{ev.hr_mean:.1f}\t"
-                    f"{ev.baseline_hr:.1f}\t{ev.delta_pct:.1f}\t"
-                    f"{ev.rr_mean:.1f}\t{ev.severity}\t{ev.label}"
-                )
-            self.app.analysis.arrhythmia_tsv = "\n".join(tsv_rows)
+            self.app.analysis.arrhythmia_tsv = self.arrhythmia_tsv(events, summary)
 
             n = len(events)
+            n_prem = int(summary["n_premature"])
             # Short form in the (crowded) action bar; the full reason and
             # remedy go to the status bar.
             av_short = "AV-delay check on" if pr_ms is not None else "AV-delay check skipped"
             bl_short = "" if bl_reliable else "  ·  baseline unreliable"
             self.app.lbl_arrhythmia_status.configure(  # type: ignore[union-attr]
                 text=(f"  {n} event{'s' if n != 1 else ''} — click to explore  ·  "
+                      f"{n_prem} premature beat{'s' if n_prem != 1 else ''} (RR-based)  ·  "
                       f"{av_short}{bl_short}"),
                 text_color=RED if any(e.severity=="alert" for e in events)
                            else (ORANGE if (n or not bl_reliable) else GREEN),
@@ -563,15 +617,104 @@ class AnalysisController:
             bl_note = ("" if bl_reliable else
                        "  ·  baseline covers most of the window — "
                        "brady/tachy calls unreliable")
+            rm_note = (f"  ·  {int(summary['n_removed'])} premature beat(s) removed by "
+                       f"artifact correction still counted" if summary["n_removed"] else "")
+            if summary.get("n_removed_unknown_type"):
+                rm_note += (f"  ·  {int(summary['n_removed_unknown_type'])} removed peak(s) "
+                            f"of unknown type (older session) judged from their interval "
+                            f"only — re-run artifact correction")
             self.app._set_status(
-                f"Abnormal-event classification — {n} event(s)  ·  {av_note}{bl_note}",
+                f"Abnormal-event classification — {n} event(s)  ·  {av_note}{rm_note}{bl_note}",
                 GREEN if bl_reliable else ORANGE)
-            self.app.tabs.set("⚠ Abnormal Events")
+            self.app.tabs.set(TAB_EVENTS)
 
         if self.app.btn_run_arrhythmia is None:
             return
         self.app._start_async_result(
             self.app.btn_run_arrhythmia, "Classifying…", _worker, _done)
+
+    def arrhythmia_removed_beats(self, fs: "float | None" = None) -> "tuple[np.ndarray, dict]":
+        """removed_beats_for_classification() of the current artifact
+        report and accepted peaks: (samples to put back, info)."""
+        return removed_beats_for_classification(
+            self.app.analysis.artifact_report, self.app.detection.rpeaks_ok,
+            self.break_tol_samples(fs))
+
+    def arrhythmia_is_current(self) -> bool:
+        """True when the stored abnormal-event results were classified
+        from the current windowed peaks and removed beats -- False after a
+        peak edit, a re-detection, a change of artifact correction or of
+        the analysis window (or with no basis recorded). Without events or
+        a summary there is nothing to be stale: True."""
+        a = self.app.analysis
+        if not a.arrhythmia_events and not a.premature_summary:
+            return True
+        basis = getattr(a, "arrhythmia_basis", None)
+        if not basis or self.app.detection.rpeaks_ok is None:
+            return False
+        try:
+            peaks = self.app._windowed_peaks()
+            removed, _ = self.arrhythmia_removed_beats()
+        except Exception as exc:
+            log.debug("arrhythmia_is_current: %s", exc)
+            return False
+        return (self._same_peaks(basis.get("peaks"), peaks)
+                and self._same_peaks(basis.get("removed"), removed))
+
+    @staticmethod
+    def arrhythmia_tsv(events: "list[ArrhythmiaEvent]",
+                       summary: "dict | None" = None) -> str:
+        """The "Copy for Excel" text: one row per event, then (after a
+        blank line) the premature-beat counts / rates and their definition."""
+        rows = ["Type\tLabel\tStart_s\tEnd_s\tDuration_s\tN_beats\tHR_bpm\t"
+                "Baseline_bpm\tDelta_pct\tRR_ms\tSeverity\tN_removed\tDescription"]
+        for ev in events:
+            rows.append(
+                f"{ev.kind}\t{event_kind_label(ev.kind)}\t{ev.t_start:.2f}\t{ev.t_end:.2f}\t"
+                f"{ev.duration_s:.2f}\t{int(ev.n_beats)}\t{ev.hr_mean:.1f}\t"
+                f"{ev.baseline_hr:.1f}\t{ev.delta_pct:.1f}\t"
+                f"{ev.rr_mean:.1f}\t{ev.severity}\t{int(getattr(ev, 'n_removed', 0) or 0)}\t"
+                f"{ev.label}"
+            )
+        summary_rows = premature_summary_rows(summary)
+        if summary_rows:
+            rows.append("")
+            rows.extend(f"{label.strip()}\t{value}" for label, value in summary_rows)
+        return "\n".join(rows)
+
+    @staticmethod
+    def premature_summary_text(summary: "dict | None") -> str:
+        """Short multi-line text of the premature-beat counts for the
+        Abnormal Events list header ('' before a classification)."""
+        if not summary:
+            return ""
+        def _r(x: float) -> str:
+            return f"{x:.1f}/h" if np.isfinite(x) else "—/h"
+        text = (f"Premature beats (RR-based): {int(summary['n_premature'])}  "
+                f"({_r(summary['premature_per_h'])})\n"
+                f"isolated {int(summary['n_isolated'])} ({_r(summary['isolated_per_h'])})  ·  "
+                f"couplets {int(summary['n_couplets'])} ({_r(summary['couplets_per_h'])})  ·  "
+                f"runs ≥3 {int(summary['n_runs'])} ({_r(summary['runs_per_h'])})")
+        if int(summary.get("n_removed", 0) or 0):
+            text += f"\n{int(summary['n_removed'])} removed by artifact correction (counted)"
+        if int(summary.get("n_removed_unknown_type", 0) or 0):
+            text += (f"\n{int(summary['n_removed_unknown_type'])} removed peak(s) of unknown "
+                     f"type (older session): re-run artifact correction")
+        text += "\nTiming only: ventricular vs supraventricular not distinguished."
+        return text
+
+    def refresh_premature_label(self) -> None:
+        """Show the current premature-beat summary in the event-list header
+        (no-op without the label). Main thread only."""
+        lbl = getattr(self.app, "lbl_arr_premature", None)
+        if lbl is None:
+            return
+        text = self.premature_summary_text(
+            getattr(self.app.analysis, "premature_summary", None))
+        try:
+            lbl.configure(text=text)
+        except Exception as exc:
+            log.debug("lbl_arr_premature configure failed: %s", exc)
 
     def build_arrhythmia_card(
         self, idx: int, ev: "ArrhythmiaEvent", kind_icons: dict,
@@ -597,7 +740,7 @@ class AnalysisController:
         hdr = ctk.CTkFrame(card, fg_color="transparent")
         hdr.grid(row=0, column=1, sticky="ew", padx=(SPACE_S, SPACE_S), pady=(SPACE_S, SPACE_XS))
         hdr.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(hdr, text=f"{icon}  {ev.kind.replace('_', ' ').title()}",
+        ctk.CTkLabel(hdr, text=f"{icon}  {event_kind_label(ev.kind)}",
                      font=FONT_SIDEBAR_HDR, text_color=TEXT,
                      anchor="w").grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(hdr, text=ev.severity.upper(),
@@ -879,6 +1022,8 @@ class AnalysisController:
         # Read on the main thread (Tk widgets / app state) before the worker.
         rr_lo, rr_hi = self.hrv_rr_bounds()
         breaks       = self.hrv_breaks()
+        bands        = self.get_freq_bands()
+        basis        = self._capture_basis()
 
         def _worker():
             t_peaks  = rpeaks / fs
@@ -911,20 +1056,18 @@ class AnalysisController:
                 rr_a, rr_b = successive_valid_pairs(rr_all, ser["valid"])
                 sdiff  = rr_b - rr_a
                 diffs  = np.abs(sdiff)
-                hr   = float(60_000.0 / rr.mean()) if len(rr) else np.nan
+                hr   = mean_hr_bpm(rr)                 # 60000 / mean NN
                 sdnn = float(rr.std(ddof=1))        if len(rr) > 1 else np.nan
                 rmssd = float(np.sqrt(np.mean(sdiff**2))) if len(sdiff) > 1 else np.nan
                 pnn6  = float(100.0 * np.sum(diffs > MouseECG.PNN_THRESHOLD) / len(diffs)) \
                         if len(diffs) else np.nan
-                # Poincare SD1/SD2 -- same definitions as the Non-linear
-                # panel (nk.hrv_nonlinear): spread of the (RR_n, RR_n+1)
-                # pairs across / along the identity line, over successive
-                # valid pairs only. Cheap enough to always compute.
-                if len(rr_a) > 1:
-                    sd1 = float(np.std(sdiff / np.sqrt(2.0), ddof=1))
-                    sd2 = float(np.std((rr_a + rr_b) / np.sqrt(2.0), ddof=1))
-                else:
-                    sd1 = sd2 = np.nan
+                # Poincare SD1/SD2 -- the app-wide definition
+                # (poincare_sd1_sd2, also used by the Non-linear panel,
+                # Compare Segments and the Summary), over successive valid
+                # pairs only. Cheap enough to always compute. SD1_LW/SD2_LW
+                # below are the explicitly named Ledoit-Wolf variant.
+                _pc = poincare_sd1_sd2(rr_all, ser["valid"])
+                sd1, sd2 = float(_pc["sd1"]), float(_pc["sd2"])
                 article_poincare = (
                     # every interval + the window's validity mask (bounds
                     # and removed-beat breaks): pairs never straddle a gap
@@ -946,7 +1089,8 @@ class AnalysisController:
                 if need_freq:
                     try:
                         fdf = analyse_hrv_freq(ep, fs, rr_min_ms=rr_lo,
-                                               rr_max_ms=rr_hi, breaks=breaks)
+                                               rr_max_ms=rr_hi, breaks=breaks,
+                                               bands=bands)
                         if not fdf.empty:
                             lf_nu = float(fdf["HRV_LFn"].values[0]) * 100.0
                             hf_nu = float(fdf["HRV_HFn"].values[0]) * 100.0
@@ -995,6 +1139,7 @@ class AnalysisController:
 
             df = pd.DataFrame(rows)
             self.app.analysis.rolling_hrv_df = df
+            self._stamp_basis("rolling", basis)
             # Confidence from the intervals the metrics were computed from
             low_n = df["n_valid"].values < self.MIN_CONFIDENT_BEATS
             if need_article_poincare:
@@ -1121,7 +1266,7 @@ class AnalysisController:
             self.app._set_status(
                 f"Rolling HRV — {n} windows computed{skip_note}{excl_note}{core_note}",
                 ORANGE if (n_excl_win or core_note) else GREEN)
-            self.app.tabs.set("💓 HRV"); self.app.after(50, lambda: self.app._on_hrv_view_change("Rolling"))
+            self.app.tabs.set(TAB_HRV); self.app.after(50, lambda: self.app._on_hrv_view_change("Rolling"))
 
         self.app._start_async_result(
             self.app.btn_roll_compute, "Computing…", _worker, _done)
@@ -1383,6 +1528,7 @@ class AnalysisController:
         window = (float(getattr(app.analysis, "t_start", 0.0) or 0.0),
                   float(getattr(app.analysis, "t_end", 0.0) or 0.0))
         peak_span = (float(rpeaks[0]) / fs, float(rpeaks[-1]) / fs)
+        basis = self._capture_basis()
 
         def _progress(pct: int, msg: str) -> None:
             app.after(0, lambda: app._set_progress(pct, msg))
@@ -1426,6 +1572,7 @@ class AnalysisController:
             app.analysis.autonomic_result = res
             app.analysis.autonomic_spwvd = spwvd
             app.analysis.autonomic_stale_note = None
+            self._stamp_basis("autonomic", basis)
             # The event-locked table derives from the previous result.
             self._invalidate_event_locked("autonomic")
             text, color = self.show_autonomic() or ("", ORANGE)
@@ -1582,6 +1729,11 @@ class AnalysisController:
 
         if self.app.analysis.results is None:
             return
+        # Taken from the bundle, not the entries: the correction can change
+        # the peaks, and the window / RR bounds may have been edited meanwhile.
+        self._stamp_basis("core", self._capture_basis(
+            window=self.app.analysis.analysed_window,
+            rr_bounds=recorded_rr_bounds(self.app.analysis.results)))
         # Sync the peak label: show windowed count if a window was active,
         # otherwise show total artifact-corrected count.
         _rp_ok   = self.app.detection.rpeaks_ok
@@ -1710,6 +1862,8 @@ class AnalysisController:
         # Same bounds/breaks as the core results this extends (main thread).
         rr_lo, rr_hi = self.results_rr_bounds()
         breaks       = self.hrv_breaks()
+        bands        = self.get_freq_bands()
+        basis        = self._capture_basis(rr_bounds=(rr_lo, rr_hi))
         if self.app.lbl_freq_status is not None:
             self.app.lbl_freq_status.configure(text="  Computing…", text_color=ORANGE)  # type: ignore[union-attr]
 
@@ -1717,13 +1871,15 @@ class AnalysisController:
             def _prog(p, m):
                 self.app.after(0, lambda pp=p, mm=m: self.app._set_progress(pp, mm))
             return analyse_hrv_freq(rp, fs, progress_cb=_prog,
-                                    rr_min_ms=rr_lo, rr_max_ms=rr_hi, breaks=breaks)
+                                    rr_min_ms=rr_lo, rr_max_ms=rr_hi, breaks=breaks,
+                                    bands=bands)
 
         def _done(result):
             if self.app.analysis.results is None or getattr(self.app, "_generation", 0) != _gen:
                 log.info("_run_freq: stale result discarded (file changed)")
                 return
             self.app.analysis.results["hrv_freq"] = result
+            self._stamp_basis("frequency", basis)
             results: dict = self.app.analysis.results  # narrow for type checkers
             tasks = [
                 ("PSD",       lambda: self.app._plot_psd(results)),
@@ -1757,6 +1913,30 @@ class AnalysisController:
 
         self.app._start_async_result(self.app.btn_run_freq, "Computing…", _worker, _done)  # type: ignore[arg-type]
 
+    def entropy_cap(self) -> int:
+        """Cap on valid RR intervals for the entropy/complexity block of
+        non-linear HRV, from the Non-linear tab's entry (only an explicit 0
+        = no cap); the MouseECG.ENTROPY_MAX_BEATS default when the entry is
+        missing, blank, invalid or negative -- a negative entry is a typo,
+        not a request for the O(N²) entropy block on every beat. Poincaré
+        and DFA always use every beat of the window."""
+        ent = getattr(self.app, "ent_entropy_cap", None)
+        try:
+            txt = ent.get().strip() if ent is not None else ""
+            val = int(float(txt)) if txt else MouseECG.ENTROPY_MAX_BEATS
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            return MouseECG.ENTROPY_MAX_BEATS
+        if val < 0:
+            log.warning("Entropy cap %r is negative — using the default %d RR",
+                        txt, MouseECG.ENTROPY_MAX_BEATS)
+            try:   # show the value actually used in the entry
+                ent.delete(0, "end")  # type: ignore[union-attr]
+                ent.insert(0, str(MouseECG.ENTROPY_MAX_BEATS))  # type: ignore[union-attr]
+            except Exception as _exc:
+                log.debug("entropy cap entry reset failed: %s", _exc)
+            return MouseECG.ENTROPY_MAX_BEATS
+        return val
+
     def run_nonlinear(self) -> None:
         """Compute non-linear HRV in background, then render."""
         if self.app.analysis.results is None or self.app.detection.rpeaks_ok is None:
@@ -1775,6 +1955,8 @@ class AnalysisController:
         # Same bounds/breaks as the core results this extends (main thread).
         rr_lo, rr_hi = self.results_rr_bounds()
         breaks       = self.hrv_breaks()
+        entropy_cap  = self.entropy_cap()
+        basis        = self._capture_basis(rr_bounds=(rr_lo, rr_hi))
         if self.app.lbl_nonlin_status is not None:
             self.app.lbl_nonlin_status.configure(  # type: ignore[union-attr]
                 text="  Computing SampEn / DFA… (may take 30 s+)", text_color=ORANGE)
@@ -1783,6 +1965,7 @@ class AnalysisController:
             def _prog(p, m):
                 self.app.after(0, lambda pp=p, mm=m: self.app._set_progress(pp, mm))
             return analyse_hrv_nonlinear(rp, fs, progress_cb=_prog,
+                                         max_beats=entropy_cap,
                                          rr_min_ms=rr_lo, rr_max_ms=rr_hi,
                                          breaks=breaks)
 
@@ -1791,6 +1974,7 @@ class AnalysisController:
                 log.info("_run_nonlinear: stale result discarded (file changed)")
                 return
             self.app.analysis.results["hrv_nonlin"] = result
+            self._stamp_basis("nonlinear", basis)
             results: dict = self.app.analysis.results  # narrow for type checkers
             tasks = [
                 ("Non-linear metrics", lambda: self.app._plot_nonlinear(results)),
@@ -1810,6 +1994,25 @@ class AnalysisController:
                     f"Non-linear HRV done{excl_note}", ORANGE if excl_note else GREEN))
 
         self.app._start_async_result(self.app.btn_run_nonlin, "Computing…", _worker, _done)  # type: ignore[arg-type]
+
+    def recording_wave_template(self) -> WaveTemplate:
+        """The current recording's wave template, created on first use from
+        the saved default template (``WaveTemplate.load_default``, read
+        only). It stays with the recording -- kept in its session, changed
+        only from the Landmarks editor -- so the intervals of one recording
+        never depend on the recordings analysed before it.
+
+        A saved default that is not used (older-version file, invalid or
+        implausible windows -- see ``WaveTemplate.load_default_checked``)
+        is reported once per app session, naming the file and its windows."""
+        wt = self.app.analysis.wave_template
+        if wt is None:
+            wt, notice = WaveTemplate.load_default_checked()
+            self.app.analysis.wave_template = wt
+            if notice and not getattr(self.app, "_default_template_notice_shown", False):
+                self.app._default_template_notice_shown = True
+                messagebox.showwarning("Saved default template not used", notice)
+        return wt
 
     def run_intervals(self) -> None:
         """Compute interval delineation (PR/QRS/QT/QTc) for every beat."""
@@ -1831,12 +2034,10 @@ class AnalysisController:
             self.app.lbl_ivl_status.configure(  # type: ignore[union-attr]
                 text="  Delineating all beats…", text_color=ORANGE)
 
-        # Load or create template — always pass it so auto-update works
-        _wt = self.app.analysis.wave_template
-        if _wt is None:
-            _wt = WaveTemplate.load()
-            self.app.analysis.wave_template = _wt
-        wt_for_worker = _wt   # always pass (confirmed or not)
+        # This recording's template (the saved default -- or the built-in
+        # one -- until the user changes it in the Landmarks editor). The
+        # worker gets a copy: delineation never modifies or saves it.
+        wt_for_worker = self.recording_wave_template().copy()
         permissive_for_worker = (bool(self.app.sw_permissive.get())  # type: ignore[union-attr]
                                   if self.app.sw_permissive is not None else False)
         # Read on the main thread (Tk widget) before the worker starts.
@@ -1846,6 +2047,7 @@ class AnalysisController:
         # anaesthetised mouse leaves no interval valid under the defaults,
         # and one spurious close peak would then shrink every beat window).
         rr_lo, rr_hi = self.results_rr_bounds()
+        basis = self._capture_basis(rr_bounds=(rr_lo, rr_hi))
 
         def _worker() -> "pd.DataFrame":
             def _prog(p: int, m: str) -> None:
@@ -1866,13 +2068,18 @@ class AnalysisController:
             if self.qtc_formula() != qtc_formula_for_worker:
                 df = recompute_qtc_column(df, self.qtc_formula())
             self.app.analysis.results["intervals"] = df
+            self._stamp_basis("intervals", basis)
 
             interval_cols = [c for c in ["PR_ms", "QRS_ms", "QT_ms"] if c in df.columns]
             n_ok    = int((~df[interval_cols].isna().any(axis=1)).sum()) if interval_cols else 0  # type: ignore[arg-type]
             n_total = len(df)
 
-            wt        = self.app.analysis.wave_template
-            tmpl_note = f"  ·  template: {wt.source}" if wt else ""
+            tmpl_note = f"  ·  template: {wt_for_worker.provenance()}"
+            lbl_tmpl = getattr(self.app, "lbl_template_info", None)
+            if lbl_tmpl is not None:
+                lbl_tmpl.configure(text=f"Template: {wt_for_worker.provenance()}",
+                                   text_color=MUTED if wt_for_worker.source == "default"
+                                   else GREEN)
             pct       = 100.0 * n_ok / n_total if n_total else 0.0
             # Graded by completion ratio, not "any beat succeeded" -- a
             # measurement drawn from a small, possibly-biased subset (wave
@@ -1983,6 +2190,7 @@ class AnalysisController:
         # Read on the main thread (Tk widgets / app state) before the worker.
         rr_lo, rr_hi = self.hrv_rr_bounds()
         breaks       = self.hrv_breaks()
+        basis        = self._capture_basis()
         if len(starts) < 2:
             # Inline, non-blocking: a modal here used to re-fire on every
             # auto-run (see sw_epoch) without ever applying the suggested
@@ -2041,7 +2249,7 @@ class AnalysisController:
                     "N_beats":       len(ep_rp),
                     "N_valid":       len(rr),
                     "N_excluded":    ser["n_excluded"],
-                    "HR_mean":       round(float(60_000 / rr.mean()), 1),
+                    "HR_mean":       round(mean_hr_bpm(rr), 1),   # 60000 / mean NN
                     "MeanNN":        round(float(rr.mean()), 1),
                     "SDNN":          round(sdnn, 2),
                     "RMSSD":         round(rmssd, 2),
@@ -2067,6 +2275,7 @@ class AnalysisController:
                 return
             df    = pd.DataFrame(rows)
             self.app.analysis.epoch_df = df
+            self._stamp_basis("epochs", basis)
             t_mid = ((df["Epoch_start_s"] + df["Epoch_end_s"]) / 2).values
             # Confidence from the intervals the metrics were computed from
             low_n = df["N_valid"].values < self.MIN_CONFIDENT_BEATS
@@ -2153,7 +2362,7 @@ class AnalysisController:
             # Update the label in the Summary tab (shows last-computed epoch info)
             self.app.lbl_summary_epoch_info.configure(
                 text=f"Last epoch run: {n_ep} × {epoch_s:.0f}s", text_color=MUTED)
-            self.app.tabs.set("💓 HRV"); self.app.after(50, lambda: self.app._on_hrv_view_change("Epochs"))
+            self.app.tabs.set(TAB_HRV); self.app.after(50, lambda: self.app._on_hrv_view_change("Epochs"))
             # Can be the last step of an Analyze (auto epochs): keep the core
             # results' exclusion disclosure (and its orange) rather than
             # ending on plain green -- an excluded interval in the tail after
@@ -2168,32 +2377,3 @@ class AnalysisController:
                 ORANGE if (n_excl_ep or core_note) else GREEN)
 
         self.app._start_async_result(self.app.btn_compute_epochs, "Computing…", _worker, _done)
-
-    @staticmethod
-    def mannwhitney_test(a: "np.ndarray", b: "np.ndarray") -> "tuple[float, str]":
-        """Mann-Whitney U test for two independent RR series.
-
-        Named for the test it actually runs (mannwhitneyu) -- this used to be
-        called wilcoxon_test, but the Wilcoxon signed-rank test is a paired
-        test and doesn't apply to two independent segments the way this is
-        used. Called from _open_compare_segments in app.py to test whether
-        the two segments' RR-interval distributions differ significantly.
-
-        Returns (p_value, interpretation_string).
-        Falls back gracefully if scipy is unavailable.
-        """
-        try:
-            from scipy.stats import mannwhitneyu
-            if len(a) < 5 or len(b) < 5:
-                return float("nan"), "n<5"
-            result: Any = mannwhitneyu(a, b, alternative="two-sided")
-            p_val = getattr(result, "pvalue", None)
-            p = float(p_val if p_val is not None else result[1])
-            interp = ("**** p<0.0001" if p < 0.0001 else
-                      "*** p<0.001"   if p < 0.001  else
-                      "** p<0.01"     if p < 0.01   else
-                      "* p<0.05"      if p < 0.05   else
-                      "ns")
-            return p, interp
-        except Exception:
-            return float("nan"), "—"

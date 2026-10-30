@@ -40,7 +40,24 @@ class SignalState:
     # True right after _load_raw_only(); cleared once Preview Detection runs.
     raw_only_loaded: bool = False
     no_filter_mode: bool = True                 # default: detect on raw signal
+    # Filters the current filtered signal / peaks were computed with
+    # (filtering.filter_description); None = not recorded (raw-only load).
+    filter_text: Optional[str] = None
+    # FilterParams.to_dict() snapshot the filtered signal / peaks were
+    # prepared with (SignalController.compute_preview_bundle) -- saved in
+    # sessions so a restore re-prepares the signal the results came from,
+    # not widget values edited afterwards. None = not prepared / unknown.
+    prepare_params: Optional[dict] = None
+    # Load-time crop in file time (analysis.signal_crop_info: t_start,
+    # t_end, file_duration_s); all times are relative to its start.
+    # None = not recorded (session saved before it was).
+    crop: Optional[dict] = None
     inverted: bool = False                      # True if polarity was auto-flipped
+    # Channel the loaded signal was read from (load_mat_signal's detected
+    # channel). A channel can be another animal: re-detecting on a
+    # different channel drops the recording's wave template
+    # (SignalController.on_preview_done). None = nothing loaded yet.
+    channel: Optional[str] = None
 
 
 @dataclass
@@ -134,6 +151,14 @@ class AnalysisState:
     event_locked_params: dict = field(default_factory=dict)
     arrhythmia_events: list = field(default_factory=list)
     arrhythmia_tsv: str = ""
+    # detection.premature_beat_summary() of arrhythmia_events (counts and
+    # per-hour rates of the RR-based premature beats); None before a run.
+    premature_summary: Optional[dict] = None
+    # What arrhythmia_events were classified from: {"peaks": the windowed
+    # peaks, "removed": the removed beats put back} -- compared with the
+    # current ones (AnalysisController.arrhythmia_is_current) so exports
+    # never write counts from an earlier peak set or analysis window.
+    arrhythmia_basis: Optional[dict] = None
     arr_selected_idx: int = -1                  # index into arrhythmia_events
     arr_nav_pos: float = 0.0                    # current t_start in arrhythmia ECG view
     arr_win: float = 3.0                        # seconds shown in arrhythmia ECG view
@@ -175,6 +200,10 @@ class AnalysisState:
     # the exports and session save; set by the selector, Intervals and
     # session restore.
     qtc_formula: str = "mitchell"
+    # What each module's result was computed from (ecg.ui.freshness):
+    # module -> {peaks, removed, window, rr}, captured at job start. Derived
+    # again on a session restore, not saved. Empty = nothing computed yet.
+    basis: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -211,7 +240,6 @@ class UIState:
     autonomic_subview: str = "Time series"
     ctx_keys: list = field(default_factory=list)
     operation_start_time: Optional[float] = None
-    ui_update_batch: list[tuple] = field(default_factory=list)
     figure_cache: dict = field(default_factory=dict)
     # TSV clipboard store: keyed by widget id, value = TSV string
     tsv_store: "dict[int, str]" = field(default_factory=dict)

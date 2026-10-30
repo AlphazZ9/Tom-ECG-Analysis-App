@@ -8,13 +8,32 @@ from __future__ import annotations
 
 import dataclasses
 from pathlib import Path
-from typing import Optional, TypedDict, TYPE_CHECKING
+from typing import Any, Optional, Protocol, TypedDict
 
 import numpy as np
 import pandas as pd
 
-if TYPE_CHECKING:
-    from ecg.ui.app import ECGApp
+
+class FilterWidgetHost(Protocol):
+    """What FilterParams.from_widgets reads from the UI (implemented by ECGApp)."""
+    sw_filtering: Any
+    ent_channel: Any
+    ent_fs: Any
+    ent_t_start: Any
+    ent_t_end: Any
+    ent_lp: Any
+    ent_hp: Any
+    sw_notch: Any
+    cb_clean: Any
+    ent_minrr: Any
+    sl_thr: Any
+    sw_artifact: Any
+    sw_epoch: Any
+    sw_invert_signal: Any
+    cb_det_method: Any
+
+    def _safe_float(self, widget_or_value: Any, default: float = 0.0) -> float: ...
+
 
 class MouseECG:
     """Single source of truth for adult mouse ECG physiology.
@@ -101,6 +120,22 @@ class MouseECG:
     HF:  tuple = (1.50, 5.00)    # Hz
     PSD_XLIM:        float = 5.0   # Hz  — x-axis limit for PSD plot
     PSD_INTERP_FS:   float = 20.0  # Hz  — fixed interpolation rate (Nyquist >> 5 Hz)
+
+    # ── Non-linear HRV runtime cap ──────────────────────────
+    # Poincaré SD1/SD2, DFA and the asymmetry/fragmentation indices use
+    # every valid RR interval of the analysis window. Only the O(N²)
+    # entropy/complexity block (SampEn, ApEn, FuzzyEn, MSE, CD, ...) is
+    # restricted, to this many valid intervals (~10 s of compute at 3000),
+    # taken as the contiguous block with the fewest excluded intervals --
+    # disclosed with its count and time span. Configurable in the
+    # Non-linear tab; 0 = no cap.
+    ENTROPY_MAX_BEATS: int = 2000
+
+    # ── Compare Segments: non-overlapping block length ──────
+    # Within-recording A/B comparisons summarise each segment by the means
+    # of non-overlapping blocks of this length instead of testing hundreds
+    # of autocorrelated beats (pseudoreplication).
+    SEGMENT_BLOCK_S: float = 10.0
 
     # ── Spectral HRV across excluded RR intervals ──────────
     # The spectrum is estimated on a uniformly resampled RR series, so an
@@ -283,7 +318,7 @@ class FilterParams:
         )
 
     @classmethod
-    def from_widgets(cls, app: "ECGApp") -> "FilterParams":
+    def from_widgets(cls, app: FilterWidgetHost) -> "FilterParams":
         """Read all values from main-thread widgets.  Call only from main thread."""
         # sw_filtering ON means DSP filtering IS applied -- the inverse of
         # this dataclass's no_filter field (kept as-is for session-JSON
@@ -325,11 +360,62 @@ SESSION_SUFFIX  = ".ecgsession"   # file extension (content is now JSON)
 SESSION_DIR     = Path.home() / ".ecg_sessions"   # default cache folder
 
 
+# Premature beats are found from R-R TIMING only (classify_arrhythmias: a
+# beat ending an RR interval shorter than PREMATURE_RR_FRACTION × the
+# reference RR on both sides of its group, see detection._premature_runs).
+# Timing cannot tell a ventricular premature beat from a supraventricular
+# (atrial / junctional) one -- that needs QRS morphology and P waves -- so the kinds are named "premature", never "ventricular".
+# Earlier versions called runs of >= 3 "esv_run" (extrasystole
+# ventriculaire) and reported neither isolated beats nor couplets.
+PREMATURE_KINDS = ("premature_beat", "premature_couplet", "premature_run")
+
+# Event kinds renamed since: an event built from an older record (dict,
+# TSV, saved state) with one of these kinds is read as the new one.
+LEGACY_EVENT_KINDS = {
+    "esv_run": "premature_run",
+    "esv":     "premature_run",
+}
+
+EVENT_KIND_LABELS = {
+    "bradycardia":       "Bradycardia",
+    "tachycardia":       "Tachycardia",
+    "pause":             "Pause",
+    "premature_beat":    "Isolated premature beat (RR-based)",
+    "premature_couplet": "Premature couplet (RR-based)",
+    "premature_run":     "Premature run ≥3 (RR-based)",
+    "irregular_run":     "Irregular run",
+    "av_delay":          "AV delay",
+}
+
+PREMATURE_DEFINITION_TEXT = (
+    "RR-based: a beat ending an RR interval < 70% of the reference RR (median "
+    "of the 10 intervals before the group, or of the 10 after it if smaller). "
+    "A group must end within 30 beats (longer: rate change, not counted). "
+    "Timing only — ventricular and supraventricular premature beats are not "
+    "distinguished.")
+
+
+def normalize_event_kind(kind: object) -> str:
+    """The current name of an abnormal-event kind (legacy "esv_run" ->
+    "premature_run"); unknown kinds are returned unchanged."""
+    k = str(kind or "").strip()
+    return LEGACY_EVENT_KINDS.get(k.lower(), k)
+
+
+def event_kind_label(kind: object) -> str:
+    """Human-readable name of an event kind, for cards, legends, exports."""
+    k = normalize_event_kind(kind)
+    return EVENT_KIND_LABELS.get(k, k.replace("_", " ").title())
+
+
 @dataclasses.dataclass
 class ArrhythmiaEvent:
     """A single classified arrhythmia episode."""
     kind:        str          # "bradycardia" | "tachycardia" | "pause" |
-                              # "esv_run" | "irregular_run" | "av_delay"
+                              # "premature_beat" | "premature_couplet" |
+                              # "premature_run" | "irregular_run" | "av_delay"
+                              # (legacy "esv_run" is read as "premature_run",
+                              # see normalize_event_kind)
                               # NOTE on "av_delay": classify_arrhythmias() only
                               # sees R-peak timing by default, so a plain
                               # "pause" is NOT distinguishable from AV block on
@@ -356,10 +442,39 @@ class ArrhythmiaEvent:
     # the analysed beats (see detection.arrhythmia_baseline_info) -- the
     # reference then includes the event itself, so the call is unreliable.
     baseline_reliable: bool = True
+    # Premature-beat events only: how many of the event's premature beats
+    # had been removed by artifact correction (classify_arrhythmias puts
+    # them back for classification, so they are still counted).
+    n_removed:   int = 0
+
+    def __post_init__(self) -> None:
+        self.kind = normalize_event_kind(self.kind)
 
     @property
     def duration_s(self) -> float:
         return max(0.0, self.t_end - self.t_start)
+
+    @property
+    def n_premature(self) -> int:
+        """Premature beats this event stands for (0 for other kinds)."""
+        return int(self.n_beats) if self.kind in PREMATURE_KINDS else 0
+
+    def to_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ArrhythmiaEvent":
+        """Build an event from a stored dict, tolerating keys that do not
+        exist (any more) and legacy kinds ("esv_run" -> "premature_run",
+        whose old "Potential ESV run" label is rewritten too)."""
+        names = {f.name for f in dataclasses.fields(cls)}
+        kw = {k: v for k, v in dict(d).items() if k in names}
+        old_kind = str(kw.get("kind", ""))
+        ev = cls(**kw)
+        if ev.kind != old_kind and "esv" in str(ev.label).lower():
+            ev.label = (f"Premature run (RR-based) — {int(ev.n_beats)} beats "
+                        f"({float(ev.hr_mean):.0f} bpm)")
+        return ev
 
 
 class AnalysisResults(TypedDict, total=False):
@@ -374,7 +489,7 @@ class AnalysisResults(TypedDict, total=False):
     Keys populated by analyse_core (always present after a successful run):
         hr, rr_ms, rr_valid, rr_t_s, rr_df, hrv_time, hrv_freq, hrv_nonlin,
         intervals, beat_template, beat_time, beat_matrix, beat_sd,
-        beat_corr, peak_amps
+        beat_corr, beat_corr_t_s, peak_amps
 
     (rr_valid / rr_t_s may be missing from results restored from a session
     saved before they existed -- analysis.rr_timeseries() rebuilds both.)
@@ -401,6 +516,7 @@ class AnalysisResults(TypedDict, total=False):
     beat_matrix:   "Optional[np.ndarray]"        # ≤60 ghost rows
     beat_sd:       "Optional[np.ndarray]"        # std per sample
     beat_corr:     "Optional[np.ndarray]"        # per-beat Pearson r with template
+    beat_corr_t_s: "Optional[np.ndarray]"        # time (s) of each beat_corr value (edge beats are not scored)
     peak_amps:     "Optional[np.ndarray]"        # R-peak amplitude per beat
 
 

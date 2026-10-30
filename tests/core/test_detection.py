@@ -654,21 +654,24 @@ class TestClassifyArrhythmias:
         events = self._events([120.0] * 20 + [190.0] + [120.0] * 20)
         assert not any(e.kind == "pause" for e in events)
 
-    def test_esv_run(self):
+    def test_premature_run(self):
         # 70ms is < 0.70 * ~120ms local median -- 4 consecutive premature
-        # beats, above the min_b=3 run-length floor for esv_run.
+        # beats: a run (>= 3; "esv_run" in older versions).
         events = self._events([120.0] * 20 + [70.0] * 4 + [120.0] * 20)
         assert len(events) == 1
         ev = events[0]
-        assert ev.kind == "esv_run"
+        assert ev.kind == "premature_run"
         assert ev.severity == "alert"
         assert ev.n_beats == 4
         assert ev.rr_mean == pytest.approx(70.0, abs=0.5)
 
-    def test_short_esv_run_below_min_beats_not_flagged(self):
-        # Only 2 premature beats -- under esv_run's min_b=3 floor.
+    def test_two_premature_beats_are_a_couplet(self):
+        # Only 2 premature beats -- not a run (>= 3) but reported as a
+        # couplet (older versions dropped it).
         events = self._events([120.0] * 20 + [70.0] * 2 + [120.0] * 20)
-        assert not any(e.kind == "esv_run" for e in events)
+        assert not any(e.kind == "premature_run" for e in events)
+        cpl = [e for e in events if e.kind == "premature_couplet"]
+        assert len(cpl) == 1 and cpl[0].n_beats == 2 and cpl[0].severity == "warning"
 
     def test_irregular_run(self):
         # A period-3 oscillation (110,110,180 repeating) whose 5-sample

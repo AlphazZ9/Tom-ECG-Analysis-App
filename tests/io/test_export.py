@@ -11,7 +11,7 @@ import pytest
 
 from ecg.core import analysis
 from ecg.core.models import QTC_FORMULA_LABELS
-from ecg.io.export import PARAM_INFO, ExcelExporter, PrismExporter
+from ecg.io.export import ExcelExporter, PrismExporter
 
 from tests.helpers import rpeaks_from_rr
 
@@ -43,15 +43,6 @@ def test_excel_cover_records_qtc_formula(formula, key):
 
 def test_excel_cover_omits_qtc_formula_when_not_given():
     assert "QTc formula" not in _cover(None)
-
-
-def test_qtc_param_info_is_formula_neutral():
-    info = PARAM_INFO["QTc_ms"]
-
-    assert info.label == "Intervalle QTc"
-    assert "√(RR/100)" in info.description
-    assert "Hodges" not in info.description + info.significance
-    assert "RR_s^(1/3)" not in info.description
 
 
 # ── RR exclusion disclosure ───────────────────────────────────────────────

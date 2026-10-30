@@ -40,7 +40,9 @@ def _stub_app(results=None, combo_label=QTC_FORMULA_LABELS["mitchell"]):
 
 
 def _intervals():
-    return pd.DataFrame({"QT_ms": [50.0, 52.0], "RR_ms": [120.0, 118.0]})
+    # Standard-definition frame (QRS_onset_ms): RR_ms is the preceding RR.
+    return pd.DataFrame({"QT_ms": [50.0, 52.0], "RR_ms": [120.0, 118.0],
+                         "QRS_onset_ms": [-8.0, -8.0]})
 
 
 def test_qtc_formula_comes_from_app_state_not_the_widget():

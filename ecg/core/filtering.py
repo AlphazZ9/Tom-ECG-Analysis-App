@@ -21,6 +21,18 @@ log = logging.getLogger("ecg")
 #  FILTERS
 # ════════════════════════════════════════════════════════════
 
+def bandpass_band(lo: float, hi: float, fs: float) -> "Optional[tuple[float, float]]":
+    """The (low, high) cut-offs in Hz ``bandpass`` actually applies at *fs*:
+    each normalised cut-off is clipped to [0.01, 0.99] × Nyquist. None when
+    the clipped band is degenerate (the filter is then skipped)."""
+    nyq = fs / 2
+    lo_norm = max(0.01, min(lo / nyq, 0.99))
+    hi_norm = max(0.01, min(hi / nyq, 0.99))
+    if lo_norm >= hi_norm:
+        return None
+    return lo_norm * nyq, hi_norm * nyq
+
+
 def bandpass(
     signal: np.ndarray,
     fs: float,
@@ -32,13 +44,60 @@ def bandpass(
     Returns the signal unchanged if the passband is degenerate.
     """
     nyq = fs / 2
-    lo_norm = max(0.01, min(lo / nyq, 0.99))
-    hi_norm = max(0.01, min(hi / nyq, 0.99))
-    if lo_norm >= hi_norm:
-        log.warning("bandpass: degenerate passband [%.4f, %.4f] — skipped", lo_norm, hi_norm)
+    band = bandpass_band(lo, hi, fs)
+    if band is None:
+        log.warning("bandpass: degenerate passband [%.4f, %.4f] — skipped",
+                    max(0.01, min(lo / nyq, 0.99)), max(0.01, min(hi / nyq, 0.99)))
         return signal
-    b, a = butter(3, [lo_norm, hi_norm], btype="band")  # type: ignore[misc]
+    b, a = butter(3, [band[0] / nyq, band[1] / nyq], btype="band")  # type: ignore[misc]
     return filtfilt(b, a, signal)
+
+
+def filter_description(params: "Optional[dict]", fs: "Optional[float]" = None) -> str:
+    """What the preview pipeline (SignalController.compute_preview_bundle)
+    applies for *params* (FilterParams.to_dict() keys: no_filter, lp / hp
+    = band-pass low / high cut-off in Hz, notch, clean_method) -- recorded
+    with the detection so the reports state the filters the peaks and
+    intervals were measured on, not the current widget values.
+
+    With *fs* the band-pass is the one ``bandpass`` really applies: cut-offs
+    clipped to [0.01, 0.99] × Nyquist are stated as clipped, and a
+    degenerate band as skipped."""
+    p = params or {}
+    if p.get("no_filter", False):
+        return "none (raw signal, z-score normalised)"
+    try:
+        lo = float(p.get("lp", MouseECG.BP_LO_HZ))
+        hi = float(p.get("hp", MouseECG.BP_HI_HZ))
+        band = bandpass_band(lo, hi, float(fs)) if fs else (lo, hi)
+        if band is None:
+            parts = [f"band-pass {lo:g}–{hi:g} Hz skipped (degenerate band "
+                     f"at fs = {float(fs):g} Hz)"]  # type: ignore[arg-type]
+        else:
+            elo, ehi = band
+            text = (f"Butterworth band-pass {elo:.4g}–{ehi:.4g} Hz "
+                    f"(order 3, zero-phase)")
+            if abs(elo - lo) > 1e-6 or abs(ehi - hi) > 1e-6:
+                text += (f" — {lo:g}–{hi:g} Hz entered, clipped to "
+                         f"[0.01, 0.99] × Nyquist at fs = {float(fs):g} Hz")  # type: ignore[arg-type]
+            parts = [text]
+    except (TypeError, ValueError, ZeroDivisionError):
+        parts = ["Butterworth band-pass (order 3, zero-phase)"]
+    if p.get("notch", p.get("notch_filter", False)):
+        parts.append("50 Hz notch (Q = 30)")
+    parts.append(f"NeuroKit2 ecg_clean ({p.get('clean_method', 'neurokit')})")
+    return " + ".join(parts)
+
+
+def recorded_filter_text(filter_text: "Optional[str]", no_filter_mode: bool) -> str:
+    """The filters line of the reports: the recorded *filter_text*
+    (filter_description at detection) or, when it was not recorded (e.g.
+    a signal prepared before it was), what *no_filter_mode* still tells."""
+    if filter_text:
+        return filter_text
+    if no_filter_mode:
+        return filter_description({"no_filter": True})
+    return "band-pass + NeuroKit2 ecg_clean (cut-offs not recorded)"
 
 
 def notch(signal: np.ndarray, fs: float, freq: float = 50.0, q: float = 30.0) -> np.ndarray:
@@ -282,36 +341,3 @@ def sg_derivative_signal(
             delta=1.0 / fs,
             mode="interp",
         ), dtype=np.float64)
-
-
-def downsample_pair(sig: np.ndarray, time: np.ndarray,
-                    max_points: int = 6_000) -> "tuple[np.ndarray, np.ndarray]":
-    """Decimate signal/time pair for the overview by uniform stride."""
-    n = len(sig)
-    if n <= max_points:
-        return time, sig
-    stride = max(1, n // max_points)
-    return time[::stride], sig[::stride]
-
-
-def envelope_for_display(
-    sig: np.ndarray,
-    time: np.ndarray,
-    max_buckets: int = 3_000,
-) -> "tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]":
-    """Compute per-bucket min/max envelope for overview plots.
-
-    Returns (t_mid, mins, maxs, midline).
-    """
-    n = len(sig)
-    if n <= max_buckets:
-        return time, sig, sig, sig
-    bucket  = max(1, n // max_buckets)
-    n_trim  = (n // bucket) * bucket
-    sig_r   = sig[:n_trim].reshape(-1, bucket)
-    time_r  = time[:n_trim].reshape(-1, bucket)
-    t_mid   = time_r[:, bucket // 2]
-    mins    = sig_r.min(axis=1)
-    maxs    = sig_r.max(axis=1)
-    midline = sig_r.mean(axis=1)
-    return t_mid, mins, maxs, midline

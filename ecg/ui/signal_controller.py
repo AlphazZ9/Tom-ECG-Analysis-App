@@ -16,8 +16,9 @@ from tkinter import messagebox
 
 import numpy as np
 
-from ecg.core.models import MouseECG
-from ecg.core.filtering import bandpass, notch, normalize
+from ecg.core.analysis import signal_crop_info
+from ecg.core.models import FilterParams, MouseECG
+from ecg.core.filtering import bandpass, filter_description, notch, normalize
 from ecg.core.detection import (
     fix_polarity, apply_threshold,
     detect_peaks_sg_derivative, detect_peaks_wavelet, detect_peaks_envelope_max,
@@ -25,7 +26,9 @@ from ecg.core.detection import (
 from ecg.core.ml_detector import detect_peaks_ml, MLPeakModel
 from ecg.io.loaders import load_mat_signal
 from ecg.io.db import _DB_AVAILABLE, get_notes, get_recording
+from ecg.ui.session_controller import pending_template_info_text
 from ecg.ui.theme import BLUE, GREEN, LIGHT, MUTED, ORANGE, RED, nk
+from ecg.ui.tab_keys import TAB_DETECTION
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
@@ -39,6 +42,28 @@ class SignalController:
 
     @staticmethod
     def compute_preview_bundle(
+        sig_raw:     np.ndarray,
+        fs:          int,
+        params:      dict,
+        progress_cb: "Optional[Callable[[int, str], None]]" = None,
+    ) -> dict:
+        """``_preview_bundle`` plus ``filter_text``: the filters applied
+        (filter_description at *fs*, i.e. the cut-offs bandpass really
+        uses), stored as SignalState.filter_text so the reports state the
+        filters the peaks were detected on -- and ``prepare_params``, the
+        FilterParams snapshot they were prepared with (SignalState.
+        prepare_params): a session restore re-prepares the signal from it
+        rather than from widget values edited after detection."""
+        bundle = SignalController._preview_bundle(sig_raw, fs, params, progress_cb)
+        bundle["filter_text"] = filter_description(params, fs)
+        try:
+            bundle["prepare_params"] = FilterParams.from_dict(params).to_dict()
+        except (TypeError, ValueError):
+            bundle["prepare_params"] = None
+        return bundle
+
+    @staticmethod
+    def _preview_bundle(
         sig_raw:     np.ndarray,
         fs:          int,
         params:      dict,
@@ -328,6 +353,8 @@ class SignalController:
         self.app.signal.raw_norm  = bundle["signal_raw_norm"]
         self.app.signal.filtered       = bundle["signal_flt"]
         self.app.signal.no_filter_mode   = bundle["no_filter_mode"]
+        self.app.signal.filter_text      = bundle.get("filter_text")
+        self.app.signal.prepare_params   = bundle.get("prepare_params")
         self.app.detection.all_candidates        = bundle["all_cands"]
         self.app.detection.all_prominences        = bundle["all_proms"]
         self.app.signal.inverted  = bundle.get("inverted", False)
@@ -376,6 +403,9 @@ class SignalController:
         t1 = params["t_end"]
         i0 = int(t0 * fs) if t0 > 0 else 0
         i1 = int(t1 * fs) if t1 > 0 else len(sig)
+        # The load-time crop in file time: every time in the reports is
+        # relative to its start (disclosed as the "Signal crop" row).
+        signal_crop = signal_crop_info(t0, t1, len(sig) / fs if fs else None)
         sig = sig[i0:i1]
 
         if sig.std() < 1e-10:
@@ -397,6 +427,7 @@ class SignalController:
             "signal_raw":   sig,
             "signal_raw_norm": signal_raw_norm,
             "dur_s":        dur_s,
+            "signal_crop":  signal_crop,
             "detected_ch":  detected_ch,
             "detected_fs":  detected_fs,
             "requested_ch": params["channel"],
@@ -425,6 +456,9 @@ class SignalController:
         self.app.detection.all_candidates        = None
         self.app.detection.all_prominences        = None
         self.app.signal.no_filter_mode   = True
+        self.app.signal.filter_text      = None
+        self.app.signal.prepare_params   = None
+        self.app.signal.crop             = bundle.get("signal_crop")
         self.app.signal.inverted  = False
         self.app.signal.raw_only_loaded  = True
         self.app.ui.nav_pos          = 0.0
@@ -440,12 +474,14 @@ class SignalController:
         self.app.analysis.annotations   = []
         self.app.analysis.pacing_periods = []
         self.app.analysis.wave_template = None
+        self.app.signal.channel = bundle.get("detected_ch")
         self.app.session.dirty = False
         self.app._generation    = getattr(self.app, "_generation", 0) + 1
         self.app._reset_kpis()
         self.app._reset_result_plots()
         self.app._reset_tab_status_labels()
         self.app.analysis_ctrl.invalidate_autonomic(peaks_changed=False)
+        self.app.analysis.basis.clear()
 
         if bundle["detected_ch"] != bundle["requested_ch"]:
             if self.app.ent_channel is not None:
@@ -484,7 +520,7 @@ class SignalController:
         self.app._set_status(
             f"Raw signal loaded — {dur:.0f} s  |  {fs} Hz  "
             "→ click Detect Peaks to filter and find R-peaks.", BLUE)
-        self.app.tabs.set("📈 Detection")
+        self.app.tabs.set(TAB_DETECTION)
         self.app._update_ann_count()
         self.app._update_pacing_count()
         self.app._update_topbar_filename()
@@ -558,6 +594,9 @@ class SignalController:
         t1 = params["t_end"]
         i0 = int(t0 * fs) if t0 > 0 else 0
         i1 = int(t1 * fs) if t1 > 0 else len(sig)
+        # The load-time crop in file time: every time in the reports is
+        # relative to its start (disclosed as the "Signal crop" row).
+        signal_crop = signal_crop_info(t0, t1, len(sig) / fs if fs else None)
         sig = sig[i0:i1]
 
         if sig.std() < 1e-10:
@@ -590,6 +629,7 @@ class SignalController:
             "fs":              fs,
             "signal_raw":      sig,
             "dur_s":           dur_s,
+            "signal_crop":     signal_crop,
             "detected_ch":     detected_ch,
             "detected_fs":     detected_fs,
             "requested_ch":    params["channel"],
@@ -648,6 +688,9 @@ class SignalController:
         self.app.detection.all_candidates       = bundle["all_cands"]
         self.app.detection.all_prominences       = bundle["all_proms"]
         self.app.signal.no_filter_mode  = bundle["no_filter_mode"]
+        self.app.signal.filter_text     = bundle.get("filter_text")
+        self.app.signal.prepare_params  = bundle.get("prepare_params")
+        self.app.signal.crop            = bundle.get("signal_crop")
         self.app.signal.inverted = bundle.get("inverted", False)
         self.app.signal.raw_only_loaded = False
         # recommended_min_rr_ms supprimé — ent_minrr non modifié automatiquement.
@@ -680,7 +723,23 @@ class SignalController:
         # space into an annotation's own label field -- which triggers
         # this same Detect-Peaks pipeline via the global Space shortcut --
         # silently deleted every annotation and pacing period on the file.
-        self.app.analysis.wave_template = None  # template may not suit new signal
+        # The wave template is NOT reset here either: it belongs to the
+        # recording (chosen / calibrated by the user, kept in its session),
+        # not to one detection run. A new file gets a fresh one from
+        # reset_for_new_file(). A different CHANNEL of the same file is a
+        # different recording (often another animal, see the Subject
+        # auto-fill below): its template was fitted on the previous
+        # channel's beats, so it is dropped -- the next Intervals run starts
+        # from the saved default, as for a new file.
+        _prev_ch = self.app.signal.channel
+        _new_ch = bundle.get("detected_ch")
+        _template_dropped = (self.app.analysis.wave_template is not None
+                             and _prev_ch is not None and _new_ch != _prev_ch)
+        if _template_dropped:
+            self.app.analysis.wave_template = None
+            log.info("Wave template dropped: channel changed %s -> %s",
+                     _prev_ch, _new_ch)
+        self.app.signal.channel = _new_ch
         self.app.session.dirty = False
         # Increment generation so any in-flight bg workers discard their results
         self.app._generation    = getattr(self.app, "_generation", 0) + 1
@@ -750,13 +809,19 @@ class SignalController:
         detector_warning = bundle.get("detector_warning")
         edits_note = ("  ·  previous manual peak edits cleared (re-detected)"
                       if _had_manual_edits else "")
+        if _template_dropped:
+            edits_note += (f"  ·  wave template of channel {_prev_ch} dropped "
+                           f"(channel {_new_ch} starts from the saved default)")
+            if getattr(self.app, "lbl_template_info", None) is not None:
+                self.app.lbl_template_info.configure(  # type: ignore[union-attr]
+                    text=pending_template_info_text(), text_color=MUTED)
         if detector_warning:
             self.app._set_status(detector_warning + edits_note, ORANGE)
         else:
             self.app._set_status(
                 f"Signal ready — {n} peaks  |  {dur:.0f} s  |  {fs} Hz  "
                 f"→ adjust threshold then click Analyze.{edits_note}", GREEN)
-        self.app.tabs.set("📈 Detection")
+        self.app.tabs.set(TAB_DETECTION)
         self.app._update_ann_count()   # refresh count (annotations persist across re-detect)
         self.app._update_pacing_count()
         # Sync nav bar
@@ -1041,6 +1106,7 @@ class SignalController:
         self.app.analysis.epoch_df             = None
         self.app.analysis.rolling_hrv_df       = None
         self.app.analysis_ctrl.invalidate_autonomic(peaks_changed=False)
+        self.app.analysis.basis.clear()
         self.app.analysis.t_start      = 0.0
         self.app.analysis.t_end        = 0.0
         if self.app.ui.hover_after_id is not None:
@@ -1053,6 +1119,8 @@ class SignalController:
         self.app.ui.hover_after_id   = None
         self.app.analysis.arrhythmia_events    = []
         self.app.analysis.arrhythmia_tsv       = ""
+        self.app.analysis.premature_summary    = None
+        self.app.analysis.arrhythmia_basis     = None
         self.app.analysis.arr_selected_idx     = -1
         self.app.analysis.arr_nav_pos          = 0.0
         self.app.analysis.arr_win              = 3.0
@@ -1069,6 +1137,7 @@ class SignalController:
         self.app.detection.edit_redo            = []
         self.app.ui.nav_pos              = 0.0
         self.app.signal.inverted      = False
+        self.app.signal.channel       = None
         self.app.signal.raw_only_loaded      = False
         self.app.ui.thr_debounce_id      = None
         self.app.analysis.annotations          = []
@@ -1147,6 +1216,7 @@ class SignalController:
                 except Exception:
                     pass
             self.app._arr_card_widgets.clear()
+        self.app.analysis_ctrl.refresh_premature_label()
         if self.app.lbl_arr_event_title is not None:
             try:
                 self.app.lbl_arr_event_title.configure(  # type: ignore[union-attr]
@@ -1174,6 +1244,6 @@ class SignalController:
 
         # ── 12. Switch to Detection tab so user lands in the right place ──
         try:
-            self.app.tabs.set("📈 Detection")
+            self.app.tabs.set(TAB_DETECTION)
         except Exception as e:
             log.debug("tabs.set Detection (reset) failed: %s", e)

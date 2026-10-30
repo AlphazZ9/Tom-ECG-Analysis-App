@@ -3,7 +3,6 @@
 ecg.io.export
 -------------
 Excel (openpyxl) and GraphPad Prism (.pzfx) exporters.
-Also holds ParamInfo -- metadata for the Interpretation tab parameters.
 """
 from __future__ import annotations
 
@@ -15,7 +14,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, cast
 
-import dataclasses
 import numpy as np
 import pandas as pd
 from openpyxl import Workbook
@@ -24,16 +22,78 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from ecg.core.models import (
-    AnalysisResults, MouseECG, QTC_FORMULA_LABELS, normalize_qtc_formula,
+    AnalysisResults, MouseECG, PREMATURE_DEFINITION_TEXT, event_kind_label,
 )
+from ecg.core.detection import premature_summary_rows
 from ecg.core.analysis import (
-    hrv_freq_withheld_reason, rr_disclosure_rows, rr_exclusion_report, rr_timeseries,
+    HR_RANGE_TEXT, LEGACY_SPECTRAL_TEXT, SPECTRAL_METHOD_TEXT,
+    analysed_duration_s, analysis_provenance_rows, analysis_window_span,
+    hrv_freq_is_legacy, hrv_freq_withheld_reason, interval_disclosure_rows,
+    nonlinear_subset_text, qtc_formula_text, rr_exclusion_report,
+    RR_ASYMMETRY_TEXT,
+    rr_timeseries,
 )
 from ecg.core.autonomic import (
     KP_RAT_SHR, KS_RAT_SHR, beat_dataframe, to_dataframe,
 )
 
 log = logging.getLogger("ecg")
+
+
+# ════════════════════════════════════════════════════════════
+#  ABNORMAL EVENTS / PREMATURE BEATS -- shared by Excel and Prism
+# ════════════════════════════════════════════════════════════
+
+def abnormal_events_frame(events: "Optional[list]") -> pd.DataFrame:
+    """One row per classified abnormal event (ArrhythmiaEvent)."""
+    rows = []
+    for ev in events or []:
+        rows.append({
+            "Type":        ev.kind,
+            "Label":       event_kind_label(ev.kind),
+            "Start_s":     round(float(ev.t_start), 3),
+            "End_s":       round(float(ev.t_end), 3),
+            "Duration_s":  round(float(ev.duration_s), 3),
+            "N_beats":     int(ev.n_beats),
+            "HR_bpm":      round(float(ev.hr_mean), 1),
+            "RR_ms":       round(float(ev.rr_mean), 1),
+            "Baseline_bpm": round(float(ev.baseline_hr), 1),
+            "Delta_pct":   round(float(ev.delta_pct), 1),
+            "Severity":    ev.severity,
+            "N_removed_by_correction": int(getattr(ev, "n_removed", 0) or 0),
+            "Description": ev.label,
+        })
+    return pd.DataFrame(rows)
+
+
+def premature_beats_frame(summary: "Optional[dict]") -> pd.DataFrame:
+    """One-row table of a detection.premature_beat_summary() (empty
+    without one). Rates are per hour of the analysed span."""
+    if not summary:
+        return pd.DataFrame()
+    s = summary
+
+    def _r(x: Any) -> "Optional[float]":
+        v = _finite(x)
+        return round(v, 2) if v is not None else None
+
+    return pd.DataFrame([{
+        "N_premature_total":   int(s["n_premature"]),
+        "N_isolated":          int(s["n_isolated"]),
+        "N_couplets":          int(s["n_couplets"]),
+        "N_runs_ge3":          int(s["n_runs"]),
+        "N_beats_in_runs":     int(s["n_beats_in_runs"]),
+        "N_removed_by_correction": int(s.get("n_removed", 0) or 0),
+        "Premature_per_h":     _r(s["premature_per_h"]),
+        "Isolated_per_h":      _r(s["isolated_per_h"]),
+        "Couplets_per_h":      _r(s["couplets_per_h"]),
+        "Runs_per_h":          _r(s["runs_per_h"]),
+        "Analysed_span_s":     round(float(s.get("span_s", 0.0) or 0.0), 1),
+        "Window_start_s":      _r(s.get("window_start_s")),
+        "Window_end_s":        _r(s.get("window_end_s")),
+        "N_removed_judged_spurious": int(s.get("n_removed_spurious", 0) or 0),
+        "N_removed_unknown_type":    int(s.get("n_removed_unknown_type", 0) or 0),
+    }])
 
 
 # ════════════════════════════════════════════════════════════
@@ -225,253 +285,47 @@ def _xl_value(value: Any) -> Any:
         return str(value)
     return value
 
-@dataclasses.dataclass(frozen=True)
-class ParamInfo:
-    """Metadata for one analysis parameter displayed in the Interprétation tab.
-
-    Using a frozen dataclass instead of a plain 6-tuple means:
-    - Fields are named and IDE-navigable (.label, .unit, etc.)
-    - Wrong number of arguments raises TypeError at module import time
-    - The dict type annotation is precise: dict[str, ParamInfo]
-    """
-    label:        str
-    unit:         str
-    ref_lo:       float
-    ref_hi:       float
-    description:  str
-    significance: str
-
-
-# Knowledge base: every parameter with its meaning, units, normal range (mouse)
-# and interpretation thresholds.
-PARAM_INFO: dict[str, ParamInfo] = {
-    # ── HR / RR ─────────────────────────────────────────────────────────
-    "HR_mean": ParamInfo(
-        label="Fréquence cardiaque moyenne", unit="bpm",
-        ref_lo=MouseECG.HR_MIN_BPM, ref_hi=MouseECG.HR_MAX_BPM,
-        description="Nombre de battements par minute, calculé comme 60 000 / RR moyen.",
-        significance=(
-            "Indicateur direct de l'état autonomique global. Une FC basse (< 400 bpm) "
-            "peut refléter une anesthésie profonde, une défaillance cardiaque ou une "
-            "bradycardie vagale. Une FC élevée (> 700 bpm) suggère un stress, une douleur "
-            "ou une activation sympathique forte. La valeur de repos typique chez la souris "
-            "éveillée non contrainte est 450–600 bpm."
-        ),
-    ),
-    "RR_mean": ParamInfo(
-        label="Intervalle RR moyen", unit="ms",
-        ref_lo=60_000 / MouseECG.HR_MAX_BPM, ref_hi=60_000 / MouseECG.HR_MIN_BPM,
-        description="Durée moyenne entre deux pics R consécutifs (inverse de la FC).",
-        significance=(
-            "Le RR moyen reflète le tonus chronotrope. Un allongement indique une "
-            "dominance vagale (parasympathique) ; un raccourcissement indique une "
-            "activation sympathique. Sert de référence pour normaliser les indices de VRC."
-        ),
-    ),
-    "RR_SDNN": ParamInfo(
-        label="SDNN", unit="ms",
-        ref_lo=2.0, ref_hi=25.0,
-        description="Écart-type de tous les intervalles RR sur l'enregistrement.",
-        significance=(
-            "Indice global de la variabilité de la fréquence cardiaque (VFC). "
-            "Intègre toutes les composantes (sympathique, parasympathique, respiratoire). "
-            "Valeurs typiques chez la souris éveillée : 5–20 ms. "
-            "Une SDNN basse (< 3 ms) suggère une rigidité autonomique ou un stress "
-            "chronique ; une SDNN très haute peut indiquer des artefacts résiduels."
-        ),
-    ),
-    "RR_RMSSD": ParamInfo(
-        label="RMSSD", unit="ms",
-        ref_lo=1.5, ref_hi=20.0,
-        description="Racine carrée de la moyenne des différences au carré entre RR consécutifs.",
-        significance=(
-            "Indice de la modulation parasympathique à court terme (tonus vagal). "
-            "Corrèle fortement avec la puissance HF du spectre. "
-            "La RMSSD est le marqueur de VFC recommandé pour les enregistrements courts "
-            "car elle n'est pas influencée par les tendances de FC à long terme. "
-            "Diminuée dans les pathologies cardiovasculaires, le stress et l'insuffisance cardiaque."
-        ),
-    ),
-    "RR_pNN6": ParamInfo(
-        label="pNN6", unit="%",
-        ref_lo=0.0, ref_hi=60.0,
-        description=(
-            f"Pourcentage des intervalles RR successifs différant de plus de "
-            f"{MouseECG.PNN_THRESHOLD} ms (seuil adapté à la souris)."
-        ),
-        significance=(
-            f"Equivalent souris du pNN50 humain. Chez la souris (RR moyen ~120 ms), "
-            f"le seuil de 50 ms représente ~42 % du RR moyen — trop élevé pour détecter "
-            f"la modulation vagale normale (±5–10 ms). Le seuil de "
-            f"{MouseECG.PNN_THRESHOLD} ms (~5 % du RR moyen) est physiologiquement "
-            f"calibré pour la souris. Diminué en cas de rigidité autonomique ou stress "
-            f"chronique. Référence : Thireau et al. 2008, Am J Physiol 294:H977."
-        ),
-    ),
-    "LF_pct": ParamInfo(
-        label="Puissance LF", unit="%",
-        ref_lo=10.0, ref_hi=60.0,
-        description="Part de la puissance spectrale dans la bande basse fréquence (0.4–1.5 Hz).",
-        significance=(
-            "Traditionnellement associée à la modulation sympathique ET parasympathique. "
-            "Chez la souris, la bande LF capture principalement les oscillations "
-            "baroréflexes. Une dominance LF élevée peut indiquer un tonus sympathique "
-            "augmenté ou une réponse de stress. Interprétation controversée seule ; "
-            "utiliser en conjonction avec HF et le ratio LF/HF."
-        ),
-    ),
-    "HF_pct": ParamInfo(
-        label="Puissance HF", unit="%",
-        ref_lo=20.0, ref_hi=70.0,
-        description=(
-            "Part de la puissance spectrale dans la bande haute fréquence (1.5–5.0 Hz). "
-            "Correspond à la fréquence respiratoire de la souris (2–4 Hz)."
-        ),
-        significance=(
-            "Marqueur de la modulation parasympathique respiratoire (arythmie sinusale "
-            "respiratoire). Une HF élevée indique un bon tonus vagal. "
-            "Une HF basse est associée au stress, à la douleur, aux pathologies "
-            "cardiaques et à l'inflammation. C'est la mesure fréquentielle la plus "
-            "spécifique du système nerveux autonome parasympathique."
-        ),
-    ),
-    "LFHF": ParamInfo(
-        label="Ratio LF/HF", unit="—",
-        ref_lo=0.5, ref_hi=4.0,
-        description="Rapport entre la puissance LF et la puissance HF.",
-        significance=(
-            "Utilisé comme indice de la balance sympatho-vagale. Un ratio élevé (> 3) "
-            "suggère une dominance sympathique ; un ratio bas (< 0.5) une dominance "
-            "parasympathique. Fortement critiqué dans la littérature récente comme "
-            "marqueur ambigu. À interpréter avec les valeurs absolues de LF et HF "
-            "et le contexte expérimental."
-        ),
-    ),
-    "SD1": ParamInfo(
-        label="SD1 (Poincaré)", unit="ms",
-        ref_lo=1.0, ref_hi=15.0,
-        description="Demi-axe court de l'ellipse de Poincaré — variabilité instantanée battement-à-battement.",
-        significance=(
-            "Équivaut mathématiquement à RMSSD / √2. Mesure la dispersion à court terme "
-            "des intervalles RR sur le diagramme de Poincaré. Reflète la modulation "
-            "parasympathique rapide. Diminuée dans les insuffisances cardiaques, "
-            "la neuropathie autonomique et sous anesthésie."
-        ),
-    ),
-    "SD2": ParamInfo(
-        label="SD2 (Poincaré)", unit="ms",
-        ref_lo=3.0, ref_hi=30.0,
-        description="Demi-axe long de l'ellipse de Poincaré — variabilité à long terme.",
-        significance=(
-            "Capture les oscillations lentes de la FC (LF, VLF, tendances circadiennes). "
-            "SD2 > SD1 est la norme ; un ratio SD1/SD2 proche de 1 peut indiquer "
-            "une perte de la dynamique à long terme de la VFC."
-        ),
-    ),
-    "SampEn": ParamInfo(
-        label="Entropie d'échantillon", unit="—",
-        ref_lo=0.5, ref_hi=2.5,
-        description="Mesure de la complexité et de l'imprévisibilité de la série RR (SampEn).",
-        significance=(
-            "Une entropie élevée indique un système cardiovasculaire sain et adaptatif, "
-            "capable de répondre à des perturbations diverses. Une entropie basse reflète "
-            "une régularité pathologique — observée dans l'insuffisance cardiaque, "
-            "le diabète autonomique et le vieillissement. Insensible à la longueur "
-            "de l'enregistrement (contrairement à ApEn)."
-        ),
-    ),
-    "DFA_a1": ParamInfo(
-        label="DFA α1 (court terme)", unit="—",
-        ref_lo=0.75, ref_hi=1.25,
-        description="Exposant de fluctuation sans tendance à court terme (4–16 battements).",
-        significance=(
-            "α1 ≈ 1.0 indique une dynamique fractal saine (corrélations à longue portée). "
-            "α1 < 0.75 suggère une anti-corrélation (possible arythmie). "
-            "α1 > 1.5 indique un comportement de marche aléatoire ou une tendance "
-            "non-stationnaire. Marqueur pronostique fort dans les maladies cardiovasculaires "
-            "chez l'humain ; applicable chez la souris pour caractériser le remodelage cardiaque."
-        ),
-    ),
-    "PR_ms": ParamInfo(
-        label="Intervalle PR", unit="ms",
-        ref_lo=MouseECG.PR_NORMAL[0], ref_hi=MouseECG.PR_NORMAL[1],
-        description=(
-            "Durée entre le début de l'onde P et le début du complexe QRS "
-            "(point Q quand disponible, sinon pic R en fallback)."
-        ),
-        significance=(
-            "Reflète le temps de conduction auriculo-ventriculaire (nœud AV + faisceau de His). "
-            "La mesure utilise le pic Q comme fin de l'intervalle quand la délinéation NK2 le "
-            "détecte, ce qui correspond à la définition clinique standard. En l'absence de pic Q "
-            "détecté, le pic R est utilisé comme proxy (légère surestimation de ~5–8 ms). "
-            "Allongement (> 55 ms chez la souris) : bloc AV du 1er degré — souvent fonctionnel "
-            "sous anesthésie vagolytique ou pathologique (fibrose, myocardite). "
-            "Raccourcissement : syndrome de pré-excitation (Wolff-Parkinson-White) rare chez la souris."
-        ),
-    ),
-    "QRS_ms": ParamInfo(
-        label="Durée du complexe QRS", unit="ms",
-        ref_lo=MouseECG.QRS_NORMAL[0], ref_hi=MouseECG.QRS_NORMAL[1],
-        description="Durée de la dépolarisation ventriculaire (approximation pic Q → pic S).",
-        significance=(
-            "Le QRS de la souris est très court (8–15 ms typique) comparé à l'humain "
-            "(80–120 ms). La mesure pic-à-pic (Q→S) sous-estime légèrement la durée réelle "
-            "(≈ 2–4 ms) par rapport à la définition clinique début-à-fin. "
-            "Un élargissement (> 20 ms) suggère un bloc de branche, "
-            "une hypertrophie ventriculaire ou une ischémie myocardique. "
-            "C'est le paramètre le plus sensible au remodelage structurel ventriculaire."
-        ),
-    ),
-    "QT_ms": ParamInfo(
-        label="Intervalle QT", unit="ms",
-        ref_lo=MouseECG.QT_NORMAL[0], ref_hi=MouseECG.QT_NORMAL[1],
-        description="Durée totale de la systole ventriculaire (dépolarisation + repolarisation).",
-        significance=(
-            "L'allongement du QT (> 90 ms chez la souris) est associé à un risque "
-            "de torsade de pointe et de fibrillation ventriculaire — marqueur de "
-            "cardiotoxicité médicamenteuse et de channelopathies (LQTS). "
-            "Le QT se raccourcit normalement quand la FC augmente."
-        ),
-    ),
-    "QTc_ms": ParamInfo(
-        label="Intervalle QTc", unit="ms",
-        ref_lo=MouseECG.QTC_NORMAL[0], ref_hi=MouseECG.QTC_NORMAL[1],
-        description=(
-            "QT corrigé pour la fréquence cardiaque, selon la formule choisie "
-            "(RR en ms) : Mitchell (par défaut, souris) QTc = QT / √(RR/100) ; "
-            "Bazett (humain) QTc = QT / √(RR/1000) ; "
-            "Fridericia (humain) QTc = QT / ∛(RR/1000). "
-            "La formule utilisée est enregistrée avec l'export "
-            "(feuille Cover Excel, notes du projet Prism, en-tête du rapport PDF)."
-        ),
-        significance=(
-            "La correction de Mitchell et al. (1998) est la formule de Bazett "
-            "normalisée à un RR murin de 100 ms (QTc = QT à ~600 bpm) ; c'est la "
-            "seule des trois calibrée pour la souris, et la plage de référence "
-            "indiquée s'applique à elle. Bazett et Fridericia, normalisées à un "
-            "RR humain de 1 s, multiplient le QT par ≈ 2,9 et ≈ 2,0 à 500 bpm : "
-            "à n'utiliser que pour comparer avec des études qui les emploient. "
-            "La relation QT–RR est faible chez la souris : rapporter le QT non "
-            "corrigé à côté du QTc, et vérifier sur le diagramme QTc–RR que la "
-            "correction ne laisse pas de pente. Le QTc reste l'indice standard des "
-            "études de sécurité cardiaque (cardiotoxicité, criblage de composés). "
-            "Références : Mitchell et al. (1998) Am J Physiol 274:H747 ; "
-            "Kmecova & Klimas (2010) Eur J Pharmacol ; « Incorrectly corrected? "
-            "QT interval analysis in rats and mice » (PMC9595597)."
-        ),
-    ),
-}
-
 
 # ════════════════════════════════════════════════════════════
 #  EXCEL EXPORTER
 # ════════════════════════════════════════════════════════════
 
 
+# Units of the HRV_Frequency sheet's columns (raw values, as stored):
+# current analyse_hrv_freq output vs a legacy nk.hrv_frequency table.
+_FREQ_UNITS = {
+    "HRV_VLF": "ms²", "HRV_LF": "ms²", "HRV_HF": "ms²", "HRV_TP": "ms²",
+    "HRV_LnHF": "ln ms²", "HRV_LFn": "fraction of LF+HF",
+    "HRV_HFn": "fraction of LF+HF", "HRV_LFpeak": "Hz", "HRV_HFpeak": "Hz",
+}
+_FREQ_UNITS_LEGACY = {
+    "HRV_ULF": "a.u., legacy", "HRV_VLF": "a.u., legacy", "HRV_LF": "a.u., legacy",
+    "HRV_HF": "a.u., legacy", "HRV_VHF": "a.u., legacy", "HRV_TP": "a.u., legacy",
+    "HRV_LnHF": "ln a.u., legacy", "HRV_LFn": "fraction of TP, legacy",
+    "HRV_HFn": "fraction of TP, legacy",
+}
+
+
+def hrv_freq_sheet_frame(results: dict) -> "Optional[pd.DataFrame]":
+    """hrv_freq with each column header carrying its unit ("HRV_LF (ms²)",
+    "HRV_LFn (fraction of LF+HF)"; a legacy NeuroKit table gets "a.u.,
+    legacy" / "fraction of TP, legacy"), so the raw sheet -- whose LFn /
+    HFn are fractions, shown ×100 as n.u. elsewhere -- cannot be misread."""
+    fd = results.get("hrv_freq")
+    if fd is None or fd.empty:
+        return fd
+    units = _FREQ_UNITS_LEGACY if hrv_freq_is_legacy(results) else _FREQ_UNITS
+    return fd.rename(columns={c: f"{c} ({units[c]})" for c in fd.columns if c in units})
+
+
+def _round_or_none(v: "Optional[float]", nd: int) -> "Optional[float]":
+    return round(float(v), nd) if v is not None and np.isfinite(v) else None
+
+
 class ExcelExporter:
     """Pure utility — builds formatted openpyxl workbooks with no GUI dependency.
 
-    All methods are static/class-level.  ECGApp.build_excel_workbook() delegates
+    All methods are static/class-level.  ExportController.build_excel_workbook() delegates
     here, passing only the data it needs.  This makes the export logic testable
     without instantiating the full application.
 
@@ -487,19 +341,12 @@ class ExcelExporter:
     HRV_Time       — NeuroKit2 time-domain metrics
     HRV_Frequency  — frequency-domain metrics
     HRV_NonLinear  — non-linear metrics (SD1/SD2, SampEn …)
-    ECG_Intervals  — PR / QRS / QT / QTc per beat
+    ECG_Intervals  — PR / QRS / QT / QTc per beat (definitions and QT
+                     beat-to-beat variability on the Cover sheet)
     Epochs         — epoch-level HR / SDNN / RMSSD (if computed)
     """
 
     # ── Style helpers ─────────────────────────────────────────────────
-
-    @staticmethod
-    def header_font() -> "Font":
-        return Font(name="Calibri", bold=True, color="FFFFFF", size=11)
-
-    @staticmethod
-    def header_fill(hex_color: str = "1565C0") -> "PatternFill":
-        return PatternFill("solid", fgColor=hex_color)
 
     @staticmethod
     def alt_fill(even: bool) -> "PatternFill":
@@ -608,12 +455,27 @@ class ExcelExporter:
         sig_quality: "Optional[int]",
         epoch_df:    "Optional[pd.DataFrame]",
         qtc_formula: "Optional[str]" = None,
+        analysis_window: "Optional[tuple]" = None,
+        artifact_report: "Optional[dict]" = None,
+        filter_text:     "Optional[str]" = None,
+        signal_crop:     "Optional[dict]" = None,
     ) -> "Workbook":
         """Build and return a formatted openpyxl Workbook.
 
         *qtc_formula* (a QTC_FORMULA_LABELS key or label) is the formula the
         ECG_Intervals ``QTc_ms`` column was computed with; when given it is
         recorded on the Cover sheet.
+
+        The Cover sheet also records what is needed to reproduce the
+        numbers (analysis_provenance_rows, same rows as the Summary report
+        and the Prism notes): the recording duration, *analysis_window*
+        ((t_start, t_end) the results were computed on, 0 = signal start /
+        end) and the analysed duration (window end − start -- not the time
+        of the last beat), *signal_crop* (the load-time crop,
+        analysis.signal_crop_info; every time is relative to its start),
+        *filter_text* (when given), *artifact_report*
+        (the artifact correction in effect; None = not applied), the QTc
+        formula, interval definitions and wave template.
 
         The Cover and HR_Statistics sheets disclose how many RR intervals
         HRV used and how many were excluded (too short / too long /
@@ -647,28 +509,56 @@ class ExcelExporter:
         ws_cover["A1"].font  = title_font
         ws_cover.row_dimensions[1].height = 32
 
-        dur_str = f"{float(time[-1]):.1f} s" if time is not None and len(time) else "—"
+        sig_end = float(time[-1]) if time is not None and len(time) else None
+        dur_str = f"{sig_end:.1f} s" if sig_end is not None else "—"
+        # Window, analysed duration, filters, RR bounds / exclusions,
+        # artifact correction, QTc formula, interval definitions, template.
+        provenance = analysis_provenance_rows(
+            cast(dict, results), window=analysis_window, signal_end_s=sig_end,
+            artifact_report=artifact_report, filter_text=filter_text,
+            qtc_formula=None, signal_crop=signal_crop)
+        n_ivl_rows = len(interval_disclosure_rows(results.get("intervals")))
+        if n_ivl_rows:
+            provenance, ivl_rows = provenance[:-n_ivl_rows], provenance[-n_ivl_rows:]
+        else:
+            ivl_rows = []
         cover_rows = [
             ("Subject",        subject),
             ("File",           os.path.basename(filepath or "—")),
             ("Analysis date",  datetime.now().strftime("%Y-%m-%d  %H:%M:%S")),
             ("Sampling rate",  f"{fs} Hz"),
-            ("Duration",       dur_str),
+            ("Recording duration", dur_str),
             ("N beats",        str(hr["n"])),
-            *rr_disclosure_rows(rr_report),
-            ("HR mean",        f"{hr['mean']:.1f} bpm"),
-            ("HR range",       f"{hr['min']:.0f} – {hr['max']:.0f} bpm"),
+            *provenance,
+            ("HR mean",        f"{hr['mean']:.1f} bpm  (60000 / mean NN)"),
+            ("HR range",       f"{hr['min']:.0f} – {hr['max']:.0f} bpm  ({HR_RANGE_TEXT})"),
             ("Signal quality", f"{sig_quality}%" if sig_quality is not None else "—"),
         ]
         # A withheld spectrum leaves no HRV_Frequency sheet: say why here.
         freq_withheld = hrv_freq_withheld_reason(cast(dict, results))
         if freq_withheld:
             cover_rows.append(("Frequency HRV", f"withheld — {freq_withheld}"))
+        else:
+            _fd = results.get("hrv_freq")
+            if _fd is not None and not _fd.empty:
+                # An older session's NeuroKit table is not in ms² / n.u.
+                cover_rows.append(("Frequency HRV",
+                                   LEGACY_SPECTRAL_TEXT if hrv_freq_is_legacy(cast(dict, results))
+                                   else SPECTRAL_METHOD_TEXT))
+        # Beats behind the non-linear metrics (entropy block may be capped).
+        _nl = results.get("hrv_nonlin")
+        if _nl is not None and not _nl.empty:
+            cover_rows.append(("Non-linear HRV",
+                               nonlinear_subset_text(_nl.attrs)
+                               or "all valid RR intervals of the analysis window"))
+            # HRV_PI / HRV_GI of the HRV_NonLinear sheet (NeuroKit's, same
+            # conventions as the Summary report's RR-asymmetry block).
+            cover_rows.append(("HR asymmetry (HRV_PI, HRV_GI)", RR_ASYMMETRY_TEXT))
         if qtc_formula is not None:
-            cover_rows.append((
-                "QTc formula",
-                f"{QTC_FORMULA_LABELS[normalize_qtc_formula(qtc_formula)]}"
-                f"  (report uncorrected QT alongside)"))
+            cover_rows.append(("QTc formula", qtc_formula_text(qtc_formula)))
+        # PR / QRS / QT landmarks and the beat-to-beat QT variability of the
+        # ECG_Intervals sheet (single lead -- not classical QT dispersion).
+        cover_rows.extend(ivl_rows)
         for i, (label, value) in enumerate(cover_rows, start=3):
             lbl = ws_cover.cell(row=i, column=1, value=label)
             val = ws_cover.cell(row=i, column=2, value=value)
@@ -739,7 +629,12 @@ class ExcelExporter:
             "RR_excluded_time_s":    rr_report["excluded_time_s"],
             "RR_min_ms":             rr_report["rr_min_ms"],
             "RR_max_ms":             rr_report["rr_max_ms"],
-            "Duration_s":  round(float(time[-1]), 1) if time is not None and len(time) else None,
+            # Recording length vs the span the HR / HRV were computed on.
+            "Recording_duration_s": round(sig_end, 1) if sig_end is not None else None,
+            "Window_start_s":       analysis_window_span(analysis_window, sig_end)[0],
+            "Window_end_s":         analysis_window_span(analysis_window, sig_end)[1],
+            "Analysed_duration_s":  _round_or_none(
+                analysed_duration_s(cast(dict, results), analysis_window, sig_end), 3),
             "Fs_Hz":       fs,
         }])
         cls.write_dataframe(ws_hr, hr_df, header_color="2E7D32")
@@ -753,7 +648,7 @@ class ExcelExporter:
         sheet_specs: "list[tuple[str, Optional[pd.DataFrame], str]]" = [
             ("RR_Timeseries", rr_ts if not rr_ts.empty else results.get("rr_df"), "E65100"),
             ("HRV_Time",      results.get("hrv_time"),    "1565C0"),
-            ("HRV_Frequency", results.get("hrv_freq"),    "6A1B9A"),
+            ("HRV_Frequency", hrv_freq_sheet_frame(cast(dict, results)), "6A1B9A"),
             ("HRV_NonLinear", results.get("hrv_nonlin"),  "00695C"),
             ("ECG_Intervals", results.get("intervals"),   "AD1457"),
         ]
@@ -808,8 +703,8 @@ class ExcelExporter:
             ("File",          os.path.basename(filepath or "—")),
             ("Analysis date", datetime.now().strftime("%Y-%m-%d  %H:%M:%S")),
             ("Sampling rate", f"{rate:g} Hz" if rate is not None else "—"),
-            ("Duration",      f"{float(time[-1]):.1f} s" if time is not None and len(time)
-                              else "—"),
+            ("Recording duration", f"{float(time[-1]):.1f} s" if time is not None and len(time)
+                                   else "—"),
             ("Core HRV",      cls.AUTONOMIC_ONLY_NOTE),
         ]
         for i, (label, value) in enumerate(rows, start=3):
@@ -833,6 +728,54 @@ class ExcelExporter:
         } for a in annotations])
         ws = cast(OpenpyxlWorksheet, wb.create_sheet("Annotations"))
         cls.write_dataframe(ws, ann_df, header_color="4A148C")
+        cls.autofit_columns(ws)
+
+    @classmethod
+    def add_abnormal_events_sheets(cls, wb, events: "Optional[list]",
+                                   summary: "Optional[dict]",
+                                   stale_note: "Optional[str]" = None) -> None:
+        """Append the Abnormal Events tab's results: a Premature_Beats
+        sheet (one row of counts and per-hour rates -- isolated beats,
+        couplets, runs >= 3, beats removed by artifact correction and
+        still counted -- with the RR-based definition below it), an
+        Abnormal_Events sheet (one row per event) and the same premature
+        rows on the Cover sheet. No-op before a classification.
+        *stale_note* (the classification no longer matches the exported
+        peaks / window; the caller then passes no events or summary) is
+        written on the Cover instead."""
+        if stale_note and "Cover" in wb.sheetnames:
+            cover = wb["Cover"]
+            row = cover.max_row + 1
+            cover.cell(row=row, column=1, value="Abnormal events")
+            cover.cell(row=row, column=2, value=stale_note)
+        if summary:
+            df = premature_beats_frame(summary)
+            ws = cast(OpenpyxlWorksheet, wb.create_sheet("Premature_Beats"))
+            cls.write_dataframe(ws, df, header_color="E65100")
+            cls.autofit_columns(ws)
+            note = ws.cell(row=len(df) + 3, column=1,
+                           value=f"Definition: {PREMATURE_DEFINITION_TEXT}")
+            note.font = Font(italic=True, color="888888", size=9)
+            if "Cover" in wb.sheetnames:
+                cover = wb["Cover"]
+                row = cover.max_row + 1
+                for label, value in premature_summary_rows(summary):
+                    cover.cell(row=row, column=1, value=label.strip())
+                    cover.cell(row=row, column=2, value=value)
+                    row += 1
+        if events:
+            ws_ev = cast(OpenpyxlWorksheet, wb.create_sheet("Abnormal_Events"))
+            cls.write_dataframe(ws_ev, abnormal_events_frame(events), header_color="B71C1C")
+            cls.autofit_columns(ws_ev)
+
+    @classmethod
+    def add_metrics_sheet(cls, wb, table: Any) -> None:
+        """Append a Metrics sheet: one line per row of a
+        core.metric_table.MetricTable -- raw value (empty when missing), unit,
+        basis n, what the basis is, module state, tier. Additive: every other
+        sheet is written without it."""
+        ws = cast(OpenpyxlWorksheet, wb.create_sheet("Metrics"))
+        cls.write_dataframe(ws, table.to_frame(), header_color="1A237E")
         cls.autofit_columns(ws)
 
     # ── Autonomic (CSI / CPI) and event-locked sheets ─────────────────
@@ -943,7 +886,9 @@ class ExcelExporter:
             ("SD01_ms (whole-recording SD1)", result.sd01),
             ("SD02_ms (whole-recording SD2)", result.sd02),
             ("D0_ms (whole-recording CCD)", result.d0),
-            ("HR_mean_bpm", hr_mean),
+            # time-average of the resampled HR series -- not the app-wide
+            # mean HR (60000 / mean NN), hence the explicit name
+            ("HR_series_mean_bpm (time-average of the 20 Hz HR series)", hr_mean),
             ("N_windows (beats evaluated)", p.get("n_beats")),
             ("N_windows_withheld", p.get("n_windows_withheld")),
         ]
@@ -1072,8 +1017,6 @@ class PrismExporter:
         subject:         str = "",
         context_label:   str = "",
         arrhythmia_events: "Optional[list]" = None,
-        beat_corr: "Optional[np.ndarray]" = None,
-        beat_peak_times: "Optional[np.ndarray]" = None,
         segment_a: "Optional[dict]" = None,
         segment_b: "Optional[dict]" = None,
         fs: "Optional[float]" = None,
@@ -1084,8 +1027,25 @@ class PrismExporter:
         event_table: "Optional[pd.DataFrame]" = None,
         event_params: "Optional[dict]" = None,
         hrv_window: Any = None,
+        premature_summary: "Optional[dict]" = None,
+        signal_end_s:    "Optional[float]" = None,
+        artifact_report: "Optional[dict]" = None,
+        filter_text:     "Optional[str]" = None,
+        signal_crop:     "Optional[dict]" = None,
     ) -> int:
         """Build all tables and write directly to *path*.
+
+        The project notes record what is needed to reproduce the tables
+        (analysis_provenance_rows, same rows as the Excel Cover sheet):
+        the analysis window *hrv_window* and the analysed duration (window
+        end − start, the window end defaulting to *signal_end_s*),
+        *filter_text*, RR bounds / exclusions, *artifact_report* (None =
+        not applied), the QTc formula, interval definitions and template,
+        and the load-time *signal_crop* (analysis.signal_crop_info).
+
+        *premature_summary* (detection.premature_beat_summary) adds the
+        RR-based premature-beat counts / rates and their definition to the
+        project notes.
 
         *qtc_formula* (a QTC_FORMULA_LABELS key or label), when given, is
         recorded in the project notes next to the QTc tables it produced.
@@ -1182,19 +1142,32 @@ class PrismExporter:
         # ── 3. HRV frequency-domain summary (Column) ────────────────────
         hrv_f = results.get("hrv_freq")
         if hrv_f is not None and not hrv_f.empty:
-            key_map_f = [
-                ("HRV_LF",    "LF (ms²)"),
-                ("HRV_HF",    "HF (ms²)"),
-                ("HRV_VLF",   "VLF (ms²)"),
-                ("HRV_TP",    "Total Power (ms²)"),
-                ("HRV_LFn",   "LF norm (%)"),
-                ("HRV_HFn",   "HF norm (%)"),
-                ("HRV_LF_HF", "LF/HF ratio"),
-                ("HRV_LFpeak","LF peak (Hz)"),
-                ("HRV_HFpeak","HF peak (Hz)"),
-            ]
+            if hrv_freq_is_legacy(cast(dict, results)):
+                # Older session (nk.hrv_frequency): arbitrary units, LFn = LF / TP.
+                key_map_f = [
+                    ("HRV_LF",    "LF (a.u., legacy)"),
+                    ("HRV_HF",    "HF (a.u., legacy)"),
+                    ("HRV_VLF",   "VLF (a.u., legacy)"),
+                    ("HRV_TP",    "Total Power (a.u., legacy)"),
+                    ("HRV_LFn",   "LF (% of TP, legacy)"),
+                    ("HRV_HFn",   "HF (% of TP, legacy)"),
+                    ("HRV_LFHF",  "LF/HF ratio"),
+                ]
+            else:
+                key_map_f = [
+                    ("HRV_LF",    "LF (ms²)"),
+                    ("HRV_HF",    "HF (ms²)"),
+                    ("HRV_VLF",   "VLF (ms²)"),
+                    ("HRV_TP",    "Total Power (ms²)"),
+                    ("HRV_LFn",   "LF (n.u., %)"),
+                    ("HRV_HFn",   "HF (n.u., %)"),
+                    ("HRV_LFHF",  "LF/HF ratio"),
+                    ("HRV_LFpeak","LF peak (Hz)"),
+                    ("HRV_HFpeak","HF peak (Hz)"),
+                ]
+            # LFn / HFn are fractions LF or HF / (LF + HF): shown ×100 (n.u.)
             rows_f = {
-                label: float(hrv_f[col].values[0])
+                label: float(hrv_f[col].values[0]) * (100.0 if col in ("HRV_LFn", "HRV_HFn") else 1.0)
                 for col, label in key_map_f
                 if col in hrv_f.columns and pd.notna(hrv_f[col].values[0])
             }
@@ -1215,7 +1188,8 @@ class PrismExporter:
                 ("HRV_ApEn",       "ApEn"),
                 ("HRV_DFA_alpha1", "DFA α1"),
                 ("HRV_DFA_alpha2", "DFA α2"),
-                ("HRV_PI",         "Porta Index"),
+                ("HRV_PI",         "Porta Index PI (%)"),
+                ("HRV_GI",         "Guzik Index GI (%)"),
             ]
             rows_nl = {
                 label: float(hrv_nl[col].values[0])
@@ -1255,7 +1229,11 @@ class PrismExporter:
                 _add("ECG Intervals per Beat", df, x_col=0, row_name=False)
 
         # ── 6. ECG intervals timeline (XY) ──────────────────────────────
-        if ivl is not None and not ivl.empty and "Time_s" in ivl.columns:
+        # analyse_intervals times each beat by its R peak (R_peak_s); it has
+        # no Time_s column, so keying on Time_s alone never wrote this table.
+        _ivl_t = next((c for c in ("Time_s", "R_peak_s")
+                       if ivl is not None and c in ivl.columns), None)
+        if ivl is not None and not ivl.empty and _ivl_t is not None:
             tl_cols = {
                 label: ivl[col].fillna(np.nan).values
                 for col, label in [
@@ -1265,7 +1243,7 @@ class PrismExporter:
                 if col in ivl.columns
             }
             if tl_cols:
-                tl_df = pd.DataFrame({"Time (s)": ivl["Time_s"].values, **tl_cols})
+                tl_df = pd.DataFrame({"Time (s)": ivl[_ivl_t].values, **tl_cols})
                 _add("ECG Intervals — Timeline", tl_df, x_col="Time (s)")
 
         # Per-window / per-epoch bookkeeping counts: kept out of the metric
@@ -1365,9 +1343,14 @@ class PrismExporter:
         # Build notes info with subject/context metadata
         note_names  = ["Notes", "Subject", "Context"]
         note_values = [f"ECG Analysis TOM v6 — {subject}", subject, context_label]
-        # Same RR disclosure as the Excel Cover sheet: the HRV tables are
-        # computed on the valid intervals only.
-        for label, value in rr_disclosure_rows(rr_exclusion_report(cast(dict, results))):
+        # Same provenance rows as the Excel Cover sheet: window, analysed
+        # duration, filters, RR bounds / exclusions (the HRV tables are
+        # computed on the valid intervals only), artifact correction, QTc
+        # formula, interval definitions / QT variability / wave template.
+        for label, value in analysis_provenance_rows(
+                cast(dict, results), window=hrv_window, signal_end_s=signal_end_s,
+                artifact_report=artifact_report, filter_text=filter_text,
+                qtc_formula=qtc_formula, signal_crop=signal_crop):
             note_names.append(label)
             note_values.append(value)
         # A withheld spectrum leaves no frequency-domain table: say why.
@@ -1375,9 +1358,10 @@ class PrismExporter:
         if freq_withheld:
             note_names.append("Frequency HRV")
             note_values.append(f"withheld — {freq_withheld}")
-        if qtc_formula is not None:
-            note_names.append("QTc formula")
-            note_values.append(QTC_FORMULA_LABELS[normalize_qtc_formula(qtc_formula)])
+        # Premature beats (RR-based): counts, per-hour rates, definition.
+        for label, value in premature_summary_rows(premature_summary):
+            note_names.append(label.strip())
+            note_values.append(value)
         # Autonomic tables exported: method, window, ks / kp, rat caveat.
         if autonomic is not None:
             sp_params = (dict(autonomic_spwvd.get("params", {}) or {})       # type: ignore[union-attr]

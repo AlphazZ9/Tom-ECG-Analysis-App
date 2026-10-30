@@ -1,9 +1,9 @@
 """
 Mapping analyse_intervals() rows back onto R peaks.
 
-analyse_intervals() returns one row fewer than its valid beats (the last
-beat has no following RR) and drops beats too close to the signal edges,
-so its columns can never be indexed positionally against the peak array.
+analyse_intervals() returns one row per beat whose full window fits in
+the signal: beats too close to the signal edges are dropped, so its columns
+can never be indexed positionally against the peak array.
 These tests pin align_interval_column_to_peaks()'s sample-index matching and
 the end-to-end AV-delay path it unblocks (Intervals PR -> classify_arrhythmias).
 """
@@ -20,9 +20,9 @@ from tests.helpers import make_synth_ecg, rpeaks_from_rr
 
 @pytest.fixture(autouse=True)
 def _no_template_writes(monkeypatch):
-    """analyse_intervals() auto-saves an unconfirmed template to the user's
-    home profile -- every template here is confirmed, and this makes any
-    accidental save fail loudly instead of touching the real profile."""
+    """analyse_intervals() never saves a template (older versions re-saved
+    it to the user's home profile); this makes any accidental save fail
+    loudly instead of touching the real profile."""
     def _refuse(self):
         raise AssertionError("WaveTemplate.save() must not run in tests")
     monkeypatch.setattr(WaveTemplate, "save", _refuse)
@@ -46,12 +46,12 @@ def _intervals(sig: np.ndarray, rp: np.ndarray, fs: float) -> pd.DataFrame:
 @pytest.mark.parametrize("crop", [0, 150])
 def test_aligned_pr_matches_analyse_intervals_rows(crop):
     # crop=150 puts the first peak inside the beat half-window from the
-    # signal start, so analyse_intervals drops it as an edge beat too --
-    # the rows then start at the SECOND peak and end one before the last.
-    sig, fs, rp = make_synth_ecg(n_beats=60)
+    # signal start, so analyse_intervals drops it as an edge beat -- the
+    # rows then start at the SECOND peak (and still run to the last one).
+    sig, fs, rp = make_synth_ecg(n_beats=60, p_amp=0.15)
     sig, rp = sig[crop:], rp - crop
     df = _intervals(sig, rp, fs)
-    assert 0 < len(df) < len(rp)
+    assert len(df) == len(rp) - (1 if crop else 0)
     assert df["PR_ms"].notna().any()
 
     aligned = align_interval_column_to_peaks(df, rp, fs)
@@ -63,8 +63,9 @@ def test_aligned_pr_matches_analyse_intervals_rows(crop):
     np.testing.assert_array_equal(aligned[row_peak], df["PR_ms"].to_numpy())
     others = np.setdiff1d(np.arange(len(rp)), row_peak)
     assert np.isnan(aligned[others]).all()
-    # The last peak never has a row; an edge-dropped first peak doesn't either.
-    assert np.isnan(aligned[-1])
+    # An edge-dropped first peak has no row.
+    if crop:
+        assert np.isnan(aligned[0])
     first_row = 1 if crop else 0
     np.testing.assert_array_equal(
         aligned[first_row:first_row + len(df)], df["PR_ms"].to_numpy())
@@ -150,8 +151,10 @@ def test_invalid_sampling_rate_is_rejected():
 def test_aligned_intervals_pr_triggers_av_delay():
     fs = 1000.0
     rp = rpeaks_from_rr([120.0] * 40, fs)            # 41 peaks
-    # Shaped like analyse_intervals' output: one row per peak except the
-    # last (no following RR), so one row fewer than there are peaks.
+    # analyse_intervals keeps one row per peak whose beat window fits in the
+    # signal, so its frame can be shorter than the peak list (edge beats
+    # dropped). Here one row fewer than there are peaks stands for any such
+    # length mismatch.
     pr = np.array([40.0] * 15 + [70.0] * 15 + [40.0] * 10)
     ivl = pd.DataFrame({"R_peak_s": rp[:-1] / fs, "PR_ms": pr,
                         "accepted": np.ones(40, dtype=bool)})

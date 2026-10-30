@@ -53,12 +53,55 @@ detection, HRV analysis, abnormal events, and export.
 - **Time Domain** — the full `nk.hrv_time()` metric set (SDNN, RMSSD, pNN6,
   SDANN, MedianNN, TINN, HTI...).
 - **Frequency** — Welch PSD with mouse-specific VLF/LF/HF bands (not the
-  human 0.04–0.15/0.15–0.4 Hz convention).
+  human 0.04–0.15/0.15–0.4 Hz convention). One spectrum for everything: the
+  valid RR intervals are resampled at 20 Hz (cubic spline on their true
+  times) and Welch's method is applied (Hann window, 75 % overlap,
+  ≈0.02 Hz resolution); the PSD plot draws exactly that spectrum, and
+  VLF / LF / HF are its integrals over the shaded bands, as **absolute
+  powers in ms²**. **LFn / HFn** are the Task Force normalised units,
+  LF or HF / (LF + HF); LF/HF = LF / HF. The same estimator is used by
+  Rolling HRV and Compare Segments.
 - **Non-linear** — Poincaré scatter with an SD1/SD2 ellipse overlay, sample
   entropy, DFA α1/α2, and a **multiscale entropy (MSEn)** curve across
   coarse-graining scales — catches loss of complexity a single-scale SampEn
-  can miss. Beat-count truncation on long recordings (for runtime) is
-  disclosed on-screen, not silent.
+  can miss. Poincaré SD1/SD2, DFA and the asymmetry/fragmentation indices
+  use **every valid beat of the analysis window**. Only the slow (O(N²))
+  entropy block — SampEn, ApEn, FuzzyEn, MSE, CD, … — is capped for
+  runtime, to **Entropy cap (RR)** valid intervals (default 2000, set in the
+  Non-linear tab; 0 = no cap, a negative entry falls back to 2000), taken as the contiguous block with the
+  fewest excluded intervals; the count and time span of that block are
+  shown in the status line, on the MSE curve, in the Summary report and on
+  the Excel Cover sheet.
+- **One definition per metric.** Mean HR is **60000 / mean NN** everywhere
+  (Summary, KPI bar, Excel, Compare Segments, Rolling, Epochs, tachogram
+  titles); the SD of HR and the min / max HR describe the instantaneous HR
+  60000 / RRᵢ — sample SD (n − 1) and **2nd / 98th percentiles**, the same
+  in the Summary, KPI bar, Excel and Compare Segments, and labelled as such. Poincaré **SD1 / SD2** have a single
+  definition — SD of (RRᵢ − RRᵢ₊₁)/√2 and of (RRᵢ + RRᵢ₊₁)/√2 over
+  successive pairs of adjacent valid intervals (never across an excluded
+  one) — used by the Non-linear panel, Rolling HRV, Compare Segments and the
+  Summary / exports. The Ledoit-Wolf (SD1 LW / SD2 LW in Rolling) and the
+  Autonomic covariance estimators are explicitly named variants.
+  **Changed numbers (this version):** earlier versions computed every
+  non-linear metric, SD1/SD2 included, on the **first 1000 beats** only (a
+  few minutes of a long recording); took mean HR as the mean of the
+  instantaneous HR (biased upwards, typically by 0.1–1 bpm, more with high
+  variability); and took VLF / LF / HF from NeuroKit's spectrum (100 Hz
+  resampling, PSD normalised to its maximum: the "powers" were in arbitrary
+  units, mislabelled n.u.) while the PSD plot drew a different spectrum, and
+  LFn / HFn were LF or HF / total power including VLF and 5–20 Hz.
+  Compare Segments' LF / HF used a third Welch pipeline, and its HR SD /
+  min / max were the absolute extremes (the Summary used percentiles and a
+  population SD; the HR SD now reads very slightly higher). A restored
+  older session has its mean HR / HR SD / range recomputed from the saved
+  valid RR intervals (said in the status bar); an older frequency result
+  cannot be recomputed without re-running, so it is kept but labelled
+  **"legacy NeuroKit spectrum"** (arbitrary units, LFn = LF / TP) in the
+  Frequency table, the Summary, the PDF, the Excel Cover / HRV_Frequency
+  sheet and Prism instead of ms² / n.u. Re-run Frequency and Non-linear HRV
+  on older sessions. The raw **HRV_Frequency** sheet's headers carry their
+  units (e.g. `HRV_LF (ms²)`, `HRV_LFn (fraction of LF+HF)` — fractions,
+  shown ×100 as n.u. everywhere else).
 - **Epochs** — fixed-window HRV trends (HR, SDNN, RMSSD, pNN6) with
   low-beat-count windows visually flagged.
 - **Rolling** — sliding-window HRV trends; HR/SDNN/RMSSD/pNN6 plus
@@ -77,8 +120,91 @@ detection, HRV analysis, abnormal events, and export.
 
 ### Interval delineation
 
-- P/Q/R/S/J/T landmark detection per beat, with a calibratable
-  per-recording wave template and an interactive verifier.
+- P/Q/R/S/J/T landmark detection per beat, plus the **QRS onset** and the
+  **QRS offset (J point)**, with a calibratable per-recording wave template
+  and an interactive verifier.
+- Standard interval definitions, measured on every beat:
+  - **PR** = P onset → QRS onset;
+  - **QRS** = QRS onset → QRS offset (J point);
+  - **QT** = QRS onset → T end;
+  - **QTc** = QT corrected with the **preceding** RR (previous R → this R).
+
+  QRS onset is the first departure from the PR-segment baseline (Q-wave
+  onset, or the R upstroke when there is no Q); the J point is where the S
+  wave returns to that baseline (or the notch before the J wave when it
+  never does). Both are placed where a straight line fitted (least squares)
+  through the 30–70 % part of the deflection meets the baseline
+  (threshold: 5 % of the R amplitude or 3× the PR-segment noise for the R
+  wave; a Q or S wave counts once it dips more than 2 % of R or 3× the
+  noise below the baseline). P onset is where the same kind of line
+  through the P-wave upstroke meets the PR baseline, searched up to 30 ms
+  before the P peak (when a P riding on the previous T never returns to
+  that baseline, the line through the part of the upstroke above the T–P
+  junction is used, not earlier than that junction). The P peak itself is
+  searched after the previous beat's T peak and measured against the PR
+  baseline (at mouse heart rates the beat window reaches back onto the
+  previous T wave: a baseline taken there read PR ~60 ms instead of 42 at
+  500 bpm and raised false AV-delay events); a beat with no P wave above
+  3× the noise gets no P peak and no PR, rather than one made of noise or
+  of the previous T tail. The PR
+  baseline is the last flat stretch found on each beat before the Q/R
+  (not a fixed window), so a widened QRS is measured in full. The mouse J
+  wave is early repolarisation (Boukens et al. 2014, J Physiol 592:4613),
+  so it is counted in QT, not in QRS. T end is where the same kind of line
+  through the 70–30 % part of the T-wave trailing edge meets the PR
+  baseline; the mouse T-wave end is gradual and ambiguous, so check its
+  placement on the mean beat. Each beat is delineated in its own window:
+  up to ±100 ms, at most 70 % of its preceding RR before R and of its
+  following RR after R (a neighbour closer than Min RR is ignored); the
+  exports and the Summary report state how many beats had a shortened
+  window. QTc uses the preceding RR only when it lies inside the Min / Max
+  RR bounds used for HRV. P onset, QRS onset, J point and T end are **not**
+  clamped to the template windows: a landmark that cannot be placed inside
+  the beat is left empty (NaN) instead of being set to a window edge, and
+  a template auto-updated by one recording no longer shortens the next
+  recording's QRS or QT. **Changed numbers (this version):** the beat
+  window used to be ±45 % of the recording's *shortest* RR, so one
+  premature beat shortened every beat's window (QT lost on all beats, PR
+  cut) and at ~500 bpm the T end fell outside it; P onset was capped about
+  9 ms before the P peak by the default template (PR 3–6 ms short with a
+  12–15 ms P upstroke, long PRs truncated to plausible values — they are
+  now measured, or rejected beyond 80 ms); a Q wave of 2–5 % of R was
+  skipped (QRS onset ~3 ms late: QRS and QT shorter, PR longer); QTc was
+  empty for every beat with an RR above the default 333 ms even when Max
+  RR was widened. The
+  line fit removes a noise-dependent shortening of QT (several ms at
+  2–4 kHz) and of QRS; QRS onsets earlier than −22 ms and T ends earlier
+  than 60 ms after R (default template) were previously reported at those
+  limits. **Changed numbers (earlier):** earlier versions
+  measured PR to the Q nadir, QRS from the Q nadir to the S nadir and QT
+  from the R peak, and paired QTc with the following RR — QRS and QT are
+  now longer (closer to the literature, e.g. Mitchell et al. 1998) and PR
+  slightly shorter. Sessions saved before this change keep their stored
+  intervals (flagged "legacy" in the Intervals tab and in the exports;
+  their QTc is re-paired with the preceding RR, or left empty — and stated
+  as such — when the frame has no R-peak times) until Intervals is re-run.
+  The AV-delay check of Abnormal events uses this PR.
+- **Wave template per recording.** The landmark search windows used for a
+  recording are that recording's own template: the saved default template
+  (or the built-in mouse defaults) until you change it in **Landmarks**
+  (Beat Template tab) — auto-calibrated on the mean beat, refined from this
+  recording's delineation, edited by hand or loaded from a template file.
+  **Apply to this recording** writes nothing to disk; the template is kept
+  in the recording's session. Only **Save as default template** (or
+  **Save to file…**) writes a template, and the default only applies to
+  recordings opened afterwards. Another channel of the same file is another
+  recording (often another animal): detecting peaks on a different channel
+  drops the template made on the previous one, and the new channel starts
+  from the saved default. The Beat Template tab, the Intervals status
+  line, the Summary report, the Excel Cover sheet and the Prism notes state
+  which template was used ("Wave template" row: provenance and search
+  windows). **Changed behaviour (this version):** earlier versions narrowed
+  the template to each recording after every delineation and re-saved it
+  as the global default, so a recording's intervals depended on the
+  recordings analysed before it. A saved default written that way
+  ("auto-updated") is now ignored in favour of the built-in defaults — save
+  a template explicitly to make it the default. Intervals computed by
+  earlier versions show "Wave template: not recorded".
 - PR/QRS/QT/QTc distributions (violin + box plots).
 - Selectable QTc correction formula (RR in ms):
   - **Mitchell** (default, mouse-calibrated; Mitchell et al. 1998) —
@@ -95,13 +221,61 @@ detection, HRV analysis, abnormal events, and export.
 - A QTc-vs-RR regression diagnostic scatter to judge whether the selected
   correction actually removed rate-dependence (a well-corrected QTc is flat
   against RR), instead of trusting one formula's number blindly.
-- QT dispersion.
+- Beat-to-beat QT variability (IQR, SD and range of QT across the beats of
+  one recording, single lead). This is **not** classical QT dispersion
+  (max − min QT across the leads of one beat), which earlier versions
+  reported under that name; the range is dominated by delineation outliers,
+  so report the IQR.
 
 ### Abnormal events (rhythm classification)
 
-- Bradycardia/tachycardia runs, pauses, ectopic-beat (ESV) runs, and
+- Bradycardia/tachycardia runs, pauses, premature beats and
   irregular-rhythm runs, classified against each recording's own baseline
   heart rate (not a fixed human bpm cutoff).
+- **Premature beats (RR-based)** — a beat ending an RR interval shorter
+  than 70 % of the reference RR: the median of the 10 intervals before
+  the group of premature beats or, if smaller, of the 10 from the
+  interval the rhythm returns on. The group must end — rhythm back above
+  that bound — within 30 beats: a longer stretch of short intervals is a
+  rate change (left to the tachycardia rule), and a group still under way
+  at the end of the analysed window is not counted. Earlier versions used
+  the median of the 10 neighbouring intervals, which a run of 6 or more
+  beats pulled down itself, so **runs longer than about 5 beats were never
+  reported** (they showed as irregular runs or tachycardia); they are now
+  counted, which raises premature counts on recordings that have them. A
+  limitation: a stretch of normal conduction between two 2:1-blocked
+  stretches (RR halved, then doubled again) looks the same by timing and
+  is reported as a run (check the bradycardia events around it). Detection
+  uses R-R timing only, so it **cannot tell ventricular from
+  supraventricular** premature beats (that needs QRS morphology and P
+  waves); earlier versions called these "ESV" (ventricular extrasystoles)
+  and only reported runs of ≥ 3. Isolated beats, couplets and runs ≥ 3 are
+  now each reported, with counts and per-hour rates (per hour of the
+  analysed span, first to last analysed beat) in the Abnormal Events tab,
+  its status line and ribbon, the "Copy for Excel" text, the Excel
+  (`Premature_Beats`, `Abnormal_Events` sheets and Cover rows), the PDF
+  reports and the Prism notes. Beats that artifact correction removed as
+  ectopic are put back for this classification and **still counted**
+  (flagged "removed by artifact correction"); before, auto-correction
+  deleted them before classification, so they vanished from the counts.
+  So are very premature beats (coupling interval below Min R-R, ≈ 67 ms)
+  that correction removes as *duplicate* / *non-physiological*: such a
+  removal is put back when the interval it leaves is long (> 1.2 × the
+  local median RR) or followed by a compensatory pause, and its closest
+  gap is ≥ 0.35 × that median. A removal that leaves a normal interval is
+  a spurious double detection and is **not** counted; the summary gives
+  how many were judged so. Sessions saved before the removal types were
+  recorded have removals of unknown type: they are judged by the same
+  interval test only, and the summary says how many (re-run artifact
+  correction for the full check). The Excel `Premature_Beats` sheet now
+  also gives the analysed window (start / end), and the exports **omit**
+  the abnormal-event results (with a note on the Cover / PDF and in the
+  status bar) when the peaks, the artifact correction or the analysis
+  window changed after the classification — re-run it.
+  The interval spanning such a removed beat is no longer reported as a
+  pause, and an irregular-RR run overlapping a premature beat is not
+  reported on top of it — both change event counts against older
+  versions. Older "esv_run" event records are read as premature runs.
 - **AV conduction-delay flagging** from sustained PR-interval prolongation,
   once Interval Delineation has been run — closes the gap where rhythm
   classification previously only ever saw R-peak timing.
@@ -112,9 +286,21 @@ detection, HRV analysis, abnormal events, and export.
 
 ### Comparison & export
 
-- A/B segment comparison with superimposed RR tachograms, a full metric
-  table (including LF/HF-normalized and SD1/SD2), and a **Mann-Whitney U
-  test** on the two segments' RR-interval distributions.
+- A/B segment comparison with superimposed RR tachograms and a full metric
+  table (LF / HF power and n.u., SD1/SD2 — the same definitions as the main
+  panels). Each segment is also summarised by the **means of
+  non-overlapping blocks** (default 10 s, **Block (s)** in the dialog; a
+  block is used when valid RR intervals cover ≥ 50 % of it): HR block mean
+  ± SD with the number of blocks, and the B − A difference. A Mann-Whitney
+  p on the block means is shown only as **descriptive** (≥ 3 blocks per
+  segment): two stretches of one recording are not independent samples —
+  the experimental unit is the animal — so group inference belongs to the
+  Event-locked statistics / cohort tools, across animals. The Excel export
+  adds a **Blocks** sheet and the note. **Changed behaviour (this
+  version):** earlier versions ran a Mann-Whitney U test on the hundreds of
+  beat-level RR intervals of each segment (autocorrelated values treated as
+  independent — pseudoreplication), so p was "significant" for almost any
+  two segments.
 - Session persistence — save/restore a full analysis session as JSON, plus
   a local SQLite registry of recently analyzed recordings and of the
   event-locked autonomic results saved for cohort statistics.
@@ -122,6 +308,72 @@ detection, HRV analysis, abnormal events, and export.
   PDF report (signal strip, key-metric table, Poincaré diagram,
   abnormal-events summary), a per-episode annotated
   PDF for abnormal events, and CSV.
+- **Provenance in every report.** The Summary text report (PROVENANCE
+  block), the Excel Cover sheet, the Prism project notes and the PDF footer
+  state the same rows: the **analysis window** and the **analysed
+  duration** (window end − start, plus the first → last analysed R-peak
+  span), the **filters** recorded when the peaks were detected, the RR
+  bounds and the intervals excluded from HRV, the **artifact correction**
+  (beats removed, by type), the **QTc formula actually used** (with the
+  preceding RR), the interval definitions and the wave template. Every
+  value carries its unit: VLF / LF / HF are powers in **ms²**, n.u. is used
+  only for LFn / HFn. **Changed numbers (this version):** the "Duration"
+  shown by the Summary verdict line and the duration tile was the absolute
+  time of the last beat (it also counted the time before a windowed
+  analysis start); it is now the analysed duration. The Excel Cover row
+  "Duration" is renamed **Recording duration** (the signal length), and the
+  HR_Statistics sheet's `Duration_s` column is replaced by
+  `Recording_duration_s`, `Window_start_s`, `Window_end_s` and
+  `Analysed_duration_s`. The Summary report and the PDF page, partly in
+  French before, are now entirely in English.
+  **Further provenance fixes (this version):** an analysis window whose
+  end lies past the end of the signal is clamped to the signal end
+  everywhere it is reported (the analysed duration and `Window_end_s` used
+  to count time that does not exist; the row now says which end was
+  entered). A **Signal crop** row states the load-time crop (Start / End
+  crop) in file time: every time in the reports is relative to its start.
+  The **Filters** row gives the band-pass cut-offs actually applied at the
+  recording's fs: the filter clips each cut-off to [0.01, 0.99] × Nyquist,
+  so at 2 kHz a 1 Hz low cut-off is really 10 Hz, and the row now says so
+  (the filtering itself is unchanged). The artifact-correction counts are
+  stated as whole-recording counts (it runs before windowing), and the
+  "excluded from HRV" clause appears only for results that really exclude
+  those intervals (older results bridged them). A saved session now keeps
+  the analysis window the results were computed on and the filters / crop
+  the signal was prepared with, and the restore re-prepares the signal
+  from those rather than from widget values edited after detection
+  (older sessions: as before).
+- **RR asymmetry (changed numbers).** The Summary's **Porta index** and
+  **Guzik index** now follow the published conventions, the same as
+  NeuroKit's HRV_PI / HRV_GI on the Excel HRV_NonLinear sheet: Porta PI
+  (Porta et al. 2008) = points below the Poincaré identity line
+  (accelerations, ΔRR < 0) / points off the line, so ΔRR = 0 no longer
+  counts in the denominator; Guzik GI (Guzik et al. 2006) = Σ distance to
+  the line of the points above it (decelerations, ΔRR > 0) / Σ distance of
+  all off-line points. The Summary used to show the acceleration share of
+  Σ ΔRR² (the complement of a squared-distance GI) and a PI with zeros in
+  the denominator. Both are 50 % for a symmetric series and NaN when no
+  ΔRR differs from 0; the report, the Excel Cover sheet ("HR asymmetry")
+  and the Prism Non-linear table (now with GI) state the convention. In
+  that Prism table the row title **"Porta Index" is now "Porta Index PI
+  (%)"** (same NeuroKit HRV_PI values) and a "Guzik Index GI (%)" row is
+  added: a Prism layout that looks the row up by its old title must be
+  updated. The Summary bar chart shows decelerations and accelerations as
+  shares of the pairs with ΔRR ≠ 0 (the acceleration bar is the PI, the
+  50 % line is symmetry) and gives the ΔRR = 0 pairs as a separate count;
+  it used to divide by all pairs, so its bars did not match the PI.
+- **Quality over time** is timed by the beats actually scored against the
+  template: peaks too close to the signal edges are not scored, and the
+  curve used to pair the scores with the peaks from the first one, shifting
+  it by one beat when the first peak was excluded. The "Poor-shape-match
+  time" tile and the RR CSV "quality" column both attribute each RR
+  interval to the scored beat that **starts** it (the CSV row's
+  Time_s − RR_ms, Time_s being the interval end), as the CSV did when no
+  edge beat was dropped.
+  Results from older versions, which did not record the scored beats, get
+  them rebuilt on session restore from the restored peaks (same edge rule);
+  if that is ambiguous, the curve, the tile ("—") and the CSV column are
+  all left out, and the status bar says so.
 
 ### Interface
 

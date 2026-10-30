@@ -218,7 +218,7 @@ def test_widened_max_rr_analyses_an_anaesthetised_recording():
     assert hr["n_excluded"] == 0
     assert hr["rr_min_ms"] == MouseECG.RR_MIN_MS
     assert hr["rr_max_ms"] == 500.0
-    assert hr["mean"] == pytest.approx(np.mean(60_000.0 / rr_all))
+    assert hr["mean"] == pytest.approx(60_000.0 / np.mean(rr_all))   # 60000 / mean NN
     assert result["hrv_time"].attrs["rr_max_ms"] == 500.0
     freq = analysis.analyse_hrv_freq(peaks, FS, rr_max_ms=500.0)
     nonlin = analysis.analyse_hrv_nonlinear(peaks, FS, rr_max_ms=500.0)
@@ -526,55 +526,99 @@ def test_one_spurious_close_peak_does_not_shrink_the_beat_window():
     assert analysis._beat_window_min_rr_samples(spurious, FS) == int(0.120 * FS)
 
 
-def test_analyse_intervals_beat_window_ignores_a_spurious_close_peak(monkeypatch):
-    peaks = rpeaks_from_rr([120.0] * 60, FS)
-    spurious = np.sort(np.r_[peaks, peaks[30] + int(0.060 * FS)])
-    signal = np.zeros(int(peaks[-1]) + 4000)
+def _record_windows(monkeypatch):
+    """Patch detect_waves_on_beat to record each beat's (start, end) ms."""
     windows: "list[tuple[float, float]]" = []
 
-    def _fake_detect(beat, bt_ms, template):
+    def _fake_detect(beat, bt_ms, template, **kw):
         windows.append((float(bt_ms[0]), float(bt_ms[-1])))
         return {k: np.nan for k in ("P_onset", "P_peak", "Q_peak", "S_peak",
                                     "J_peak", "T_peak", "T_offset")}
 
     monkeypatch.setattr(analysis, "detect_waves_on_beat", _fake_detect)
+    return windows
+
+
+def test_analyse_intervals_beat_window_ignores_a_spurious_close_peak(monkeypatch):
+    # A spurious peak 60 ms after beat 30 (below RR_MIN_MS) is not a heart
+    # beat: it neither shortens beat 30's window nor any other beat's.
+    peaks = rpeaks_from_rr([120.0] * 60, FS)
+    spurious = np.sort(np.r_[peaks, peaks[30] + int(0.060 * FS)])
+    signal = np.zeros(int(peaks[-1]) + 4000)
+    windows = _record_windows(monkeypatch)
     wt = WaveTemplate()
-    wt.confirmed = True   # never auto-save to the user profile
     for rp in (peaks, spurious):
         windows.clear()
         analysis.analyse_intervals(signal, rp, FS, np.diff(rp) / FS * 1000.0,
                                    wave_template=wt)
-        # 45 % of the 120 ms RR = ±54 ms, not 45 % of the 60 ms doublet
-        assert windows[0] == pytest.approx((-54.0, 53.5))
+        # 70 % of the 120 ms RR on each side (the first beat has no
+        # preceding RR: full ±100 ms before R).
+        assert windows[0] == pytest.approx((-100.0, 83.5))
+        assert windows[30] == pytest.approx((-84.0, 83.5))
 
 
-def test_analyse_intervals_beat_window_uses_the_bounds_it_is_given(monkeypatch):
-    # Anaesthetised mouse (~400 ms RR, below the default 333 ms Max RR) with
-    # one spurious split 45 ms after a beat: under the default bounds no
-    # interval is valid, so the window falls back to the 45 ms split and
-    # shrinks to the ±20 ms floor. With the widened Max RR HRV used, it
-    # stays sized from the ~355 ms valid intervals (capped at ±100 ms).
+def test_one_premature_beat_only_shortens_its_neighbours_windows(monkeypatch):
+    # The window used to be sized from the recording's SHORTEST RR, so one
+    # premature beat (85 ms) shortened every beat's window.
+    rr = [180.0] * 60
+    rr[30], rr[31] = 85.0, 275.0
+    peaks = rpeaks_from_rr(rr, FS)
+    signal = np.zeros(int(peaks[-1]) + 4000)
+    windows = _record_windows(monkeypatch)
+    df = analysis.analyse_intervals(signal, peaks, FS, np.asarray(rr),
+                                    wave_template=WaveTemplate())
+    assert windows[10] == pytest.approx((-100.0, 99.5))   # 0.7 x 180 > cap
+    assert windows[30] == pytest.approx((-100.0, 59.0))   # before the premature beat
+    assert windows[31] == pytest.approx((-59.5, 99.5))    # the premature beat
+    shortened = [i for i, w in enumerate(windows[1:-1], 1) if w != (-100.0, 99.5)]
+    assert shortened == [30, 31]
+    info = df.attrs["beat_window"]
+    assert (info["n_short_pre"], info["n_short_post"]) == (1, 1)
+    assert info["min_post_ms"] == pytest.approx(59.5)
+    text = analysis.beat_window_text(info)
+    assert "70 % of the preceding RR" in text and "shortened on 1 / 1 of 61" in text
+
+
+def test_analyse_intervals_beat_window_uses_the_rr_min_it_is_given(monkeypatch):
+    # A 45 ms split after beat 15 is ignored under the default Min RR
+    # (67 ms) but is a neighbour when Min RR is lowered below it.
     peaks = rpeaks_from_rr([400.0] * 30, FS)
     spurious = np.sort(np.r_[peaks, peaks[15] + int(0.045 * FS)])
     signal = np.zeros(int(peaks[-1]) + 4000)
-    windows: "list[float]" = []
-
-    def _fake_detect(beat, bt_ms, template):
-        windows.append(float(bt_ms[0]))
-        return {k: np.nan for k in ("P_onset", "P_peak", "Q_peak", "S_peak",
-                                    "J_peak", "T_peak", "T_offset")}
-
-    monkeypatch.setattr(analysis, "detect_waves_on_beat", _fake_detect)
+    windows = _record_windows(monkeypatch)
     wt = WaveTemplate()
-    wt.confirmed = True   # never auto-save to the user profile
     rr = np.diff(spurious) / FS * 1000.0
+    cap = 1000.0 * MouseECG.BEAT_HALF_WIN_S
 
     analysis.analyse_intervals(signal, spurious, FS, rr, wave_template=wt)
-    assert windows[0] == pytest.approx(-20.0, abs=0.5)
+    assert windows[15] == pytest.approx((-cap, cap - 0.5))
     windows.clear()
     analysis.analyse_intervals(signal, spurious, FS, rr, wave_template=wt,
-                               rr_max_ms=500.0)
-    assert windows[0] == pytest.approx(-1000.0 * MouseECG.BEAT_HALF_WIN_S, abs=0.5)
+                               rr_min_ms=40.0)
+    assert windows[15] == pytest.approx((-cap, 31.0))     # 0.7 x 45 ms
+
+
+def test_analyse_intervals_qtc_uses_the_rr_bounds_it_is_given():
+    # Anaesthetised mouse, RR 400 ms > the default 333 ms Max RR: with the
+    # widened bound HRV used, RR_ms and QTc are kept (they were NaN on
+    # every beat while QT was measured).
+    peaks = rpeaks_from_rr([400.0] * 30, FS)
+    signal = np.zeros(int(peaks[-1]) + 4000)
+    for p in peaks:
+        add_qrs_pulse(signal, int(p), FS)
+    rr = np.diff(peaks) / FS * 1000.0
+    df = analysis.analyse_intervals(signal, peaks, FS, rr, wave_template=WaveTemplate(),
+                                    rr_max_ms=600.0)
+    assert df["RR_ms"].iloc[1:].notna().all()
+    np.testing.assert_allclose(df["RR_ms"].iloc[1:], 400.0, atol=0.5)
+    ok = df["QT_ms"].notna()
+    np.testing.assert_allclose(
+        df.loc[ok, "QTc_ms"],
+        analysis.compute_qtc(df.loc[ok, "QT_ms"], df.loc[ok, "RR_ms"], "mitchell"),
+        equal_nan=True)
+    default = analysis.analyse_intervals(signal, peaks, FS, rr,
+                                         wave_template=WaveTemplate())
+    assert default["RR_ms"].isna().all() and default["QTc_ms"].isna().all()
 
 
 def test_poincare_metrics_accept_an_explicit_validity_mask():
@@ -690,14 +734,16 @@ def test_compute_qtc_nan_for_invalid_qt_or_rr(formula):
 
 
 def _synth_pqrst(rr_ms: np.ndarray, fs: float = FS, seed: int = 1) -> "tuple[np.ndarray, np.ndarray]":
-    """QRS pulses plus a T wave ~45 ms after each R, at the given RRs --
-    enough for the default WaveTemplate to find T offsets (finite QT)."""
+    """QRS pulses plus a T wave ~25 ms after each R, at the given RRs --
+    enough for the default WaveTemplate to find T offsets (finite QT).
+    The whole T wave lies inside the beat window (0.45 x the shortest RR,
+    38 ms here): a T end past the window is NaN, not an edge value."""
     rp = rpeaks_from_rr(list(rr_ms), fs)
     sig = np.zeros(int(rp[-1] + fs))
     t = np.arange(len(sig))
     for c in rp:
         add_qrs_pulse(sig, int(c), fs)
-        sig += 0.25 * np.exp(-0.5 * ((t - (c + 0.045 * fs)) / (0.010 * fs)) ** 2)
+        sig += 0.25 * np.exp(-0.5 * ((t - (c + 0.025 * fs)) / (0.004 * fs)) ** 2)
     sig += np.random.default_rng(seed).normal(0.0, 0.005, len(sig))
     return sig, rp
 
@@ -730,8 +776,11 @@ def test_analyse_intervals_default_qtc_is_mitchell(_confirmed_template):
         df["QTc_ms"].to_numpy(),
         analysis.compute_qtc(df["QT_ms"].to_numpy(), df["RR_ms"].to_numpy(), "mitchell"),
         equal_nan=True)
-    # Every measured QT gets a QTc -- nothing is clamped away.
-    assert df["QTc_ms"].notna().sum() == df["QT_ms"].notna().sum()
+    # Every measured QT with a preceding RR gets a QTc -- nothing is clamped
+    # away (the first peak has no preceding RR, hence no QTc).
+    with_rr = df["QT_ms"].notna() & df["RR_ms"].notna()
+    assert df["QTc_ms"].notna().sum() == with_rr.sum()
+    assert np.isnan(df["RR_ms"].iloc[0])
 
 
 @pytest.mark.parametrize("formula", ["bazett", "fridericia"])
@@ -747,7 +796,8 @@ def test_analyse_intervals_formula_matches_recompute(_confirmed_template, formul
         analysis.compute_qtc(df_formula["QT_ms"].to_numpy(),
                              df_formula["RR_ms"].to_numpy(), formula),
         equal_nan=True)
-    assert df_formula["QTc_ms"].notna().sum() == df_formula["QT_ms"].notna().sum()
+    assert df_formula["QTc_ms"].notna().sum() == (
+        df_formula["QT_ms"].notna() & df_formula["RR_ms"].notna()).sum()
     # The selector / session-restore path reproduces a fresh run exactly.
     recomputed = analysis.recompute_qtc_column(df_default, formula)
     np.testing.assert_allclose(recomputed["QTc_ms"].to_numpy(),
@@ -764,7 +814,9 @@ def test_recompute_qtc_column_leaves_frames_without_qt_untouched():
 
 def test_recompute_qtc_column_fixes_legacy_cube_root_session_values():
     # A session saved under the old "Mitchell (∛RR)" stored QT / ∛RR_s.
+    # (QRS_onset_ms: measured with the standard definitions, RR_ms preceding.)
     old = pd.DataFrame({"RR_ms": [100.0, 120.0], "QT_ms": [50.0, 50.0],
+                        "QRS_onset_ms": [-8.0, -8.0],
                         "QTc_ms": [50.0 / np.cbrt(0.10), 50.0 / np.cbrt(0.12)]})
 
     fixed = analysis.recompute_qtc_column(old, normalize_qtc_formula("Mitchell (∛RR)"))

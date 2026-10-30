@@ -19,12 +19,19 @@ import numpy as np
 import pandas as pd
 
 from ecg.core.models import FilterParams, QTC_FORMULA_LABELS, normalize_qtc_formula
-from ecg.core.analysis import recompute_qtc_column
+from ecg.core.analysis import (
+    mean_hr_bpm, migrate_legacy_results, rebuild_beat_corr_times,
+    recompute_qtc_column, signal_crop_info,
+)
 from ecg.io.loaders import load_mat_signal, _serialise_results, _deserialise_results
 from ecg.io.session import load_session, save_session, delete_session
 from ecg.io.db import _DB_AVAILABLE, upsert_recording, set_verified
 from ecg.core.ml_detector import save_training_sample, delete_training_sample
+from ecg.core.wave_template import WaveTemplate
 from ecg.ui.theme import GREEN, MUTED, ORANGE, RED
+from ecg.ui.tab_keys import (
+    TAB_DETECTION, TAB_HRV, TAB_INTERVALS, TAB_BEAT_TEMPLATE, TAB_EVENTS, TAB_SUMMARY,
+)
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
@@ -39,17 +46,41 @@ log = logging.getLogger("ecg")
 # sees a current-format name. Old->new only; anything already in the new
 # format (or unrecognized) passes through unchanged via .get(x, x).
 _TAB_KEY_MAP = {
-    "Detection":     "📈 Detection",
-    "HRV":           "💓 HRV",
-    "Intervals":     "📏 Intervals",
-    "Beat Template": "〰 Beat Template",
-    "Arrhythmias":   "⚠ Abnormal Events",
-    "Summary":       "📋 Summary",
+    "Detection":     TAB_DETECTION,
+    "HRV":           TAB_HRV,
+    "Intervals":     TAB_INTERVALS,
+    "Beat Template": TAB_BEAT_TEMPLATE,
+    "Arrhythmias":   TAB_EVENTS,
+    "Summary":       TAB_SUMMARY,
     # "Arrhythmias" tab was renamed to "Abnormal Events" (less clinically-
     # loaded wording for a mouse study) -- map the pre-rename emoji name
     # forward too, same one-old-format-per-generation pattern as above.
-    "⚠ Arrhythmias": "⚠ Abnormal Events",
+    "⚠ Arrhythmias": TAB_EVENTS,
 }
+
+
+def template_info_text(wt: WaveTemplate) -> str:
+    """Beat Template tab label: the recording's wave template provenance."""
+    return f"Template: {wt.provenance()}"
+
+
+def pending_template_info_text() -> str:
+    """Beat Template tab label for a recording with no template yet: the
+    saved default (or built-in) template its next Intervals run starts from.
+    Quiet: refreshed on every file load, it must not log the "saved default
+    not used" warning each time (Intervals reports that once per session)."""
+    wt, notice = WaveTemplate.load_default_checked(quiet=True)
+    unused = "; saved default not used" if notice else ""
+    return (f"Template: {wt.provenance()}"
+            f" (used at the next Intervals run{unused})")
+
+
+def wave_template_from_session(state: dict) -> "WaveTemplate | None":
+    """The recording's wave template saved in a session *state* (None for
+    sessions saved before templates were kept per recording -- the saved
+    default template is then used at the next Intervals run)."""
+    raw = state.get("wave_template")
+    return WaveTemplate.from_dict(raw) if isinstance(raw, dict) else None
 
 
 class SessionController:
@@ -164,38 +195,68 @@ class SessionController:
         # ── Parse saved filter params via FilterParams.from_dict ────────
         # from_dict tolerates missing keys with safe defaults, so old session
         # files (saved before any new field was added) restore without error.
+        # fp = the widget values at save time (restored onto the widgets);
+        # prep = the params the saved signal / peaks / results were prepared
+        # with (SignalState.prepare_params). They differ when the cut-offs,
+        # notch or crop were edited after detection without re-detecting:
+        # the signal is rebuilt from prep, so the restored results and their
+        # Filters / Signal crop provenance rows match. Sessions saved before
+        # prepare_params was recorded fall back to the widget values.
         fp = FilterParams.from_dict(state.get("filter_params", {}))
+        prep_raw = state.get("prepare_params")
+        prep = FilterParams.from_dict(prep_raw) if isinstance(prep_raw, dict) else fp
 
         try:
             sig_raw, detected_ch, _, detected_fs = load_mat_signal(
-                self.app.signal.filepath, fp.channel)
+                self.app.signal.filepath, prep.channel)
         except Exception as exc:
             raise RuntimeError(f"Could not reload signal from {self.app.signal.filepath}: {exc}") from exc
 
         if detected_fs is not None:
             fs = int(detected_fs)
 
-        # Apply the same time-crop that was active when the session was saved
-        i0 = int(fp.t_start * fs) if fp.t_start > 0 else 0
-        i1 = int(fp.t_end   * fs) if fp.t_end   > 0 else len(sig_raw)
+        # Apply the same time-crop the saved signal was prepared with
+        i0 = int(prep.t_start * fs) if prep.t_start > 0 else 0
+        i1 = int(prep.t_end   * fs) if prep.t_end   > 0 else len(sig_raw)
+        signal_crop = signal_crop_info(prep.t_start, prep.t_end, len(sig_raw) / fs)
         sig_raw = sig_raw[i0:i1]
         n_samples = len(sig_raw)
 
         # ── Re-run signal processing with saved filter params (pure/static) ──
-        # fp.to_dict() produces the "notch" key (not "notch_filter") that
+        # prep.to_dict() produces the "notch" key (not "notch_filter") that
         # _compute_preview_bundle expects.
-        prepare_params = fp.to_dict()
+        prepare_params = prep.to_dict()
         signal_bundle = self.app._compute_preview_bundle(sig_raw, fs, prepare_params)
+        # The analysis window the saved results were computed on -- not the
+        # window entries, which may have been applied since without
+        # re-running Analyze. Older sessions did not save it: the entries
+        # are then the best remaining guess. None without results.
+        aw = state.get("analysed_window")
+        if not state.get("results"):
+            analysed_window = None
+        elif isinstance(aw, (list, tuple)) and len(aw) == 2:
+            analysed_window = (float(aw[0] or 0.0), float(aw[1] or 0.0))
+        else:
+            analysed_window = (float(state.get("analysis_t_start", 0.0)),
+                               float(state.get("analysis_t_end",   0.0)))
 
         results_raw  = state.get("results")
+        results      = _deserialise_results(results_raw) if results_raw else None
+        # Results saved by an older version: recompute the HR stats under
+        # the current definitions and note a legacy (arbitrary-unit) spectrum.
+        legacy_notes = migrate_legacy_results(results)
+        for _note in legacy_notes:
+            log.info("Session restore: %s", _note)
         epoch_raw    = state.get("epoch_df")
         rolling_raw  = state.get("rolling_hrv_df")
 
         return {
             "fs":               fs,
             "n_samples":        n_samples,
+            "detected_ch":      detected_ch,
             "signal_raw":       sig_raw,
             "signal_bundle":    signal_bundle,
+            "signal_crop":      signal_crop,
             "filter_params":    fp,
             "thresh_amp":       float(state.get("threshold", float(state.get("thresh_amp", 0.5)))),
             # The slider FRACTION (0.01-2.0, apply_threshold()'s thresh_frac
@@ -213,7 +274,8 @@ class SessionController:
             "signal_inverted":  bool(state.get("signal_inverted", False)),
             "no_filter_mode":   bool(state.get("no_filter_mode",  fp.no_filter)),
             "verified_for_training": bool(state.get("verified_for_training", False)),
-            "results":          _deserialise_results(results_raw) if results_raw else None,
+            "results":          results,
+            "legacy_notes":     legacy_notes,
             "artifact_report":  state.get("artifact_report"),
             "artifact_candidates": state.get("artifact_candidates", []),
             "epoch_df":         pd.DataFrame(epoch_raw)   if epoch_raw   is not None else None,
@@ -222,6 +284,7 @@ class SessionController:
             "pacing_periods":   list(state.get("pacing_periods", [])),
             "analysis_t_start": float(state.get("analysis_t_start", 0.0)),
             "analysis_t_end":   float(state.get("analysis_t_end",   0.0)),
+            "analysed_window":  analysed_window,
             "nav_pos":          float(state.get("nav_pos", 0.0)),
             "edit_mode":        bool(state.get("edit_mode", False)),
             "current_tab":      _TAB_KEY_MAP.get(
@@ -234,6 +297,8 @@ class SessionController:
             "autonomic_params": state.get("autonomic_params"),
             # Same for the Event-locked panel (label filter, pre / post, z).
             "event_locked_params": state.get("event_locked_params"),
+            # The recording's own wave template (with its provenance).
+            "wave_template":    wave_template_from_session(state),
         }
 
     def on_restore_session_done(self, bundle: dict, saved_at: str) -> None:
@@ -251,6 +316,9 @@ class SessionController:
         self.app.signal.fs  = fs
 
         self.app.signal.raw = bundle["signal_raw"]
+        # The channel the restored template belongs to (a later re-detection
+        # on another channel drops it, see SignalController.on_preview_done).
+        self.app.signal.channel = bundle.get("detected_ch")
         self.app.signal.time       = np.arange(n_samples) / fs
         self.app.ui.nav_pos    = 0.0
 
@@ -260,6 +328,9 @@ class SessionController:
         self.app.detection.all_candidates       = sb["all_cands"]
         self.app.detection.all_prominences       = sb["all_proms"]
         self.app.signal.no_filter_mode  = sb["no_filter_mode"]
+        self.app.signal.filter_text     = sb.get("filter_text")
+        self.app.signal.prepare_params  = sb.get("prepare_params")
+        self.app.signal.crop            = bundle.get("signal_crop")
         self.app.signal.inverted = sb.get("inverted", False)
 
         # ── Restore user-edited state (session values win over freshly
@@ -280,6 +351,9 @@ class SessionController:
         self.app.analysis.rolling_hrv_df  = bundle["rolling_hrv_df"]
         self.app.analysis.annotations     = list(bundle["annotations"])
         self.app.analysis.pacing_periods  = list(bundle["pacing_periods"])
+        # Per-recording wave template (None for older sessions: the saved
+        # default is loaded at the next Intervals run).
+        self.app.analysis.wave_template   = bundle.get("wave_template")
         # The peaks are re-detected below: any Autonomic result is stale.
         # Its saved parameters are restored (old sessions: unchanged).
         self.app.analysis_ctrl.invalidate_autonomic(peaks_changed=False)
@@ -290,22 +364,19 @@ class SessionController:
 
         self.app.analysis.t_start = bundle["analysis_t_start"]
         self.app.analysis.t_end   = bundle["analysis_t_end"]
+        # The window the restored results were computed on (see
+        # restore_session_worker), not necessarily the entries above.
         self.app.analysis.analysed_window = (
-            (self.app.analysis.t_start, self.app.analysis.t_end)
-            if bundle["results"] is not None else None)
+            bundle.get("analysed_window") if bundle["results"] is not None else None)
         # Sync analysis window entry widgets with restored values
         if self.app.ent_analysis_t0 is not None:
-            self.app._batch_ui_update(self.app.ent_analysis_t0, state="normal")
             self.app.ent_analysis_t0.delete(0, "end")  # type: ignore[union-attr]
             if self.app.analysis.t_start > 0:
                 self.app.ent_analysis_t0.insert(0, str(self.app.analysis.t_start))  # type: ignore[union-attr]
-            self.app._batch_ui_update(self.app.ent_analysis_t0, state="normal")
         if self.app.ent_analysis_t1 is not None:
-            self.app._batch_ui_update(self.app.ent_analysis_t1, state="normal")
             self.app.ent_analysis_t1.delete(0, "end")  # type: ignore[union-attr]
             if self.app.analysis.t_end > 0:
                 self.app.ent_analysis_t1.insert(0, str(self.app.analysis.t_end))  # type: ignore[union-attr]
-            self.app._batch_ui_update(self.app.ent_analysis_t1, state="normal")
 
         # ── Restore UI state ─────────────────────────────────────────────
         self.app.ui.nav_pos = bundle["nav_pos"]
@@ -356,7 +427,8 @@ class SessionController:
 
         # ── Resync FILTERS sidebar widgets from the restored FilterParams ──
         # signal.no_filter_mode/.inverted (state) are already set above, and
-        # signal_bundle was computed from these same saved params -- but
+        # signal_bundle was computed from the saved prepare_params (equal to
+        # these widget values unless they were edited after detection) -- but
         # nothing previously wrote ent_lp/ent_hp/sw_notch/sw_filtering/
         # sw_invert_signal/cb_clean back onto the actual widgets, so they'd
         # keep showing whatever was on screen before the restore even though
@@ -436,6 +508,16 @@ class SessionController:
                 text=f"Peaks detected: {_n}  (after correction)",
                 text_color=GREEN if _n > 10 else RED))
 
+        # Results from older versions did not record which beats the
+        # template scored: rebuild those times from the restored peaks so
+        # the quality curve, the Poor-shape-match tile and the RR CSV agree
+        # (when that cannot be done unambiguously all three leave it out).
+        quality_note = self.restore_beat_quality_times(bundle)
+        # The restored results count as computed on these (re-detected) peaks.
+        fresh = getattr(self.app, "freshness", None)
+        if fresh is not None:
+            fresh.stamp_restored()
+
         # ── Enable analysis buttons ──────────────────────────────────────
         self.app._set_save_session_enabled(True)
         self.app._set_result_btns_enabled(
@@ -446,10 +528,15 @@ class SessionController:
         # Analyze (the persistent labels are re-derived below).
         excl_note = (self.app.analysis_ctrl.exclusion_status_note()
                      if self.app.analysis.results is not None else "")
+        # Older-version results brought to the current definitions (or a
+        # legacy spectrum to re-run), said once here.
+        legacy = "; ".join(list(bundle.get("legacy_notes") or [])
+                           + ([quality_note] if quality_note else []))
+        legacy_note = f"  |  older session: {legacy}" if legacy else ""
         self.app._set_status(
             f"Session restored — {n_beats} beats  |  "
-            f"{n_samples / fs:.0f} s recording  |  results ready{excl_note}",
-            ORANGE if excl_note else GREEN)
+            f"{n_samples / fs:.0f} s recording  |  results ready{excl_note}{legacy_note}",
+            ORANGE if (excl_note or legacy_note) else GREEN)
 
         # ── Render ───────────────────────────────────────────────────────
         self.app._draw_detail(self.app.ui.nav_pos)
@@ -471,6 +558,32 @@ class SessionController:
                 freq_done_label="Loaded from session ✓")
         self.app._update_kpis()
         self.update_session_ui(has_session=True, saved_at=saved_at)
+
+    def restore_beat_quality_times(self, bundle: dict) -> str:
+        """Rebuild beat_corr_t_s of restored results from an older version
+        (rebuild_beat_corr_times) from the restored peaks inside the
+        analysed window and the filtered signal length. Returns a status
+        note when the beats scored stay unknown, "" otherwise."""
+        r = self.app.analysis.results
+        if not r or r.get("beat_corr") is None or r.get("beat_corr_t_s") is not None:
+            return ""
+        rp = self.app.detection.rpeaks_ok
+        flt = self.app.signal.filtered
+        fs = self.app.signal.fs
+        if rp is not None and flt is not None and fs:
+            rp = np.asarray(rp, dtype=np.int64)
+            aw = bundle.get("analysed_window") or (0.0, 0.0)
+            t0, t1 = float(aw[0] or 0.0), float(aw[1] or 0.0)
+            mask = rp / fs >= t0
+            if t1 > 0:
+                mask &= rp / fs <= t1
+            if rebuild_beat_corr_times(r, len(flt), rp[mask], fs):
+                log.info("Session restore: beat-quality times rebuilt")
+                return ""
+        log.info("Session restore: beat-quality times unknown")
+        # beat_quality_times / noisy_time_pct then still pair by position
+        # when no edge beat was left out (exact); otherwise they are empty.
+        return "beat-quality times not recorded (re-run Analyze for the quality curve)"
 
     def current_filter_params_dict(self) -> dict:
         """Return a serialisable filter-params dict, reading from widgets if available.
@@ -494,7 +607,7 @@ class SessionController:
         try:
             return self.app.tabs.get()
         except Exception:
-            return "📈 Detection"
+            return TAB_DETECTION
 
     def collect_session_state(self) -> dict:
         """Gather all serialisable app state into a flat dict.
@@ -536,8 +649,18 @@ class SessionController:
             "analysis_t_start": self.app.analysis.t_start,
             "analysis_t_end":   self.app.analysis.t_end,
         }
+        # What the signal / peaks were prepared with (filters, crop) -- the
+        # restore re-prepares from it, so the results keep their provenance.
+        prep = getattr(self.app.signal, "prepare_params", None)
+        if prep is not None:
+            state["prepare_params"] = dict(prep)
         if self.app.analysis.results is not None:
             state["results"] = _serialise_results(self.app.analysis.results)
+            # The window the results were computed on (the entries above
+            # can have been applied since without re-running Analyze).
+            aw = self.app.analysis.analysed_window
+            if aw is not None:
+                state["analysed_window"] = [float(aw[0] or 0.0), float(aw[1] or 0.0)]
         # Only the removals still in effect on the current peaks: restore
         # re-detects the peaks and re-applies these, so it must not remove
         # beats that have come back since (threshold change, re-detection).
@@ -554,6 +677,10 @@ class SessionController:
             state["annotations"] = self.app.analysis.annotations
         if self.app.analysis.pacing_periods:
             state["pacing_periods"] = self.app.analysis.pacing_periods
+        # The recording's wave template: restoring the session restores the
+        # windows (and provenance) its delineation used / will use.
+        if self.app.analysis.wave_template is not None:
+            state["wave_template"] = self.app.analysis.wave_template.to_dict()
         # HRV > Autonomic parameters (window, method, ks, kp, LF/HF) as
         # entered; the result itself is cheap to recompute and not saved.
         state["autonomic_params"] = self.app.analysis_ctrl.autonomic_widget_params()
@@ -689,7 +816,8 @@ class SessionController:
                 # were silently never written to the registry.
                 _hrv = self.app.analysis.results.get("hrv_time")
                 if _rdf is not None and len(_rdf):
-                    _stats["hr_mean"] = float(_rdf["HR_bpm"].mean())
+                    # 60000 / mean NN -- the app-wide mean-HR definition
+                    _stats["hr_mean"] = mean_hr_bpm(_rdf["RR_ms"].to_numpy(dtype=float))
                     # Downsampled here (already on the background thread,
                     # and rr_df is already in memory) so the Recent-
                     # recordings popup can draw its sparkline straight from
@@ -804,16 +932,19 @@ class SessionController:
         else:
             self.app.lbl_session_info.configure(  # type: ignore[union-attr]
                 text="No session saved for this file", text_color=MUTED)
-        # Update wave template info label
-        if self.app.lbl_template_info is not None and self.app.analysis.wave_template is not None:
+        # Update wave template info label. A new recording has no template
+        # yet (reset_for_new_file): show the one its next Intervals run
+        # would start from -- never the previous recording's -- without
+        # assigning it.
+        if self.app.lbl_template_info is not None:
             wt = self.app.analysis.wave_template
-            if wt.confirmed:
+            if wt is not None:
                 self.app.lbl_template_info.configure(  # type: ignore[union-attr]
-                    text=f"✓ Custom template active  (source={wt.source})",
-                    text_color=GREEN)
+                    text=template_info_text(wt),
+                    text_color=MUTED if wt.source == "default" else GREEN)
             else:
                 self.app.lbl_template_info.configure(  # type: ignore[union-attr]
-                    text="Using default mouse landmarks", text_color=MUTED)
+                    text=pending_template_info_text(), text_color=MUTED)
 
     def snapshot_ui_state(self) -> dict:
         """Capture all editable widget values before a UI rebuild."""
@@ -847,7 +978,7 @@ class SessionController:
         try:
             s["current_tab"] = self.app.tabs.get()
         except Exception:
-            s["current_tab"] = "📈 Detection"
+            s["current_tab"] = TAB_DETECTION
         s["edit_mode"] = self.app.detection.edit_mode
         s["nav_pos"]   = self.app.ui.nav_pos
         s["rrhr_strip_visible"] = self.app.ui.rrhr_strip_visible
@@ -930,7 +1061,7 @@ class SessionController:
         except Exception as _exc:
             log.debug("cb_det_method restore: %s", _exc)
         try:
-            self.app.tabs.set(s.get("current_tab", "📈 Detection"))
+            self.app.tabs.set(s.get("current_tab", TAB_DETECTION))
         except Exception as _exc:
             log.debug("restore current_tab failed: %s", _exc, exc_info=True)
         # Re-apply non-widget state

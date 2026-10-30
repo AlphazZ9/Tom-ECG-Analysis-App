@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import textwrap
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -23,26 +24,27 @@ import matplotlib.patches
 import matplotlib.colors as mcolors
 import numpy as np
 import pandas as pd
-from scipy.interpolate import CubicSpline
-from scipy.signal import welch as _scipy_welch
-
-# numpy 2.x renamed trapz to trapezoid. Own this locally rather than relying
-# on app.py's module-level np.trapz = np.trapezoid shim having already run --
-# a comment here used to (incorrectly) claim "the shim at the top of this
-# module ensures np.trapz always exists", but no such shim was ever defined
-# in this file; it only worked because app.py happens to always be imported
-# before PlotController is ever instantiated.
-_trapz = getattr(np, "trapz", None) or getattr(np, "trapezoid", None)
 
 from ecg.core.models import MouseECG, QTC_FORMULA_LABELS, normalize_qtc_formula
-from ecg.core.filtering import downsample_xy_for_display
+from ecg.core.filtering import downsample_xy_for_display, recorded_filter_text
+from ecg.core.wave_template import WaveTemplate
 from ecg.core.analysis import (
-    compute_beat_correlation, hrv_freq_withheld_reason, rr_bounds_label,
-    rr_disclosure_rows, rr_exclusion_report, rr_exclusion_text,
-    rr_interval_series, rr_timeseries, rr_valid_mask,
-    spectral_withheld_reason, successive_valid_pairs,
+    INTERVAL_DEFINITIONS_TEXT,
+    intervals_use_legacy_definitions, qt_beat_variability, qtc_rr_column,
+    compute_beat_correlation, hrv_freq_is_legacy, hrv_freq_withheld_reason,
+    rr_bounds_label, LEGACY_SPECTRAL_TEXT,
+    rr_exclusion_text,
+    rr_interval_series, rr_timeseries,
+    spectral_withheld_reason, successive_valid_pairs, rr_asymmetry_indices,
+    beat_quality_times,
+    MIN_BEATS_SPECTRAL, band_mask, hrv_spectrum, mean_hr_bpm,
+    nonlinear_subset_text, spectral_band_metrics,
+    analysis_provenance_rows,
 )
-from ecg.ui.plots import style_axes
+from ecg.core.metric_table import (
+    MetricTable, build_metric_table, interval_rows, quality_tile_texts, results_rr_valid,
+)
+from ecg.ui.plots import style_axes, wrap_fig_text
 from ecg.ui.wave_editor import WaveTemplateEditor
 from ecg.ui.theme import (
     THEME, PLOT, RED, AMBER, ORANGE, ORANGE_DARK,
@@ -51,11 +53,237 @@ from ecg.ui.theme import (
     GREEN, GREEN_DARK, PINK, AMBER_DARK, ARTIFACT_TYPE_COLOR,
 )
 from ecg.ui.widgets import update_quality_gauge
+from ecg.ui.tab_keys import TAB_DETECTION
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
+
+
+def beat_template_overlay(current: "Optional[WaveTemplate]",
+                          intervals: "Optional[pd.DataFrame]",
+                          ) -> "tuple[Optional[WaveTemplate], str]":
+    """(template whose windows the Beat Template plot overlays, title note).
+
+    The displayed intervals record the template that produced them
+    (``attrs["wave_template"]``). When the recording's current template
+    differs (applied in Landmarks without re-running Intervals, or an old
+    session), the windows actually used are drawn and the note says so --
+    the overlay must match the numbers on screen."""
+    used_raw = intervals.attrs.get("wave_template") if intervals is not None else None
+    used = WaveTemplate.from_dict(used_raw) if isinstance(used_raw, dict) else None
+    if used is not None and (current is None or current.to_dict() != used.to_dict()):
+        note = "  ·  windows used by the displayed intervals"
+        if current is not None:
+            note += " (current template differs: re-run Intervals)"
+        return used, note
+    if current is None:
+        return None, ""
+    return current, f"  ·  template: {current.provenance()}"
+
+
+
+def summary_interval_metrics(ivl: "Optional[pd.DataFrame]") -> "dict[str, str]":
+    """Summary metric-card values (median, ms) for the delineated intervals,
+    keyed like the card rows: PR, QRS, uncorrected QT and QTc (QT is always
+    shown next to its rate correction). Missing / empty columns are left out."""
+    out: "dict[str, str]" = {}
+    t = MetricTable(interval_rows(ivl))
+    for col, key in [("PR_ms", "pr"), ("QRS_ms", "qrs"),
+                     ("QT_ms", "qt"), ("QTc_ms", "qtc")]:
+        row = t.row(f"intervals.{col}")
+        if row is not None and row.basis_n:
+            out[key] = f"{row.value:.0f}"
+    return out
+
+
+def _df_val(df: "Optional[pd.DataFrame]", col: str, decimals: int = 3) -> str:
+    """Formatted first value of *df[col]*, '—' when missing / not finite."""
+    try:
+        v = float(df[col].values[0])   # type: ignore[index]
+        return f"{v:.{decimals}f}" if np.isfinite(v) else "—"
+    except Exception:
+        return "—"
+
+
+def summary_report_text(
+    r:               dict,
+    subject:         str = "",
+    filepath:        "Optional[str]" = None,
+    filter_text:     "Optional[str]" = None,
+    window:          "Optional[tuple]" = None,
+    signal_end_s:    "Optional[float]" = None,
+    artifact_report: "Optional[dict]" = None,
+    qtc_formula:     "Optional[str]" = "mitchell",
+    asymmetry:       "Optional[dict]" = None,
+    when:            "Optional[datetime]" = None,
+    signal_crop:     "Optional[dict]" = None,
+) -> str:
+    """The Summary tab's text report for results *r* (pure: testable
+    without the app). Every value carries its unit; VLF / LF / HF are
+    absolute powers (ms²), n.u. only for LFn / HFn. The PROVENANCE block
+    (analysis_provenance_rows -- same rows as the Excel Cover sheet and the
+    Prism notes) states what is needed to reproduce the numbers: analysis
+    window and analysed duration (window end − start, not the absolute
+    time of the last beat), filters, RR bounds and exclusions, artifact
+    correction, QTc formula, interval definitions and wave template, plus
+    the load-time *signal_crop* (analysis.signal_crop_info) when recorded.
+    A missing value is a bare '—' (no unit after it).
+    *asymmetry* = rr_asymmetry_indices() of the successive valid RR pairs
+    ({"porta_pct", "guzik_pct", "n_dec", "n_acc", "n_tot", "n_zero", ...};
+    plot_summary's RR-asymmetry block) or None."""
+    t   = build_metric_table(r, asymmetry=asymmetry)
+    nl  = r.get("hrv_nonlin")
+    ivl = r.get("intervals")
+    W   = 62
+
+    def row(label: str, value: str) -> str:
+        return f"    {label:<22} {value}"
+
+    def nu(key: str) -> str:
+        v = t.finite(f"hrv_freq.{key}")
+        return f"{v * 100.0:.1f}" if v is not None and np.isfinite(v * 100.0) else "—"
+
+    def time_val(key: str) -> str:
+        return t.text(f"hrv_time.{key}", 3)
+
+    def freq_val(key: str) -> str:
+        return t.text(f"hrv_freq.{key}", 3)
+
+    def nl_val(key: str) -> str:
+        return t.text(f"hrv_nonlin.{key}", 3)
+
+    def wrapped(label: str, value: str) -> "list[str]":
+        # Long provenance values (definitions, template) wrapped under
+        # their label rather than running off the text box.
+        body = textwrap.wrap(str(value), 56) or [""]
+        return [row(label, body[0])] + [f"{'':<27}{ln}" for ln in body[1:]]
+
+    def u(v: str, unit: str, note: str = "") -> str:
+        # A missing value is '—', not '— ms' (nor '— %  (note)').
+        if v == "—":
+            return v
+        return f"{v} {unit}{note}" if unit else f"{v}{note}"
+
+    when = when or datetime.now()
+    lines = [
+        "═" * W,
+        "  ECG ANALYSIS  —  Summary Report",
+        f"  Subject  :  {subject}",
+        f"  Date     :  {when:%Y-%m-%d  %H:%M}",
+        f"  File     :  {os.path.basename(filepath or '') or '—'}",
+        "═" * W, "",
+        "  PROVENANCE",
+    ]
+    for label, value in analysis_provenance_rows(
+            r, window=window, signal_end_s=signal_end_s,
+            artifact_report=artifact_report,
+            filter_text=filter_text or "not recorded",
+            qtc_formula=qtc_formula, signal_crop=signal_crop):
+        lines += wrapped(label, value)
+
+    lines += [
+        "", "  HEART RATE",
+        row("Mean (60000/mean NN)", u(t.text("hr.mean", 1), "bpm")),
+        # instantaneous_hr_stats: 2nd / 98th percentile, sample SD
+        row("Min (2nd %ile)", u(t.text("hr.min", 1), "bpm")),
+        row("Max (98th %ile)", u(t.text("hr.max", 1), "bpm")),
+        row("SD (instantaneous)", u(t.text("hr.std", 1), "bpm")),
+        row("Beats (n)", str(t.value("hr.n_beats", "—"))),
+        "",
+        "  HRV — TIME DOMAIN",
+        row("MeanNN", u(time_val('HRV_MeanNN'), "ms")),
+        row("SDNN", u(time_val('HRV_SDNN'), "ms")),
+        row("RMSSD", u(time_val('HRV_RMSSD'), "ms")),
+        row("pNN6", u(time_val('HRV_pNN6'), "%",
+                      f"  (ΔRR > {MouseECG.PNN_THRESHOLD} ms)")),
+        row("pNN20", u(time_val('HRV_pNN20'), "%", "  (human threshold)")),
+        "",
+        "  HRV — FREQUENCY DOMAIN",
+    ]
+    freq_withheld = hrv_freq_withheld_reason(r)
+    if hrv_freq_is_legacy(r):
+        # An older session's nk.hrv_frequency table: arbitrary units,
+        # LFn = LF / TP -- not ms² / Task Force n.u.
+        lines += [
+            row("VLF power", u(freq_val('HRV_VLF'), "a.u.")),
+            row("LF power", u(freq_val('HRV_LF'), "a.u.",
+                              f"  ({u(nu('HRV_LFn'), '%')} of TP)")),
+            row("HF power", u(freq_val('HRV_HF'), "a.u.",
+                              f"  ({u(nu('HRV_HFn'), '%')} of TP)")),
+            row("LF/HF", u(freq_val('HRV_LFHF'), "", "  (ratio)")),
+            *wrapped("Note", LEGACY_SPECTRAL_TEXT),
+        ]
+    elif not freq_withheld:
+        # Absolute band powers (ms²) of the spectrum drawn on the PSD
+        # panel; n.u. = LF or HF / (LF + HF) only.
+        lines += [
+            row("VLF power", u(freq_val('HRV_VLF'), "ms²")),
+            row("LF power", u(freq_val('HRV_LF'), "ms²")),
+            row("HF power", u(freq_val('HRV_HF'), "ms²")),
+            row("LF (n.u.)", u(nu('HRV_LFn'), "%", "  (LF / (LF + HF))")),
+            row("HF (n.u.)", u(nu('HRV_HFn'), "%", "  (HF / (LF + HF))")),
+            row("LF/HF", u(freq_val('HRV_LFHF'), "", "  (ratio)")),
+        ]
+    else:
+        # A withheld spectrum says why rather than a column of "—".
+        lines += wrapped("Withheld", freq_withheld)
+
+    nl_subset = nonlinear_subset_text(getattr(nl, "attrs", {}) if nl is not None else {})
+    lines += [
+        "",
+        "  HRV — NON-LINEAR",
+        row("SD1", u(nl_val('HRV_SD1'), "ms")),
+        row("SD2", u(nl_val('HRV_SD2'), "ms")),
+        row("SampEn", u(nl_val('HRV_SampEn'), "", "  (dimensionless)")),
+        row("ApEn", u(nl_val('HRV_ApEn'), "", "  (dimensionless)")),
+        row("DFA α1", u(nl_val('HRV_DFA_alpha1'), "", "  (dimensionless)")),
+        row("DFA α2", u(nl_val('HRV_DFA_alpha2'), "", "  (dimensionless)")),
+    ]
+    if nl_subset:
+        lines += wrapped("Note", nl_subset)
+
+    if ivl is not None and not ivl.empty and "QT_ms" in ivl.columns:
+        # Definitions, QT variability and template are in PROVENANCE.
+        lines += ["", "  ECG INTERVALS  (median ± SD across beats)"]
+        qtc_short = QTC_FORMULA_LABELS[normalize_qtc_formula(qtc_formula or "mitchell")]
+        for col, label in [("PR_ms", "PR"), ("QRS_ms", "QRS"), ("QT_ms", "QT"),
+                           ("QTc_ms", f"QTc ({qtc_short.split(' ')[0]})")]:
+            med = t.row(f"intervals.{col}")
+            if med is not None and med.basis_n:
+                lines.append(row(label, f"{med.value:.1f} ± "
+                                        f"{t.value(f'intervals.{col}.sd'):.1f} ms"))
+        if intervals_use_legacy_definitions(ivl):
+            # The values above are not the standard PR / QRS / QT: say so
+            # here, not only in PROVENANCE.
+            lines += wrapped("Note", "legacy definitions (older version: PR to "
+                                     "Q nadir, QRS Q→S nadir, QT from R) — re-run "
+                                     "Intervals for the standard ones")
+
+    if t.has("asymmetry.n_tot"):
+        n_tot = t.value("asymmetry.n_tot")
+        lines += [
+            "", "  RR ASYMMETRY  (successive valid ΔRR)",
+            # Literature conventions -- rr_asymmetry_indices.
+            *wrapped("Porta index (PI)", u(t.text("asymmetry.porta_pct", 1), "%",
+                                           "  (Porta 2008: points below the "
+                                           "identity line, ΔRR < 0, / off-line "
+                                           "points; ΔRR = 0 excluded; "
+                                           "symmetry → 50 %)")),
+            *wrapped("Guzik index (GI)", u(t.text("asymmetry.guzik_pct", 1), "%",
+                                           "  (Guzik 2006: Σ distance of points "
+                                           "above the identity line, ΔRR > 0, / "
+                                           "Σ distance of off-line points; "
+                                           "symmetry → 50 %)")),
+            row("Decelerations", f"{t.value('asymmetry.n_dec')} / {n_tot}  (ΔRR > 0)"),
+            row("Accelerations", f"{t.value('asymmetry.n_acc')} / {n_tot}  (ΔRR < 0)"),
+        ]
+        if t.has("asymmetry.n_zero"):
+            lines.append(row("No change", f"{t.value('asymmetry.n_zero')} / "
+                                          f"{n_tot}  (ΔRR = 0, not in PI / GI)"))
+    lines += ["", "═" * W]
+    return "\n".join(lines)
 
 
 class PlotController:
@@ -73,15 +301,19 @@ class PlotController:
     # tachogram) fall back to recomputing the mask from the bounds.
     @staticmethod
     def _rr_valid(r: dict) -> np.ndarray:
-        rr    = np.asarray(r.get("rr_ms", np.array([])), dtype=float)
-        valid = r.get("rr_valid")
-        if valid is not None:
-            valid = np.asarray(valid, dtype=bool)
-            if len(valid) == len(rr):
-                return valid
-        hr = r.get("hr") or {}
-        return rr_valid_mask(rr, float(hr.get("rr_min_ms", MouseECG.RR_MIN_MS)),
-                             float(hr.get("rr_max_ms", MouseECG.RR_MAX_MS)))
+        return results_rr_valid(r)
+
+    def _report_window(self) -> "tuple":
+        """(t_start, t_end) the current results were computed on (0 = signal
+        start / end) -- the window entries can be edited afterwards."""
+        a = self.app.analysis
+        win = getattr(a, "analysed_window", None)
+        return tuple(win) if win is not None else (a.t_start, a.t_end)
+
+    def _signal_end_s(self) -> "Optional[float]":
+        """Time of the last sample of the loaded signal (s), None without one."""
+        t = self.app.signal.time
+        return float(t[-1]) if t is not None and len(t) else None
 
     @classmethod
     def _rr_exclusion(cls, r: dict) -> "tuple[int, float]":
@@ -154,7 +386,7 @@ class PlotController:
             # ECG trace
             ax.plot(time[mask_t], sig_flt[mask_t],
                     color=PLOT.get("signal", CYAN), lw=0.9, zorder=2,
-                    label="ECG filtré")
+                    label="Filtered ECG")
 
             # Event span highlight
             if ev_t_start is not None and ev_t_end is not None:
@@ -187,7 +419,7 @@ class PlotController:
             if mask_ok.any():
                 ax.scatter(rp_ok[mask_ok] / fs, sig_flt[rp_ok[mask_ok]],
                            color=PLOT.get("rpeak_ok","#00E676"), s=55, zorder=5,
-                           marker="o", label="Acceptés")
+                           marker="o", label="Accepted")
             if mask_added.any():
                 ax.scatter(rp_added[mask_added] / fs, sig_flt[rp_added[mask_added]],
                            color=CYAN, s=140, zorder=7,
@@ -1034,7 +1266,7 @@ class PlotController:
         hr_all = ts["HR_bpm"].to_numpy(dtype=float)
         valid  = ts["valid"].to_numpy(dtype=bool)
         idx_v  = np.flatnonzero(valid)
-        t_v, rr_v, hr_v = t_all[idx_v], rr_all[idx_v], hr_all[idx_v]
+        t_v, rr_v = t_all[idx_v], rr_all[idx_v]
         excl   = ~valid & np.isfinite(rr_all)
         n_excl = int((~valid).sum())
 
@@ -1075,7 +1307,7 @@ class PlotController:
         t_ds,    rr_ds = downsample_xy_for_display(t_all, np.where(valid, rr_all, np.nan))
         t_ds_hr, hr_ds = downsample_xy_for_display(t_all, np.where(valid, hr_all, np.nan))
         rr_mean = float(rr_v.mean())
-        hr_mean = float(hr_v.mean())
+        hr_mean = mean_hr_bpm(rr_v)          # 60000 / mean NN (app-wide)
         rr_sd_v = float(rr_v.std())
 
         # Excluded intervals: hollow red markers at their true value, except
@@ -1260,7 +1492,7 @@ class PlotController:
                 self.app.ui.nav_pos = max(0.0, min(t_nav - win / 2, sig_dur - win))
             self.app._sync_nav_pos_entry()
             try:
-                self.app.tabs.set("📈 Detection")
+                self.app.tabs.set(TAB_DETECTION)
             except Exception as e:
                 log.debug("tabs.set Detection failed: %s", e)
             self.app._draw_detail()
@@ -1423,27 +1655,33 @@ class PlotController:
             return
 
         lines: list[str] = []
+        # An older session's nk.hrv_frequency table: arbitrary-unit powers,
+        # LFn = LF / TP. Said first, and labelled as such below.
+        legacy = hrv_freq_is_legacy(r)
+        if legacy:
+            lines += ["  " + ln for ln in textwrap.wrap("⚠ " + LEGACY_SPECTRAL_TEXT, 60)] + [""]
+        pw_unit = "a.u." if legacy else "ms²"
         for col in fd_df.columns:
             try:
                 v    = float(fd_df[col].values[0])
                 name = col.replace("HRV_", "")
                 if not np.isfinite(v):
                     continue
-                if name in ("LFn", "HFn"):
-                    # The actual normalized-units fractions (LF/(LF+HF) etc.) --
-                    # these are the real "% of power" figures.
-                    lines.append(f"  {name:<26} {v * 100:>10.1f} %")
+                if name in ("LFn", "HFn") and legacy:
+                    lines.append(f"  {name[:2] + ' (% of TP)':<26} {v * 100:>10.1f} %")
+                elif name in ("LFn", "HFn"):
+                    # Task Force normalised units: LF or HF / (LF + HF).
+                    lines.append(f"  {name[:2] + ' (n.u.)':<26} {v * 100:>10.1f} %")
                 elif name in ("LF", "HF", "VLF", "ULF", "VHF", "TP"):
-                    # Raw band power, NOT a fraction of anything. Previously
-                    # LF/HF/VLF were multiplied by 100 and labelled "%" here --
-                    # that showed a meaningless number (raw power x100) right
-                    # next to LFn/HFn, which are the real normalized percentages
-                    # and used to be shown unscaled as a bare decimal instead.
-                    lines.append(f"  {name + ' power':<26} {v:>10.4f}")
+                    # Absolute band power (ms²) of the spectrum on the PSD
+                    # panel -- not a fraction of anything.
+                    lines.append(f"  {name + f' power ({pw_unit})':<26} {v:>10.3f}")
                 elif name == "LFHF":
                     lines.append(f"  {'LF/HF ratio':<26} {v:>10.3f}")
-                elif name in ("LF_peak", "HF_peak", "VLF_peak"):
-                    lines.append(f"  {name + ' (Hz)':<26} {v:>10.4f}")
+                elif name in ("LFpeak", "HFpeak"):
+                    lines.append(f"  {name[:2] + ' peak (Hz)':<26} {v:>10.3f}")
+                elif name == "LnHF":
+                    lines.append(f"  {f'ln HF (ln {pw_unit})':<26} {v:>10.3f}")
                 else:
                     lines.append(f"  {name:<26} {v:>10.4f}")
             except Exception as exc:
@@ -1462,33 +1700,40 @@ class PlotController:
         self.app._set_textbox(self.app.txt_fd, "\n".join(lines) if lines else "  (not computed)",
                           tsv=_fd_tsv if len(_fd_tsv_rows) > 1 else None)
 
-    def plot_psd(self, r: dict) -> None:
-        """Welch PSD with mouse-specific VLF / LF / HF band shading.
+    def psd_for_display(self, r: dict) -> "dict":
+        """The spectrum the PSD panel draws, with the band metrics read off it.
 
-        RR intervals are resampled to a uniform time grid using a cubic spline
-        before computing the Welch periodogram.  Cubic (vs linear) resampling
-        preserves spectral shape and avoids the artificial high-frequency power
-        that linear interpolation introduces.
+        Normally the spectrum analyse_hrv_freq() stored in
+        ``hrv_freq.attrs`` -- the very curve its VLF/LF/HF/LF-HF numbers were
+        integrated from, so plot and numbers cannot disagree. Before the
+        frequency HRV was run (or for a result from an older version that
+        did not store it) the same ``hrv_spectrum`` is computed here from
+        the valid RR intervals, and its band metrics are shown instead.
 
-        Mouse-specific design choices
-        ─────────────────────────────
-        • Interpolation rate: 20 Hz  (Nyquist = 10 Hz >> HF ceiling of 5 Hz)
-        • nperseg: aims for ≥ 0.02 Hz resolution — enough to separate
-          VLF (0–0.4), LF (0.4–1.5) and HF (1.5–5.0) bands cleanly.
-          Formula: nperseg = max(256, min(fs_interp / 0.02, N // 2))
-          e.g. 20 / 0.02 = 1000, so for long recordings nperseg = 1000.
-        • noverlap: 75 % of nperseg (Welch variance reduction)
-        • Window: Hann (default scipy) — good sidelobe suppression
-        • Only valid RR intervals (inside the physiological bounds) are
-          splined, at their TRUE times (each interval's end) -- a
-          np.cumsum() of the kept intervals would shift every sample after
-          an excluded interval (e.g. a pause) earlier by its duration.
-        • The spectrum is WITHHELD (panel shows why) under the same rule as
-          analyse_hrv_freq (core.analysis.spectral_withheld_reason): a run
-          of excluded intervals longer than MouseECG.SPECTRAL_MAX_GAP_S, or
-          excluded time above MouseECG.SPECTRAL_MAX_EXCLUDED_FRAC of the
-          span -- the spline would otherwise invent RR values across it.
-        """
+        Returns {"withheld": str|None, "freqs", "psd", "metrics", "bands",
+        "n_points", "df_hz", "stored": bool, "stale_numbers": bool}."""
+        fd = r.get("hrv_freq")
+        attrs = getattr(fd, "attrs", {}) if fd is not None else {}
+        bands = attrs.get("bands") or [list(MouseECG.VLF), list(MouseECG.LF),
+                                        list(MouseECG.HF)]
+        bands = [tuple(float(x) for x in b) for b in bands]
+        out: dict = {"withheld": None, "freqs": None, "psd": None, "metrics": {},
+                     "bands": bands, "n_points": 0, "df_hz": float("nan"),
+                     "stored": False, "stale_numbers": False}
+        withheld = hrv_freq_withheld_reason(r)
+        if withheld:
+            out["withheld"] = "Spectrum withheld\n" + withheld.replace(" — ", "\n")
+            return out
+        if attrs.get("psd_freqs") is not None and attrs.get("psd_power") is not None:
+            freqs = np.asarray(attrs["psd_freqs"], dtype=float)
+            psd   = np.asarray(attrs["psd_power"], dtype=float)
+            out.update(freqs=freqs, psd=psd, stored=True,
+                       n_points=int(attrs.get("psd_n_points", 0) or 0),
+                       df_hz=float(freqs[1] - freqs[0]) if len(freqs) > 1 else float("nan"))
+            out["metrics"] = {c: float(fd[c].values[0]) for c in fd.columns
+                              if c.startswith("HRV_")}
+            return out
+        # Not computed yet (or an older result): same estimator, on the fly.
         rdf = r.get("rr_df")
         if rdf is not None and not rdf.empty and {"Time_s", "RR_ms"} <= set(rdf.columns):
             # analyse_core's rr_df: valid intervals with their end times
@@ -1499,20 +1744,49 @@ class PlotController:
             valid  = self._rr_valid(r)
             ts     = (np.cumsum(rr_all) / 1000.0)[valid]   # cumsum over ALL = true times
             rr_ms  = rr_all[valid]
-        MIN_BEATS = 60
-        withheld_msg = None
-        if len(rr_ms) < MIN_BEATS:
-            log.warning("_plot_psd: too few valid RR intervals (%d, need ≥ %d)", len(rr_ms), MIN_BEATS)
-            withheld_msg = (f"Spectral HRV requires ≥ {MIN_BEATS} valid RR intervals\n"
-                            f"(recording has {len(rr_ms)})")
-        elif r.get("rr_ms") is not None:
+        if len(rr_ms) < MIN_BEATS_SPECTRAL:
+            log.warning("_plot_psd: too few valid RR intervals (%d, need ≥ %d)",
+                        len(rr_ms), MIN_BEATS_SPECTRAL)
+            out["withheld"] = (f"Spectral HRV requires ≥ {MIN_BEATS_SPECTRAL} valid RR "
+                               f"intervals\n(recording has {len(rr_ms)})")
+            return out
+        if r.get("rr_ms") is not None:
             reason = spectral_withheld_reason(np.asarray(r["rr_ms"], dtype=float),
                                               self._rr_valid(r))
             if reason:
                 log.warning("_plot_psd: spectrum withheld — %s", reason)
-                withheld_msg = "Spectrum withheld\n" + reason.replace(" — ", "\n")
-        if withheld_msg:
-            def draw_warn(fig, _msg=withheld_msg):
+                out["withheld"] = "Spectrum withheld\n" + reason.replace(" — ", "\n")
+                return out
+        spec = hrv_spectrum(rr_ms, ts)
+        if spec is None:
+            out["withheld"] = "RR series too short for a spectrum"
+            return out
+        out.update(freqs=spec["freqs"], psd=spec["psd"], n_points=spec["n_points"],
+                   df_hz=spec["df_hz"],
+                   metrics=spectral_band_metrics(spec, *bands),
+                   stale_numbers=fd is not None and not fd.empty)
+        return out
+
+    def plot_psd(self, r: dict) -> None:
+        """Welch PSD with mouse-specific VLF / LF / HF band shading.
+
+        Draws ``psd_for_display``: the spectrum analyse_hrv_freq()
+        integrated into the VLF/LF/HF powers and LF/HF numbers shown in the
+        tables, KPIs and exports (core ``hrv_spectrum``: valid RR intervals
+        cubic-spline resampled at 20 Hz on their true times, Welch with a
+        Hann window, 75 % overlap, ≈0.02 Hz resolution). The shaded areas
+        are exactly the bins integrated into each band (``band_mask``) and
+        the legend values are those band powers (ms²) and n.u.
+
+        The spectrum is WITHHELD (panel shows why) under the same rule as
+        analyse_hrv_freq (core.analysis.spectral_withheld_reason): a run
+        of excluded intervals longer than MouseECG.SPECTRAL_MAX_GAP_S, or
+        excluded time above MouseECG.SPECTRAL_MAX_EXCLUDED_FRAC of the
+        span -- the spline would otherwise invent RR values across it.
+        """
+        disp = self.psd_for_display(r)
+        if disp["withheld"]:
+            def draw_warn(fig, _msg=disp["withheld"]):
                 ax = fig.add_subplot(111)
                 style_axes(ax)
                 ax.text(0.5, 0.5, _msg,
@@ -1522,94 +1796,42 @@ class PlotController:
             self.app._slots["psd"].update(draw_warn)
             return
         try:
-            # Build a uniformly sampled RR series via cubic spline
-            dt    = 1.0 / MouseECG.PSD_INTERP_FS
-            t_uni = np.arange(ts[0], ts[-1], dt)
-            if len(t_uni) < 32:
-                log.warning("_plot_psd: interpolated series too short (%d pts)", len(t_uni))
-                return
+            freqs, psd = disp["freqs"], disp["psd"]
+            met = disp["metrics"]
+            (vlf, lf, hf) = disp["bands"]
 
-            cs        = CubicSpline(ts, rr_ms)
-            rr_interp = cs(t_uni)
-            N         = len(rr_interp)
+            def _num(key: str) -> float:
+                v = met.get(key, float("nan"))
+                return float(v) if v is not None else float("nan")
 
-            # nperseg chosen for ≥ 0.02 Hz resolution (resolves LF band floor at 0.4 Hz cleanly)
-            # Minimum 256, maximum N//2
-            target_res_hz = 0.020
-            nperseg = int(np.clip(
-                MouseECG.PSD_INTERP_FS / target_res_hz,
-                256, N // 2,
-            ))
-            noverlap = int(nperseg * 0.75)
+            # Respiration-rate estimate: the HF-band peak of this spectrum
+            # (HRV_HFpeak), breaths/min = Hz * 60 -- HF is labelled
+            # "respiratory" (respiratory sinus arrhythmia).
+            hf_peak_hz = _num("HRV_HFpeak")
+            hf_peak_hz = hf_peak_hz if np.isfinite(hf_peak_hz) else None
+            hf_mask = band_mask(freqs, hf)
 
-            freqs, psd = _scipy_welch(
-                rr_interp - rr_interp.mean(),
-                fs=MouseECG.PSD_INTERP_FS,
-                nperseg=nperseg,
-                noverlap=noverlap,
-                window="hann",
-                scaling="density",
-            )
+            def _pw(key: str) -> str:
+                v = _num(key)
+                return f"{v:.2f} ms²" if np.isfinite(v) else "— ms²"
 
-            # Respiration-rate estimate: peak frequency within the HF band,
-            # converted breaths/min = Hz * 60. HF is labelled "respiratory"
-            # (respiratory sinus arrhythmia) but until now that was just a
-            # caption -- nk.hrv_frequency() doesn't return a peak-frequency
-            # column (confirmed empirically: HRV_HF/HRV_HFn/HRV_LFHF/... but
-            # no HRV_HF_peak), so this reads the peak directly off the PSD
-            # already computed above, the same array the HF band is shaded
-            # from, rather than adding a second spectral estimate.
-            hf_mask = (freqs >= MouseECG.HF[0]) & (freqs <= MouseECG.HF[1])
-            if hf_mask.any() and psd[hf_mask].max() > 0:
-                hf_peak_hz  = float(freqs[hf_mask][np.argmax(psd[hf_mask])])
-                resp_bpm    = hf_peak_hz * 60.0
-                hf_legend   = (f"HF   {MouseECG.HF[0]}–{MouseECG.HF[1]} Hz  "
-                               f"(resp. ≈{resp_bpm:.0f}/min)")
-            else:
-                hf_peak_hz  = None
-                hf_legend   = f"HF   {MouseECG.HF[0]}–{MouseECG.HF[1]} Hz  (respiratory)"
+            def _nu(key: str) -> str:
+                v = _num(key)
+                return f", {100.0 * v:.1f} n.u." if np.isfinite(v) else ""
 
-            # Mouse-specific band definitions (Thireau 2008)
+            resp = (f", resp. ≈{hf_peak_hz * 60:.0f}/min" if hf_peak_hz is not None
+                    else ", respiratory")
             bands = [
-                (MouseECG.VLF[0], MouseECG.VLF[1], "VLF",
-                 f"VLF  {MouseECG.VLF[0]}–{MouseECG.VLF[1]} Hz", BLUE_DARK),
-                (MouseECG.LF[0],  MouseECG.LF[1],  "LF",
-                 f"LF   {MouseECG.LF[0]}–{MouseECG.LF[1]} Hz  (baroreflex)", PURPLE),
-                (MouseECG.HF[0],  MouseECG.HF[1],  "HF", hf_legend, GREEN_DARK),
+                (vlf, f"VLF  {vlf[0]:g}–{vlf[1]:g} Hz  ({_pw('HRV_VLF')})", BLUE_DARK),
+                (lf,  f"LF   {lf[0]:g}–{lf[1]:g} Hz  ({_pw('HRV_LF')}{_nu('HRV_LFn')}, "
+                      f"baroreflex)", PURPLE),
+                (hf,  f"HF   {hf[0]:g}–{hf[1]:g} Hz  ({_pw('HRV_HF')}{_nu('HRV_HFn')}{resp})",
+                 GREEN_DARK),
             ]
-
-            # Compute per-band power for annotation
-            def _band_power(lo: float, hi: float) -> float:
-                m = (freqs >= lo) & (freqs <= hi)
-                return float(_trapz(psd[m], freqs[m])) if m.any() else 0.0
-
-            band_powers = {name: _band_power(lo, hi) for lo, hi, name, _, _ in bands}
-            total_power = sum(band_powers.values()) + 1e-12
-
-            # Percentages shown in the legend: prefer the canonical values already
-            # computed by analyse_hrv_freq() (via nk.hrv_frequency, the same source
-            # the KPI bar/export/radar read) over recomputing our own from this
-            # plot's independent Welch pipeline. The two pipelines use different
-            # interpolation/windowing and can give visibly different numbers for
-            # the same recording (e.g. 71.5% vs 72.9% LF in testing) -- showing
-            # two different "LF%" figures in the same UI is confusing regardless
-            # of which is more "correct". Only fall back to this plot's own
-            # band_powers if hrv_freq wasn't computed.
-            fd_df = r.get("hrv_freq")
-            band_pct: "dict[str, float]" = {}
-            if fd_df is not None and not fd_df.empty and "HRV_TP" in fd_df.columns:
-                try:
-                    tp = float(fd_df["HRV_TP"].values[0])
-                    if tp > 1e-12:
-                        for key in ("VLF", "LF", "HF"):
-                            col = f"HRV_{key}"
-                            if col in fd_df.columns:
-                                band_pct[key] = float(fd_df[col].values[0]) / tp * 100
-                except Exception as exc:
-                    log.debug("_plot_psd: could not read hrv_freq percentages: %s", exc)
-
-            # Frequency resolution actually achieved
-            df = freqs[1] - freqs[0] if len(freqs) > 1 else float("nan")
+            lfhf = _num("HRV_LFHF")
+            df = disp["df_hz"]
+            n_pts = disp["n_points"]
+            stale = disp["stale_numbers"]
 
             # Band colours (BLUE_DARK/PURPLE/GREEN_DARK) are lightened for
             # dark mode by theme.py's _adapt_for_mode(); at a fixed alpha
@@ -1622,29 +1844,28 @@ class PlotController:
                 ax = fig.add_subplot(111)
                 style_axes(ax)
                 ax.semilogy(freqs, psd, color=PLOT["muted"], lw=1.0, zorder=3)
-                for lo, hi, name, legend_label, color in bands:
-                    m = (freqs >= lo) & (freqs <= hi)
-                    pct = band_pct.get(name, band_powers[name] / total_power * 100)
+                for band, legend_label, color in bands:
+                    m = band_mask(freqs, band)
                     ax.fill_between(freqs, psd, where=m, alpha=band_alpha, color=color,
-                                    label=f"{legend_label}  ({pct:.1f}%)", zorder=2)
+                                    label=legend_label, zorder=2)
                     # Vertical band boundary lines
-                    for boundary in (lo, hi):
+                    for boundary in band:
                         if 0 < boundary < MouseECG.PSD_XLIM:
                             ax.axvline(boundary, color=color, lw=0.8, ls=":",
                                        alpha=0.6, zorder=1)
-                if hf_peak_hz is not None:
+                if hf_peak_hz is not None and hf_mask.any():
                     ax.plot(hf_peak_hz, float(psd[hf_mask].max()),
                             marker="v", ms=7, color=GREEN_DARK, zorder=5)
                 ax.set_xlabel("Frequency (Hz)")
                 ax.set_ylabel("PSD (ms²/Hz)")
                 ax.set_xlim(0, MouseECG.PSD_XLIM)
                 ax.legend(framealpha=0, loc="upper right", fontsize=9)
-                resp_note = (f"  ·  resp. peak {hf_peak_hz:.2f} Hz ≈ "
-                             f"{hf_peak_hz * 60:.0f} breaths/min"
-                             if hf_peak_hz is not None else "")
+                lfhf_txt = f"  ·  LF/HF {lfhf:.2f}" if np.isfinite(lfhf) else ""
+                stale_txt = ("  ·  older result: re-run Frequency HRV for matching numbers"
+                             if stale else "")
                 ax.set_title(
                     f"Power spectral density  (Welch · Δf={df:.3f} Hz · "
-                    f"n={N} pts){resp_note}",
+                    f"n={n_pts} pts){lfhf_txt}{stale_txt}",
                     loc="left",
                 )
 
@@ -1672,16 +1893,20 @@ class PlotController:
         nl   = r["hrv_nonlin"]
         sd1  = self.app._safe_df_val(nl, "HRV_SD1", 1)
         sd2  = self.app._safe_df_val(nl, "HRV_SD2", 1)
-        # SD1/SD2 (and the rest of hrv_nonlin) may have been computed from
-        # only the first max_beats of a long recording -- see
-        # analyse_hrv_nonlinear's attrs (core/analysis.py). The scatter
-        # below always shows every beat, so disclose the mismatch instead
-        # of letting the numbers silently imply a different beat count than
-        # the cloud they're printed next to.
+        # SD1/SD2 use every valid pair of the window (poincare_sd1_sd2), the
+        # same cloud as the scatter below. Only a result from an older
+        # version (everything on the first 1000 beats) is flagged; the MSE
+        # curve may come from the capped entropy block (noted on its title).
         trunc_note = ""
         attrs = getattr(nl, "attrs", {})
         if attrs.get("truncated"):
-            trunc_note = f"  ·  SD1/SD2 from first {attrs['n_beats_used']:,} beats"
+            trunc_note = (f"  ·  SD1/SD2 from first {attrs['n_beats_used']:,} beats "
+                          f"(older analysis)")
+        mse_note = ""
+        if attrs.get("entropy_capped"):
+            mse_note = (f"  ·  {int(attrs.get('entropy_n_rr', 0)):,} RR, "
+                        f"{float(attrs.get('entropy_t_start_s', 0.0)):.0f}–"
+                        f"{float(attrs.get('entropy_t_end_s', 0.0)):.0f} s")
 
         # Ellipse geometry: centred on the plotted series' own mean RR;
         # SD1 = semi-minor axis (perpendicular to the identity line --
@@ -1752,7 +1977,7 @@ class PlotController:
                 ax_mse.plot(mse_scales, mse_values, color=PURPLE, lw=1.3,
                            marker="o", ms=3, zorder=2)
                 pt_txt = f"  ·  Σ={mse_point:.2f}" if mse_point is not None else ""
-                ax_mse.set_title(f"Multiscale entropy{pt_txt}", loc="left", fontsize=8)
+                ax_mse.set_title(f"Multiscale entropy{pt_txt}{mse_note}", loc="left", fontsize=8)
                 ax_mse.set_xlabel("Scale factor", fontsize=8)
                 ax_mse.set_ylabel("SampEn", fontsize=8)
                 ax_mse.set_xticks(mse_scales)
@@ -1810,6 +2035,7 @@ class PlotController:
             self.app._slots["intervals"].update(draw_unavailable)
             return
 
+        legacy_ivl = intervals_use_legacy_definitions(ivl)
         palette  = [BLUE_DARK, GREEN_DARK, PINK, ORANGE_DARK]
         col_data = [(col, ivl[col].dropna().values, color)
                     for col, color in zip(cols, palette)]
@@ -1830,8 +2056,11 @@ class PlotController:
         # rodent RR intervals).
         have_qtrr = "QTc_ms" in ivl.columns and ivl["QTc_ms"].notna().sum() > 3
         if have_qtrr:
-            _qtrr = ivl[["RR_ms", "QTc_ms"]].dropna()
-            rr_qtrr  = _qtrr["RR_ms"].values.astype(float)
+            # The RR each QTc was corrected with (RR_prev_ms for a re-paired
+            # legacy frame, whose RR_ms is the following RR).
+            _rr_col = qtc_rr_column(ivl)
+            _qtrr = ivl[[_rr_col, "QTc_ms"]].dropna()
+            rr_qtrr  = _qtrr[_rr_col].values.astype(float)
             qtc_qtrr = _qtrr["QTc_ms"].values.astype(float)
             try:
                 from scipy.stats import linregress
@@ -1852,13 +2081,28 @@ class PlotController:
                 fig.set_layout_engine(None)
             except Exception as exc:
                 log.debug("draw_intervals: set_layout_engine(None) failed: %s", exc)
+            # Definitions line wrapped to the figure width (it was clipped on
+            # figures narrower than ~7.6 in); the axes make room for it.
+            defs_txt = wrap_fig_text(
+                "Legacy interval definitions (older session) — re-run Intervals"
+                if legacy_ivl else INTERVAL_DEFINITIONS_TEXT,
+                0.96 * fig.get_figwidth(), 6.5)
+            n_def_lines = defs_txt.count("\n") + 1
             gs = GridSpec(1, n_cols, figure=fig,
-                          left=0.10, right=0.97, top=0.88, bottom=0.08,
+                          left=0.10, right=0.97, top=0.88,
+                          bottom=min(0.30, 0.08 + (n_def_lines - 1) * 0.11
+                                     / max(fig.get_figheight(), 1.0)),
                           wspace=0.40)
             title_color = GREEN if pct_ivl >= 90 else ORANGE_DARK if pct_ivl >= 50 else RED
             fig.suptitle(
                 f"{n_ok_ivl}/{n_total_ivl} beats measured ({pct_ivl:.0f}%)",
                 color=title_color, fontsize=9, y=0.985)
+            # Which landmarks the numbers come from -- old sessions keep
+            # their legacy (Q-nadir / from-R) values until re-run.
+            fig.text(0.5, 0.005, defs_txt,
+                     ha="center", va="bottom", fontsize=6.5, linespacing=1.1,
+                     multialignment="center",
+                     color=ORANGE_DARK if legacy_ivl else PLOT["muted"])
             for ci, (col, data, color) in enumerate(col_data):
                 ax = fig.add_subplot(gs[0, ci])
                 style_axes(ax)
@@ -1904,14 +2148,15 @@ class PlotController:
                 label = col.replace("_ms", "")
                 ax.set_title(label, color=color, fontsize=10, pad=4)
                 if col == "QT_ms" and len(finite) > 3:
-                    # QT dispersion (max-min QT across beats) used to be a
-                    # single buried line in the Summary tab's text report
-                    # with a code comment noting its dedicated plot had been
-                    # dropped -- this is the same value, restored to the
-                    # panel that already shows the QT distribution it's
-                    # derived from.
-                    qt_disp = float(np.nanmax(finite) - np.nanmin(finite))
-                    ax.text(0.5, 0.03, f"dispersion {qt_disp:.1f} ms",
+                    # Beat-to-beat QT variability on this single lead. It
+                    # used to be shown as "dispersion" (max - min QT), but
+                    # classical QT dispersion is an inter-LEAD measure of
+                    # one beat; the range here is dominated by delineation
+                    # outliers, so the robust IQR is shown first.
+                    qtv = qt_beat_variability(finite)
+                    ax.text(0.5, 0.03,
+                            f"beat-to-beat IQR {qtv['iqr_ms']:.1f}  ·  "
+                            f"range {qtv['range_ms']:.1f} ms",
                             ha="center", va="bottom", color=PLOT["muted"],
                             fontsize=7, transform=ax.transAxes)
                 ax.set_ylabel("ms", fontsize=8)
@@ -1960,16 +2205,10 @@ class PlotController:
                          transform=axr.transAxes,
                          bbox=dict(boxstyle="round,pad=0.2",
                                    fc=PLOT["axes"], ec="none", alpha=0.8))
-                axr.set_xlabel("RR (ms)", fontsize=8)
+                axr.set_xlabel("Preceding RR (ms)", fontsize=8)
                 axr.set_ylabel("QTc (ms)", fontsize=8)
 
         self.app._slots["intervals"].update(draw_intervals)
-        # Only describe the interval measurement columns, not wave-position columns
-        ivl_stats = ivl[["RR_ms", "PR_ms", "QRS_ms", "QT_ms", "QTc_ms"]].copy()
-        ivl_stats = ivl_stats[[c for c in ivl_stats.columns if c in ivl.columns]]
-        _ivl_desc = ivl_stats.describe().round(2)
-        # self.app._set_textbox(self.app.txt_ivl, _ivl_desc.to_string(),  # Attribut supprimé
-        #                   tsv=self.app._describe_to_tsv(_ivl_desc))
 
     def plot_beat_template(self, r: dict) -> None:
         """Average beat template, ±1 SD band, and amplitude / morphology distributions.
@@ -1994,7 +2233,8 @@ class PlotController:
 
         stride = max(1, n_beats // 60)  # show at most ~60 individual ghost traces
 
-        wt = self.app.analysis.wave_template
+        wt, src_note = beat_template_overlay(self.app.analysis.wave_template,
+                                             r.get("intervals"))
 
         def draw_template(fig):
             ax = fig.add_subplot(111)
@@ -2008,7 +2248,7 @@ class PlotController:
             ax.plot(beat_time, mean_beat, color=BLUE, lw=2.0, label="Mean beat")
             ax.axvline(0, color=RED, lw=1.2, ls="--", alpha=0.8, label="R peak")
 
-            # ── Overlay wave template landmarks if confirmed ───────────────
+            # ── Overlay the wave template windows (beat_template_overlay) ──
             if wt is not None:
                 for wkey, (center_ms, half_ms) in wt.landmarks.items():
                     col  = WaveTemplateEditor.WAVE_COLORS.get(wkey, GRAY)
@@ -2022,9 +2262,6 @@ class PlotController:
                             transform=ax.get_xaxis_transform(),
                             ha="center", va="bottom",
                             color=col, fontsize=9, fontweight="bold", zorder=7)
-                src_note = f"  ·  template: {wt.source}" if wt is not None else ""
-            else:
-                src_note = ""
 
             ax.set_xlabel("Time relative to R peak (ms)")
             ax.set_ylabel("Amplitude (norm.)")
@@ -2069,17 +2306,26 @@ class PlotController:
         """Populate the Summary tab: signal-quality panel, kept plots, metrics
         table, and text report.
         """
-        hr  = r["hr"]
-        td  = r["hrv_time"]
-        fd  = r["hrv_freq"]
-        nl  = r["hrv_nonlin"]
         ivl = r["intervals"]
-        val = self.app._safe_df_val   # shorthand
+        rr_ms = r.get("rr_ms", np.array([]))
 
-        # Default values for metrics computed later (referenced in report text)
-        porta_pct: float = float("nan")
-        guzik_pct: float = float("nan")
-        n_dec: int = 0; n_acc: int = 0; n_tot: int = 0
+        # RR-asymmetry indices (shown in the table, the plot and the report).
+        # Literature conventions (rr_asymmetry_indices, RR_ASYMMETRY_TEXT):
+        # Porta PI = accelerations / off-line points, Guzik GI = deceleration
+        # share of the distances to the identity line; symmetry → 50 %.
+        # Successive VALID differences only: a ΔRR across an excluded
+        # interval (e.g. into/out of a pause) is dropped, not counted.
+        rr_a_v, rr_b_v = successive_valid_pairs(
+            np.asarray(rr_ms, dtype=float), self._rr_valid(r))
+        have_asym = len(rr_a_v) >= 8
+        asym_ix: "Optional[dict]" = (rr_asymmetry_indices(rr_a_v, rr_b_v)
+                                     if have_asym else None)
+
+        t = build_metric_table(
+            r, sig_quality=self.app.detection.sig_quality,
+            artifact_report=self.app.analysis.artifact_report,
+            window=self._report_window(), signal_end_s=self._signal_end_s(),
+            asymmetry=asym_ix)
 
         # ── Metrics table (values only -- no reference-range judgment) ─────────
         def _metric(key: str, text: str) -> None:
@@ -2087,30 +2333,21 @@ class PlotController:
             if lbl is not None:
                 lbl.configure(text=text)
 
-        rdf = r.get("rr_df")
-        if rdf is not None and not rdf.empty:
-            _metric("hr_mean", f"{rdf['HR_bpm'].mean():.0f}")
+        if t.has("hr.mean_rr"):
+            # 60000 / mean NN -- the app-wide mean-HR definition (hr["mean"])
+            _metric("hr_mean", f"{t.value('hr.mean_rr'):.0f}")
             _metric("hr_range",
-                    f"{rdf['HR_bpm'].quantile(0.02):.0f}–{rdf['HR_bpm'].quantile(0.98):.0f}")
+                    f"{t.value('hr.range_lo'):.0f}–{t.value('hr.range_hi'):.0f}")
 
-        _metric("sdnn",  val(td, "HRV_SDNN",  1))
-        _metric("rmssd", val(td, "HRV_RMSSD", 1))
-        _metric("pnn6",  val(td, "HRV_pNN6",  1))
+        _metric("sdnn",  t.text("hrv_time.HRV_SDNN",  1))
+        _metric("rmssd", t.text("hrv_time.HRV_RMSSD", 1))
+        _metric("pnn6",  t.text("hrv_time.HRV_pNN6",  1))
+        _metric("lf_hf", t.text("hrv_freq.HRV_LFHF", 2))
+        _metric("sampen", t.text("hrv_nonlin.HRV_SampEn", 2))
+        _metric("dfa1",   t.text("hrv_nonlin.HRV_DFA_alpha1", 2))
 
-        try:
-            lfhf = float(fd["HRV_LFHF"].values[0]) if (fd is not None and "HRV_LFHF" in fd.columns) else float("nan")
-        except Exception:
-            lfhf = float("nan")
-        _metric("lf_hf", f"{lfhf:.2f}" if np.isfinite(lfhf) else "—")
-        _metric("sampen", val(nl, "HRV_SampEn", 2))
-        _metric("dfa1",   val(nl, "HRV_DFA_alpha1", 2))
-
-        if ivl is not None and not ivl.empty:
-            for col, key in [("PR_ms", "pr"), ("QRS_ms", "qrs"), ("QTc_ms", "qtc")]:
-                if col in ivl.columns:
-                    d = ivl[col].dropna()
-                    if len(d):
-                        _metric(key, f"{d.median():.0f}")
+        for key, text in summary_interval_metrics(ivl).items():
+            _metric(key, text)
 
         # ── Signal Quality panel ────────────────────────────────────────────────
         # Surfaces numbers the app already computes but never showed anywhere:
@@ -2119,10 +2356,6 @@ class PlotController:
         # judgment about DATA TRUSTWORTHINESS, not physiology -- deliberately
         # has no experimental-context-dependent reference ranges.
         beat_corr = r.get("beat_corr")
-        rr_ms     = r.get("rr_ms", np.array([]))
-        n_beats   = len(beat_corr) if beat_corr is not None else 0
-        mean_corr = float(np.nanmean(beat_corr)) if n_beats else float("nan")
-        n_bad     = int(np.sum(beat_corr < 0.90)) if n_beats else 0
 
         def _sq(key: str, text: str) -> None:
             lbl = self.app._sum_quality_vals.get(key)
@@ -2131,43 +2364,25 @@ class PlotController:
 
         score = self.app.detection.sig_quality
         _sq("sq_score", f"{score}%" if score is not None else "—")
-        _sq("sq_corr", f"{mean_corr:.3f}" if np.isfinite(mean_corr) else "—")
-        _sq("sq_badbeats",
-            f"{100.0 * n_bad / n_beats:.1f}%  ({n_bad}/{n_beats})" if n_beats else "—")
-
-        # Duration-weighted counterpart -- see update_kpis() for why a pure
-        # beat-count percentage can understate noise burden on rodent ECG.
-        n_ivl = min(n_beats, len(rr_ms)) if n_beats else 0
-        if n_ivl:
-            rr_slice   = np.asarray(rr_ms[:n_ivl], dtype=float)
-            corr_slice = np.asarray(beat_corr[:n_ivl], dtype=float)
-            total_ms   = float(np.nansum(rr_slice))
-            noisy_ms   = float(np.nansum(rr_slice[corr_slice < 0.90]))
-            pct_time   = 100.0 * noisy_ms / total_ms if total_ms > 0 else float("nan")
-        else:
-            pct_time = float("nan")
-        _sq("sq_noisy_time", f"{pct_time:.1f}%" if np.isfinite(pct_time) else "—")
-
-        arep = self.app.analysis.artifact_report
-        if arep:
-            removed = arep["n_in"] - arep["n_out"]
-            _sq("sq_artifact",
-                f"{removed}  ({arep['n_duplicate']} dup · "
-                f"{arep['n_nonphysio']} non-physio · {arep['n_ectopic']} ectopic)")
-        else:
-            _sq("sq_artifact", "not applied")
+        # sq_noisy_time: duration-weighted counterpart of sq_badbeats -- see
+        # update_kpis() for why a beat-count percentage can understate noise
+        # burden on rodent ECG.
+        for key, text in quality_tile_texts(t).items():
+            _sq(key, text)
 
         if self.app.lbl_sum_verdict is not None:
-            dur_s = float(rdf["Time_s"].iloc[-1]) if rdf is not None and len(rdf) else float("nan")
+            # Analysed duration (window end − start), not the absolute time
+            # of the last beat (which also counts the time before the window).
+            _dur = t.finite("core.duration_s")
             score_word = "good" if (score or 0) >= 70 else ("fair" if (score or 0) >= 40 else "poor")
             score_color = GREEN if (score or 0) >= 70 else (ORANGE if (score or 0) >= 40 else RED)
             parts = [f"Signal quality {score}% — {score_word}." if score is not None else "Signal quality not computed."]
-            if hr.get("n"):
-                parts.append(f"{hr['n']} beats")
-            if np.isfinite(dur_s):
-                parts.append(f"{dur_s:.0f} s")
-            if arep:
-                parts.append(f"{arep['n_in'] - arep['n_out']} beats auto-corrected")
+            if t.value("hr.n_beats", None):
+                parts.append(f"{t.value('hr.n_beats')} beats")
+            if _dur is not None:
+                parts.append(f"{_dur:.0f} s analysed")
+            if t.has("artifact.removed"):
+                parts.append(f"{t.value('artifact.removed')} beats auto-corrected")
             self.app.lbl_sum_verdict.configure(
                 text="  ·  ".join(parts), text_color=score_color)
 
@@ -2195,56 +2410,48 @@ class PlotController:
                 except Exception as exc:
                     log.debug("sum mirror %s→%s: %s", src_key, dst_key, exc)
 
-        # ── sum_asymmetry: Asymétrie RR (Porta / Guzik index) ─────────────────
-        # Porta index P0: fraction of beats with RR_n+1 < RR_n  (sym → 50 %)
-        # Guzik index GI: contribution of decelerations to total variation
-        # Both are markers of autonomic nervous system balance asymmetry.
-        # Successive VALID differences only: a ΔRR across an excluded
-        # interval (e.g. into/out of a pause) is dropped, not counted.
-        rr_a_v, rr_b_v = successive_valid_pairs(
-            np.asarray(rr_ms, dtype=float), self._rr_valid(r))
-        have_asym = len(rr_a_v) >= 8
-        if have_asym:
-            rr_a = rr_a_v
-            rr_b = rr_b_v
-            diff = rr_b - rr_a
-            n_dec = int(np.sum(diff > 0))    # decelerations (RR lengthens)
-            n_acc = int(np.sum(diff < 0))    # accelerations (RR shortens)
-            n_tot = len(diff)
-            porta_raw  = n_acc / n_tot if n_tot else 0.5
-            guzik_num  = float(np.sum(diff[diff > 0] ** 2))
-            guzik_den  = float(np.sum(diff ** 2))
-            guzik_raw  = (1.0 - guzik_num / guzik_den) if guzik_den > 0 else 0.5
-            porta_pct  = porta_raw  * 100
-            guzik_pct  = guzik_raw  * 100
+        # ── sum_asymmetry: RR asymmetry (Porta / Guzik index) ─────────────────
+        if asym_ix is not None:
+            diff = rr_b_v - rr_a_v
+            n_dec = asym_ix["n_dec"]    # decelerations (RR lengthens)
+            n_acc = asym_ix["n_acc"]    # accelerations (RR shortens)
+            n_tot = asym_ix["n_tot"]
+            porta_pct = asym_ix["porta_pct"]
+            guzik_pct = asym_ix["guzik_pct"]
             # ΔRR histogram (signed)
             drr_clip = np.clip(diff, -60, 60)
 
             _porta_pct  = porta_pct
             _guzik_pct  = guzik_pct
             _n_dec = n_dec; _n_acc = n_acc; _n_tot = n_tot
+            _n_off = asym_ix["n_off"]; _n_zero = asym_ix["n_zero"]
             _drr_clip = drr_clip
 
             def draw_asymmetry(fig):
                 ax_bar, ax_hist = fig.subplots(1, 2)
                 style_axes(ax_bar); style_axes(ax_hist)
 
-                # Bar chart: proportions
-                cats  = ["Decelerations\n(RR↑)", "Neutral", "Accelerations\n(RR↓)"]
-                n_neu = _n_tot - _n_dec - _n_acc
-                vals2 = [_n_dec / _n_tot * 100,
-                         n_neu  / _n_tot * 100,
-                         _n_acc / _n_tot * 100]
-                colors2 = [RED, GRAY, BLUE_DARK]
+                # Bar chart: shares of the OFF-line pairs (ΔRR ≠ 0), the
+                # Porta PI denominator -- the acceleration bar IS the PI and
+                # the 50 % line is symmetry. ΔRR = 0 pairs are counted aside.
+                cats  = ["Decelerations\n(RR↑)", "Accelerations\n(RR↓)"]
+                vals2 = ([_n_dec / _n_off * 100, _n_acc / _n_off * 100]
+                         if _n_off else [0.0, 0.0])
+                colors2 = [RED, BLUE_DARK]
                 bars = ax_bar.bar(cats, vals2, color=colors2, alpha=0.80, width=0.5)
                 ax_bar.axhline(50, color=BORDER2, lw=1.2, ls="--", alpha=0.7)
-                ax_bar.set_ylabel("% beats")
+                ax_bar.set_ylabel("% of pairs with ΔRR ≠ 0")
                 ax_bar.set_ylim(0, 105)
                 for bar, v in zip(bars, vals2):
                     ax_bar.text(bar.get_x() + bar.get_width() / 2,
-                                v + 1.5, f"{v:.1f}%",
+                                v + 1.5, f"{v:.1f}%" if _n_off else "—",
                                 ha="center", va="bottom", fontsize=8, color=PLOT["text"])
-                porta_str = f"Porta={_porta_pct:.1f}%  Guzik={_guzik_pct:.1f}%"
+                ax_bar.set_xlabel(f"No change (ΔRR = 0): {_n_zero} of {_n_tot} pairs",
+                                  fontsize=8)
+
+                def _pct(v):
+                    return f"{v:.1f}%" if np.isfinite(v) else "—"
+                porta_str = f"Porta PI={_pct(_porta_pct)}  Guzik GI={_pct(_guzik_pct)}"
                 ax_bar.set_title(f"RR Asymmetry  ({porta_str})", loc="left", fontsize=8)
                 ax_bar.tick_params(axis="x", labelsize=8)
 
@@ -2265,25 +2472,18 @@ class PlotController:
 
         # ── sum_quality_time: Qualité morphologique dans le temps ──────────────
         if beat_corr is not None and len(beat_corr) > 4 and self.app.detection.rpeaks_ok is not None:
-            _bc   = np.asarray(beat_corr, dtype=float)
-            _wp = self.app._windowed_peaks()
-            _rp   = (_wp if _wp is not None else self.app.detection.rpeaks_ok).astype(float) / self.app.signal.fs   # peak times (windowed)
-            # Align: beat_corr has 1 value per accepted beat, first peak has no interval
-            _t_bc = _rp[:len(_bc)] if len(_rp) >= len(_bc) else _rp
+            # Times of the beats actually scored (edge beats are not), from
+            # the results; the windowed peaks only for older results.
+            _rp = None
+            if r.get("beat_corr_t_s") is None:
+                _wp = self.app._windowed_peaks()
+                _rp = (_wp if _wp is not None else self.app.detection.rpeaks_ok
+                       ).astype(float) / self.app.signal.fs
+            _bc_t, _bc_v = beat_quality_times(r, _rp)
+            n_pts = len(_bc_v)
 
-            n_pts = min(len(_t_bc), len(_bc))
-            _bc_t = _t_bc[:n_pts]
-            _bc_v = _bc[:n_pts]
-
-            # Rolling 50-beat mean -- computed over the ALIGNED n_pts-length
-            # slice (_bc_v), not the raw, unclipped _bc. _rp (the windowed
-            # peak-time array) can be shorter than _bc (e.g. right after a
-            # session restore, before the just-restored peak set and the
-            # active analysis window are back in sync) -- using unclipped
-            # _bc there produced a rolling-mean array with more points than
-            # _t_bc had matching times for, crashing ax.plot() with a shape
-            # mismatch ((0,) vs (671,)) instead of just rendering a shorter
-            # (but internally consistent) line.
+            # Rolling 50-beat mean over the aligned (time, corr) pairs, so
+            # the line has exactly one time per value.
             _win = min(50, max(10, n_pts // 20)) if n_pts >= 10 else 0
             if _win >= 2 and n_pts >= _win:
                 _kern = np.ones(_win) / _win
@@ -2297,12 +2497,10 @@ class PlotController:
                 ax = fig.add_subplot(111)
                 style_axes(ax)
                 if len(_bc_v) == 0:
-                    # n_pts came out 0 -- the windowed peak-time array (_rp)
-                    # didn't overlap _bc at all (e.g. right after a session
-                    # restore, before the active analysis window and the
-                    # just-restored peak set are back in sync). Nothing
-                    # valid to plot this frame; the next redraw once state
-                    # settles will have real data.
+                    # No (time, corr) pair -- only possible for older
+                    # results without beat times when the windowed peaks
+                    # are empty (e.g. mid session restore). Nothing valid
+                    # to plot this frame.
                     ax.text(0.5, 0.5, "No quality data for the current window",
                             transform=ax.transAxes, ha="center", va="center",
                             fontsize=9, color=PLOT["muted"])
@@ -2336,106 +2534,21 @@ class PlotController:
             if dst is not None:
                 dst.update(draw_quality_time)
 
-        # QT dispersion -- value only (used in the text report below); the
-        # dedicated QT-variability/QT-RR-relationship plot that used to live
-        # here in a Summary-only slot was dropped as part of de-duplicating
-        # this tab (not mirrored from, or duplicated in, any other tab, but
-        # out of scope for the slimmed-down Summary).
-        _qt = np.array([])
-        qt_disp: float = float("nan")
-        if ivl is not None and not ivl.empty:
-            _qt = ivl["QT_ms"].dropna().values.astype(float) if "QT_ms" in ivl.columns else np.array([])
-            qt_disp = float(np.nanmax(_qt) - np.nanmin(_qt)) if len(_qt) > 3 else float("nan")
-
-        # ── Texte du rapport ─────────────────────────────────────────────────
-        filter_note = "  ⚠ Signal brut (sans filtres)" if self.app.signal.no_filter_mode else "  Bandpass + notch + NK clean"
-        arep = self.app.analysis.artifact_report
-        if arep:
-            removed  = arep["n_in"] - arep["n_out"]
-            art_lines = [
-                "", "  ARTIFACT CORRECTION",
-                f"    Before        {arep['n_in']}  beats",
-                f"    After         {arep['n_out']}  beats",
-                f"    Removed       {removed}",
-                f"      Non-physio  {arep['n_nonphysio']}",
-                f"      Ectopic     {arep['n_ectopic']}",
-                f"      Duplicates  {arep['n_duplicate']}",
-            ]
-        else:
-            art_lines = ["", "  ARTIFACT CORRECTION", "    Not applied"]
-
-        # RR intervals used for HRV and the ones excluded (outside the bounds
-        # used, or spanning a removed beat) -- same rows as the Excel Cover
-        # sheet and the Prism notes.
-        rr_lines = [f"    {label:<16} {value}"
-                    for label, value in rr_disclosure_rows(rr_exclusion_report(r))]
-        freq_withheld = hrv_freq_withheld_reason(r)
-
-        # ── asymmetry metrics for report ──────────────────────────────────────
-        asym_lines: list[str] = []
-        if have_asym:
-            asym_lines = [
-                "", "  RR ASYMMETRY (autonomic system)",
-                f"    Porta index (acc.)   {porta_pct:.1f} %  (symétrie → 50 %)",
-                f"    Guzik index  (acc.)  {guzik_pct:.1f} %",
-                f"    Décélérations        {n_dec} / {n_tot}",
-                f"    Accélérations        {n_acc} / {n_tot}",
-            ]
-
-        lines = [
-            "═" * 62,
-            "  ECG ANALYSIS  —  Summary Report",
-            f"  Subject  :  {self.app.ent_subject.get()}",
-            f"  Date     :  {datetime.now():%Y-%m-%d  %H:%M}",
-            f"  File     :  {os.path.basename(self.app.signal.filepath or '')}",
-            f"  Filters  :{filter_note}",
-            "═" * 62, "",
-            "  HEART RATE",
-            f"    Moyenne          {hr['mean']:.1f} bpm",
-            f"    Min  (2e %ile)   {hr['min']:.1f} bpm",
-            f"    Max  (98e %ile)  {hr['max']:.1f} bpm",
-            f"    SD               {hr['std']:.2f} bpm",
-            f"    N battements     {hr['n']}",
-            *rr_lines, "",
-            "  HRV — TIME DOMAIN",
-            f"    MeanNN   {val(td, 'HRV_MeanNN')} ms",
-            f"    SDNN     {val(td, 'HRV_SDNN')} ms",
-            f"    RMSSD    {val(td, 'HRV_RMSSD')} ms",
-            f"    pNN6     {val(td, 'HRV_pNN6')} %  (>{MouseECG.PNN_THRESHOLD} ms)",
-            f"    pNN20    {val(td, 'HRV_pNN20')} %", "",
-            "  HRV — FREQUENCY DOMAIN",
-            f"    VLF      {val(fd, 'HRV_VLF')} n.u.",
-            f"    LF       {val(fd, 'HRV_LF')} n.u.",
-            f"    HF       {val(fd, 'HRV_HF')} n.u.",
-            f"    LF/HF    {val(fd, 'HRV_LFHF')}",
-            # A withheld spectrum says why rather than a column of "—".
-            *([f"    Withheld — {freq_withheld}"] if freq_withheld else []), "",
-            "  HRV — NON-LINEAR",
-            f"    SD1      {val(nl, 'HRV_SD1')} ms",
-            f"    SD2      {val(nl, 'HRV_SD2')} ms",
-            f"    SampEn   {val(nl, 'HRV_SampEn')}",
-            f"    ApEn     {val(nl, 'HRV_ApEn')}",
-            f"    DFA α1   {val(nl, 'HRV_DFA_alpha1')}",
-            f"    DFA α2   {val(nl, 'HRV_DFA_alpha2')}",
-        ]
-        if ivl is not None and not ivl.empty and "QT_ms" in ivl.columns:
-            lines += ["", "  ECG INTERVALS  (median ± SD)"]
-            for col in ["PR_ms", "QRS_ms", "QT_ms", "QTc_ms"]:
-                if col in ivl.columns:
-                    data = ivl[col].dropna()
-                    if len(data):
-                        lines.append(
-                            f"    {col:<16} {data.median():.1f} ± {data.std():.1f} ms")
-            if len(_qt) > 3:
-                lines.append(f"    QT dispersion    {qt_disp:.1f} ms")
-            # The QTc values above differ ~3× between formulas: name the one used.
-            lines.append(f"    QTc formula      "
-                         f"{QTC_FORMULA_LABELS[normalize_qtc_formula(self.app._qtc_formula())]}"
-                         f"  (read uncorrected QT alongside)")
-        lines += asym_lines
-        lines += art_lines
-        lines += ["", "═" * 62]
-        self.app._set_textbox(self.app.txt_sum, "\n".join(lines))
+        # ── Report text (summary_report_text: pure, tested) ──────────────────
+        asym = asym_ix
+        self.app._set_textbox(self.app.txt_sum, summary_report_text(
+            r,
+            subject=self.app.ent_subject.get(),
+            filepath=self.app.signal.filepath,
+            filter_text=recorded_filter_text(
+                getattr(self.app.signal, "filter_text", None),
+                self.app.signal.no_filter_mode),
+            window=self._report_window(),
+            signal_end_s=self._signal_end_s(),
+            artifact_report=self.app.analysis.artifact_report,
+            qtc_formula=self.app._qtc_formula(),
+            asymmetry=asym,
+            signal_crop=getattr(self.app.signal, "crop", None)))
 
     def reset_result_plots(self) -> None:
         """Clear stored draw_fn on every result-plot slot.
@@ -2490,7 +2603,7 @@ class PlotController:
     def reset_kpis(self) -> None:
         """Reset all KPI labels to dash when results are invalidated."""
         for key in ("hr_mean", "hr_range", "rr_mean", "n_beats",
-                    "sdnn", "rmssd", "pnn50", "dur",
+                    "sdnn", "rmssd", "pnn6", "dur",
                     "sq_score", "sq_corr", "sq_badbeats", "sq_noisy_time",
                     "sq_artifact"):
             widget = self.app._kpi.get(key)
@@ -2504,40 +2617,27 @@ class PlotController:
     def update_kpis(self) -> None:
         if self.app.analysis.results is None:
             return
-        r   = self.app.analysis.results
-        hr  = r["hr"]
-        rdf = r["rr_df"]
-        td  = r["hrv_time"]
-
-        def hrv_val(key: str) -> str:
-            try:
-                return f"{float(td[key].values[0]):.1f}"
-            except Exception:
-                return "—"
+        t = build_metric_table(
+            self.app.analysis.results, sig_quality=self.app.detection.sig_quality,
+            artifact_report=self.app.analysis.artifact_report,
+            window=self._report_window(), signal_end_s=self._signal_end_s(),
+            asymmetry=None)
 
         # Value text is bare (no unit suffix) -- units are baked into the
         # stat-panel tiles once at construction (make_stat_tile's unit=),
         # so the value stays the visually-prominent element per the redesign
         # brief ("valeurs numériques mises en évidence, unités discrètes").
-        self.app._kpi["hr_mean"].configure(text=f"{hr['mean']:.0f}")
-        self.app._kpi["hr_range"].configure(text=f"{hr['min']:.0f}–{hr['max']:.0f}")
-        try:
-            # Valid intervals only -- same set as HR mean and HRV_MeanNN
-            rr_mean = float(np.nanmean(np.asarray(r["rr_ms"], dtype=float)[self._rr_valid(r)]))
-            self.app._kpi["rr_mean"].configure(text=f"{rr_mean:.0f}")
-        except Exception:
-            self.app._kpi["rr_mean"].configure(text="—")
-        n_valid = hr.get("n_valid", hr["n"])
-        self.app._kpi["n_beats"].configure(text=str(n_valid))
-        self.app._kpi["sdnn"].configure(text=hrv_val("HRV_SDNN"))
-        self.app._kpi["rmssd"].configure(text=hrv_val("HRV_RMSSD"))
-        self.app._kpi["pnn50"].configure(text=hrv_val("HRV_pNN6"))
-        dur_text = "—"
-        try:
-            dur_text = f"{rdf['Time_s'].iloc[-1]:.0f}"
-            self.app._kpi["dur"].configure(text=dur_text)
-        except Exception:
-            self.app._kpi["dur"].configure(text="—")
+        self.app._kpi["hr_mean"].configure(text=t.raw_text("hr.mean", 0))
+        self.app._kpi["hr_range"].configure(
+            text=f"{t.raw_text('hr.min', 0)}–{t.raw_text('hr.max', 0)}")
+        self.app._kpi["rr_mean"].configure(text=t.raw_text("rr.mean", 0))
+        self.app._kpi["n_beats"].configure(text=str(t.value("hr.n_valid", "—")))
+        self.app._kpi["sdnn"].configure(text=t.raw_text("hrv_time.HRV_SDNN", 1))
+        self.app._kpi["rmssd"].configure(text=t.raw_text("hrv_time.HRV_RMSSD", 1))
+        self.app._kpi["pnn6"].configure(text=t.raw_text("hrv_time.HRV_pNN6", 1))
+        # Analysed duration (window end − start) -- not rdf's last Time_s,
+        # the absolute time of the last beat.
+        self.app._kpi["dur"].configure(text=t.raw_text("core.duration_s", 0))
 
         # Top-bar compact mirrors of the 3 values shown there (§1 of the
         # Phase 1 plan) -- same source numbers as the tiles above, just a
@@ -2548,52 +2648,17 @@ class PlotController:
                 widget.configure(text=src.cget("text"))
 
         # ── Signal Quality tiles ────────────────────────────────────────────
-        # Duplicates plot_summary()'s cheap ~6-line computation
-        # (plot_controller.py, Summary-tab redraw) rather than sharing a
-        # helper -- that method runs on a different/deferred schedule and
-        # must keep working completely unchanged; this is a deliberate small
-        # duplication traded for zero risk to the existing Summary tab.
-        beat_corr = r.get("beat_corr")
-        n_beats_c = len(beat_corr) if beat_corr is not None else 0
-        mean_corr = float(np.nanmean(beat_corr)) if n_beats_c else float("nan")
-        n_bad     = int(np.sum(beat_corr < 0.90)) if n_beats_c else 0
-
+        # Same texts as plot_summary()'s Signal Quality panel.
         score = self.app.detection.sig_quality
         self.app._kpi["sq_score"].configure(text=f"{score}" if score is not None else "—")
-        self.app._kpi["sq_corr"].configure(
-            text=f"{mean_corr:.3f}" if np.isfinite(mean_corr) else "—")
-        self.app._kpi["sq_badbeats"].configure(
-            text=f"{100.0 * n_bad / n_beats_c:.1f}%  ({n_bad}/{n_beats_c})"
-            if n_beats_c else "—")
-
-        # Duration-weighted counterpart to sq_badbeats: rodent ECG is prone
+        # sq_noisy_time: duration-weighted counterpart to sq_badbeats: rodent ECG is prone
         # to EMG contamination from near-constant movement/grooming, so a
         # beat-count percentage alone can understate how much of the actual
         # recording TIME is unreliable (a corrupted stretch may have very
-        # few beats detected at all). Attribute each RR interval's duration
-        # to its leading beat's quality -- rr_ms[i] is the interval starting
-        # at beat_corr[i].
-        rr_ms = r.get("rr_ms")
-        n_ivl = min(n_beats_c, len(rr_ms)) if rr_ms is not None and n_beats_c else 0
-        if n_ivl:
-            rr_slice   = np.asarray(rr_ms[:n_ivl], dtype=float)
-            corr_slice = np.asarray(beat_corr[:n_ivl], dtype=float)
-            total_ms   = float(np.nansum(rr_slice))
-            noisy_ms   = float(np.nansum(rr_slice[corr_slice < 0.90]))
-            pct_time   = 100.0 * noisy_ms / total_ms if total_ms > 0 else float("nan")
-        else:
-            pct_time = float("nan")
-        self.app._kpi["sq_noisy_time"].configure(
-            text=f"{pct_time:.1f}%" if np.isfinite(pct_time) else "—")
-
-        arep = self.app.analysis.artifact_report
-        if arep:
-            removed = arep["n_in"] - arep["n_out"]
-            self.app._kpi["sq_artifact"].configure(
-                text=f"{removed}  ({arep['n_duplicate']} dup · "
-                     f"{arep['n_nonphysio']} non-physio · {arep['n_ectopic']} ectopic)")
-        else:
-            self.app._kpi["sq_artifact"].configure(text="not applied")
+        # few beats detected at all). Each RR interval's duration goes to
+        # the quality of the scored beat it starts at (noisy_time_pct).
+        for key, text in quality_tile_texts(t).items():
+            self.app._kpi[key].configure(text=text)
 
         # Repaint the gauge too -- covers the case where update_kpis() is the
         # only thing that ran (e.g. _rebuild_ui()'s trailing call, where the

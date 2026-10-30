@@ -264,6 +264,9 @@ class EventLockedController:
         a.event_locked = el
         a.event_locked_df = el.table
         a.event_locked_stale = None
+        fresh = getattr(app, "freshness", None)
+        if fresh is not None:
+            fresh.stamp("event_locked")
         text, color = self.show() or ("", _theme.ORANGE)
         app._set_status(f"Event-locked — {text.strip()}", color)
 

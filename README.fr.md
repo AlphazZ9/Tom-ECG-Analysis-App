@@ -63,13 +63,64 @@ et export.
 - **Domaine temporel** — l'ensemble complet des métriques `nk.hrv_time()`
   (SDNN, RMSSD, pNN6, SDANN, MedianNN, TINN, HTI...).
 - **Fréquentiel** — PSD de Welch avec bandes VRC VLF/LF/HF spécifiques à la
-  souris (pas la convention humaine 0,04–0,15/0,15–0,4 Hz).
+  souris (pas la convention humaine 0,04–0,15/0,15–0,4 Hz). Un seul spectre
+  pour tout : les intervalles RR valides sont rééchantillonnés à 20 Hz
+  (spline cubique sur leurs vrais instants) puis la méthode de Welch est
+  appliquée (fenêtre de Hann, recouvrement 75 %, résolution ≈ 0,02 Hz) ; le
+  graphe PSD trace exactement ce spectre, et VLF / LF / HF sont ses
+  intégrales sur les bandes ombrées, en **puissances absolues (ms²)**.
+  **LFn / HFn** sont les unités normalisées de la Task Force, LF ou HF /
+  (LF + HF) ; LF/HF = LF / HF. Le même estimateur sert à la VRC glissante et
+  à la comparaison de segments.
 - **Non linéaire** — nuage de points de Poincaré avec ellipse SD1/SD2,
   entropie d'échantillon, DFA α1/α2, et une courbe d'**entropie
   multi-échelle (MSEn)** à travers les échelles de coarse-graining — détecte
-  une perte de complexité que la SampEn à échelle unique peut manquer. La
-  troncature du nombre de battements sur les longs enregistrements (pour le
-  temps de calcul) est affichée à l'écran, jamais silencieuse.
+  une perte de complexité que la SampEn à échelle unique peut manquer.
+  SD1/SD2 de Poincaré, la DFA et les indices d'asymétrie / de fragmentation
+  utilisent **tous les battements valides de la fenêtre d'analyse**. Seul le
+  bloc d'entropie, lent (O(N²)) — SampEn, ApEn, FuzzyEn, MSE, CD, … — est
+  plafonné pour le temps de calcul, à **Entropy cap (RR)** intervalles
+  valides (2000 par défaut, réglable dans l'onglet Non-linear ; 0 = pas de
+  plafond, une valeur négative revient à 2000), pris comme le bloc contigu contenant le moins d'intervalles
+  exclus ; le nombre et l'intervalle de temps de ce bloc sont affichés dans
+  la ligne d'état, sur la courbe MSE, dans le rapport Summary et sur la
+  feuille Cover d'Excel.
+- **Une seule définition par métrique.** La FC moyenne vaut partout
+  **60000 / NN moyen** (Summary, barre de KPI, Excel, comparaison de
+  segments, VRC glissante, époques, titres des tachogrammes) ; l'écart-type
+  et les min / max de FC décrivent la FC instantanée 60000 / RRᵢ — écart-type
+  d'échantillon (n − 1) et **2ᵉ / 98ᵉ percentiles**, identiques dans le
+  Summary, la barre de KPI, Excel et la comparaison de segments — et sont
+  libellés comme tels. **SD1 / SD2** de Poincaré n'ont qu'une définition —
+  écart-type de (RRᵢ − RRᵢ₊₁)/√2 et de (RRᵢ + RRᵢ₊₁)/√2 sur les paires
+  d'intervalles valides adjacents (jamais à travers un intervalle exclu) —
+  utilisée par le panneau Non linéaire, la VRC glissante, la comparaison de
+  segments et le Summary / les exports. Les estimateurs Ledoit-Wolf (SD1 LW
+  / SD2 LW de la VRC glissante) et ceux de la vue Autonomic sont des
+  variantes nommées explicitement. **Chiffres modifiés (cette version) :**
+  les versions précédentes calculaient toutes les métriques non linéaires,
+  SD1/SD2 compris, sur les **1000 premiers battements** seulement (quelques
+  minutes d'un long enregistrement) ; prenaient la FC moyenne comme la
+  moyenne de la FC instantanée (biaisée vers le haut, typiquement de 0,1 à
+  1 bpm, davantage si la variabilité est forte) ; et tiraient VLF / LF / HF
+  du spectre de NeuroKit (rééchantillonnage à 100 Hz, PSD normalisée par son
+  maximum : des « puissances » en unités arbitraires, étiquetées à tort
+  n.u.) alors que le graphe PSD traçait un autre spectre, avec LFn / HFn =
+  LF ou HF / puissance totale incluant VLF et 5–20 Hz. La comparaison de
+  segments utilisait un troisième calcul de Welch, et ses écart-type / min /
+  max de FC étaient les extrêmes absolus (le Summary utilisait des
+  percentiles et un écart-type de population ; l'écart-type de FC est
+  désormais très légèrement plus élevé). Une ancienne session restaurée voit
+  sa FC moyenne, son écart-type et sa plage de FC recalculés à partir des
+  intervalles RR valides enregistrés (indiqué dans la barre d'état) ; un
+  ancien résultat fréquentiel ne peut pas être recalculé sans relancer
+  l'analyse : il est conservé mais étiqueté **« legacy NeuroKit spectrum »**
+  (unités arbitraires, LFn = LF / TP) dans le tableau Frequency, le Summary,
+  le PDF, les feuilles Cover / HRV_Frequency d'Excel et Prism, au lieu de
+  ms² / n.u. Relancez Frequency et Non-linear HRV sur les anciennes
+  sessions. Les en-têtes de la feuille brute **HRV_Frequency** portent leur
+  unité (p. ex. `HRV_LF (ms²)`, `HRV_LFn (fraction of LF+HF)` — des
+  fractions, affichées ×100 en n.u. partout ailleurs).
 - **Époques** — tendances VRC par fenêtres fixes (FC, SDNN, RMSSD, pNN6) avec
   signalement visuel des fenêtres à faible nombre de battements.
 - **Glissante** — tendances VRC par fenêtre glissante ; FC/SDNN/RMSSD/pNN6
@@ -90,8 +141,96 @@ et export.
 
 ### Délinéation des intervalles
 
-- Détection des repères P/Q/R/S/J/T par battement, avec un template d'onde
-  calibrable par enregistrement et un vérificateur interactif.
+- Détection des repères P/Q/R/S/J/T par battement, ainsi que du **début du
+  QRS** et de la **fin du QRS (point J)**, avec un template d'onde calibrable
+  par enregistrement et un vérificateur interactif.
+- Définitions standard des intervalles, mesurées sur chaque battement :
+  - **PR** = début de P → début du QRS ;
+  - **QRS** = début du QRS → fin du QRS (point J) ;
+  - **QT** = début du QRS → fin de T ;
+  - **QTc** = QT corrigé avec le RR **précédent** (R précédent → ce R).
+
+  Le début du QRS est le premier écart à la ligne de base du segment PR
+  (début de l'onde Q, ou montée de R en l'absence de Q) ; le point J est le
+  retour de l'onde S à cette ligne de base (ou l'encoche avant l'onde J
+  quand elle n'y revient pas). Les deux sont placés à l'intersection avec
+  la ligne de base d'une droite ajustée (moindres carrés) sur la partie
+  30–70 % de la déflexion (seuil : 5 % de l'amplitude de R ou 3× le bruit
+  du segment PR pour l'onde R ; une onde Q ou S est retenue dès qu'elle
+  descend de plus de 2 % de R ou 3× le bruit sous la ligne de base). Le
+  début de P est l'intersection avec la ligne de base PR d'une droite du
+  même type ajustée sur la montée de l'onde P, cherchée jusqu'à 30 ms avant
+  le pic P (si une P posée sur le T précédent ne revient jamais à cette
+  ligne de base, la droite est ajustée sur la partie de la montée au-dessus
+  de la jonction T–P, sans placer le début avant cette jonction). Le pic P
+  est cherché après le pic T du battement précédent et mesuré par rapport à
+  la ligne de base PR (à 500 bpm, une ligne de base prise sur le T précédent
+  donnait un PR ~60 ms au lieu de 42 et de faux événements de retard AV) ;
+  un battement sans onde P au-dessus de 3× le bruit n'a pas de PR. La ligne de base PR est le dernier segment plat trouvé
+  sur chaque battement avant Q/R (et non une fenêtre fixe) : un QRS élargi
+  est mesuré en entier. L'onde J murine est une repolarisation précoce
+  (Boukens et al. 2014, J Physiol 592:4613) : elle est comptée dans le QT,
+  pas dans le QRS. La fin de T est l'intersection avec la ligne de base PR
+  d'une droite du même type ajustée sur la partie 70–30 % de la pente
+  descendante de T ; chez la souris elle est progressive et ambiguë,
+  vérifiez son placement sur le battement moyen. Chaque battement est
+  délimité dans sa propre fenêtre : jusqu'à ±100 ms, au plus 70 % de son
+  RR précédent avant R et de son RR suivant après R (un voisin plus proche
+  que le RR min est ignoré) ; les exports et le rapport Summary indiquent
+  combien de battements ont eu une fenêtre raccourcie. Le QTc n'utilise le
+  RR précédent que s'il est dans les bornes RR min / max de la VRC. Début
+  de P, début du QRS, point J et fin de T ne sont **pas** bornés aux
+  fenêtres du modèle : un repère
+  impossible à placer dans le battement reste vide (NaN) au lieu d'être
+  mis au bord d'une fenêtre, et un modèle mis à jour automatiquement par
+  un enregistrement ne raccourcit plus le QRS ou le QT du suivant.
+  **Valeurs modifiées (cette version) :** la fenêtre de battement valait
+  ±45 % du RR le plus *court* de l'enregistrement, si bien qu'un seul
+  battement prématuré raccourcissait la fenêtre de tous les battements (QT
+  perdu partout, PR tronqué) et qu'à ~500 bpm la fin de T en sortait ; le
+  début de P était plafonné ~9 ms avant le pic P par le modèle par défaut
+  (PR trop court de 3–6 ms pour une montée de P de 12–15 ms, PR longs
+  tronqués à des valeurs plausibles — ils sont désormais mesurés, ou
+  rejetés au-delà de 80 ms) ; une onde Q de 2–5 % de R était ignorée (début
+  du QRS ~3 ms trop tard : QRS et QT plus courts, PR plus long) ; le QTc
+  était vide pour tout RR au-dessus des 333 ms par défaut même avec un RR
+  max élargi. L'ajustement de droite supprime
+  un raccourcissement du QT (plusieurs ms à 2–4 kHz) et du QRS qui
+  dépendait du bruit ; les débuts de QRS avant −22 ms et les fins de T
+  avant 60 ms après R (modèle par défaut) étaient auparavant rapportés à
+  ces limites. **Valeurs modifiées (auparavant) :** les versions
+  antérieures mesuraient le PR jusqu'au creux de Q, le QRS du creux de Q au
+  creux de S et le QT depuis le pic R, et appariaient le QTc au RR suivant —
+  QRS et QT sont désormais plus longs (plus proches de la littérature, p. ex.
+  Mitchell et al. 1998) et le PR légèrement plus court. Les sessions
+  enregistrées avant ce changement gardent leurs intervalles (signalés
+  « legacy » dans l'onglet Intervals et les exports ; leur QTc est réapparié
+  au RR précédent, ou laissé vide — et indiqué comme tel — quand la table
+  n'a pas les temps des pics R) jusqu'à une nouvelle exécution d'Intervals. Le contrôle de
+  retard AV des événements anormaux utilise ce PR.
+- **Template d'onde par enregistrement.** Les fenêtres de recherche des
+  repères utilisées pour un enregistrement sont son propre template : le
+  template par défaut enregistré (ou les valeurs souris intégrées) tant que
+  vous ne le modifiez pas dans **Landmarks** (onglet Beat Template) —
+  auto-calibré sur le battement moyen, affiné à partir de la délinéation de
+  cet enregistrement, modifié à la main ou chargé depuis un fichier.
+  **Apply to this recording** n'écrit rien sur le disque ; le template est
+  conservé dans la session de l'enregistrement. Seuls **Save as default
+  template** (ou **Save to file…**) écrivent un template, et le défaut ne
+  s'applique qu'aux enregistrements ouverts ensuite. Une autre voie du même
+  fichier est un autre enregistrement (souvent un autre animal) : détecter
+  les pics sur une autre voie abandonne le template fait sur la précédente,
+  et la nouvelle voie repart du défaut enregistré. L'onglet Beat
+  Template, la ligne d'état d'Intervals, le rapport Summary, la feuille
+  Cover Excel et les notes Prism indiquent le template utilisé (ligne
+  « Wave template » : provenance et fenêtres). **Comportement modifié
+  (cette version) :** les versions antérieures resserraient le template sur
+  chaque enregistrement après chaque délinéation et le réenregistraient
+  comme défaut global : les intervalles d'un enregistrement dépendaient de
+  ceux analysés avant lui. Un défaut écrit de cette façon (« auto-updated »)
+  est désormais ignoré au profit des valeurs intégrées — enregistrez un
+  template explicitement pour en faire le défaut. Les intervalles calculés
+  par les versions antérieures affichent « Wave template: not recorded ».
 - Distributions PR/QRS/QT/QTc (violon + boîte).
 - Formule de correction QTc sélectionnable (RR en ms) :
   - **Mitchell** (par défaut, calibrée souris ; Mitchell et al. 1998) —
@@ -110,14 +249,70 @@ et export.
   réellement supprimé la dépendance à la fréquence cardiaque (un QTc bien
   corrigé est plat en fonction du RR), plutôt que de faire confiance
   aveuglément à un seul chiffre de formule.
-- Dispersion du QT.
+- Variabilité battement-à-battement du QT (IQR, écart-type et étendue du QT
+  sur les battements d'un enregistrement, une seule dérivation). Ce n'est
+  **pas** la dispersion du QT classique (max − min du QT entre les
+  dérivations d'un même battement), nom sous lequel les versions antérieures
+  la présentaient ; l'étendue est dominée par les erreurs de délinéation,
+  rapportez l'IQR.
 
 ### Événements anormaux (classification du rythme)
 
-- Épisodes de bradycardie/tachycardie, pauses, salves de battements
-  ectopiques (ESV) et séries irrégulières, classés par rapport à la
-  fréquence cardiaque de base propre à chaque enregistrement (pas un seuil
-  fixe en bpm humain).
+- Épisodes de bradycardie/tachycardie, pauses, battements prématurés et
+  séries irrégulières, classés par rapport à la fréquence cardiaque de base
+  propre à chaque enregistrement (pas un seuil fixe en bpm humain).
+- **Battements prématurés (fondés sur les RR)** — un battement qui termine
+  un intervalle RR inférieur à 70 % du RR de référence : la médiane des
+  10 intervalles précédant le groupe de battements prématurés ou, si elle
+  est plus petite, des 10 intervalles à partir de celui où le rythme
+  revient. Le groupe doit se terminer — rythme revenu au-dessus de ce
+  seuil — en 30 battements au plus : une suite plus longue d'intervalles
+  courts est un changement de fréquence (laissé à la règle de
+  tachycardie), et un groupe encore en cours à la fin de la fenêtre
+  analysée n'est pas compté. Les versions antérieures utilisaient la
+  médiane des 10 intervalles voisins, que la salve elle-même faisait
+  baisser dès 6 battements : **les salves de plus de 5 battements
+  environ n'étaient jamais rapportées** (elles apparaissaient comme séries
+  irrégulières ou tachycardie) ; elles sont désormais comptées, ce qui
+  augmente les effectifs sur les enregistrements qui en contiennent.
+  Limite : une période de conduction normale entre deux périodes de bloc
+  2:1 (RR divisé puis doublé de nouveau) est identique en timing et est
+  rapportée comme une salve (vérifier les bradycardies autour). La détection n'utilise que le timing R-R : elle
+  **ne distingue pas les battements prématurés ventriculaires des
+  supraventriculaires** (il faudrait la morphologie du QRS et les ondes
+  P) ; les versions antérieures les appelaient « ESV » (extrasystoles
+  ventriculaires) et ne rapportaient que les salves ≥ 3. Les battements
+  isolés, les doublets et les salves ≥ 3 sont désormais tous rapportés,
+  avec effectifs et taux par heure (par heure de la durée analysée, du
+  premier au dernier battement analysé) dans l'onglet Abnormal Events, sa
+  ligne d'état et sa frise, le texte « Copy for Excel », l'Excel (feuilles
+  `Premature_Beats`, `Abnormal_Events` et lignes de la Cover), les
+  rapports PDF et les notes Prism. Les battements que la correction
+  d'artefacts a supprimés comme ectopiques sont réinsérés pour cette
+  classification et **toujours comptés** (signalés « removed by artifact
+  correction ») ; auparavant la correction automatique les supprimait avant
+  la classification et ils disparaissaient des comptes. Il en va de même
+  des battements très prématurés (couplage inférieur au Min R-R, ≈ 67 ms)
+  que la correction supprime comme *duplicate* / *non-physiological* : une
+  telle suppression est réinsérée quand l'intervalle qu'elle laisse est
+  long (> 1,2 × la médiane locale des RR) ou suivi d'une pause
+  compensatoire, et que son écart le plus court est ≥ 0,35 × cette
+  médiane. Une suppression qui laisse un intervalle normal est une double
+  détection parasite et n'est **pas** comptée ; le résumé indique combien
+  ont été jugées ainsi. Les sessions enregistrées avant que les types de
+  suppression soient conservés ont des suppressions de type inconnu :
+  elles ne sont jugées que par ce même test d'intervalle, et le résumé
+  indique leur nombre (relancer la correction d'artefacts pour le contrôle
+  complet). La feuille Excel `Premature_Beats` donne aussi la fenêtre
+  analysée (début / fin), et les exports **omettent** les résultats des
+  événements anormaux (avec une note sur la Cover / le PDF et dans la
+  barre d'état) quand les pics, la correction d'artefacts ou la fenêtre
+  d'analyse ont changé après la classification — la relancer. L'intervalle qui
+  enjambe un tel battement supprimé n'est plus signalé comme pause, et une
+  série RR irrégulière qui chevauche un battement prématuré n'est plus
+  rapportée en plus — deux changements des effectifs d'événements par
+  rapport aux versions antérieures. Les anciens événements « esv_run » sont
+  lus comme des salves prématurées.
 - **Signalement des délais de conduction AV** à partir d'une prolongation
   soutenue de l'intervalle PR, une fois la délinéation des intervalles
   effectuée — comble le manque où la classification du rythme ne voyait
@@ -129,10 +324,23 @@ et export.
 
 ### Comparaison & export
 
-- Comparaison de segments A/B avec tachogrammes RR superposés, un tableau
-  complet des métriques (incluant LF/HF normalisés et SD1/SD2), et un
-  **test U de Mann-Whitney** sur les distributions d'intervalles RR des deux
-  segments.
+- Comparaison de segments A/B avec tachogrammes RR superposés et un tableau
+  complet des métriques (puissance et n.u. LF / HF, SD1/SD2 — mêmes
+  définitions que les panneaux principaux). Chaque segment est aussi résumé
+  par les **moyennes de blocs non chevauchants** (10 s par défaut, champ
+  **Block (s)** ; un bloc est retenu si les RR valides en couvrent ≥ 50 %) :
+  FC moyenne des blocs ± écart-type avec le nombre de blocs, et la
+  différence B − A. Un p de Mann-Whitney sur les moyennes de blocs n'est
+  affiché qu'à titre **descriptif** (≥ 3 blocs par segment) : deux portions
+  d'un même enregistrement ne sont pas des échantillons indépendants —
+  l'unité expérimentale est l'animal — l'inférence de groupe relève des
+  statistiques Event-locked / outils de cohorte, entre animaux. L'export
+  Excel ajoute une feuille **Blocks** et la note. **Comportement modifié
+  (cette version) :** les versions précédentes appliquaient un test U de
+  Mann-Whitney aux centaines d'intervalles RR battement par battement de
+  chaque segment (valeurs autocorrélées traitées comme indépendantes —
+  pseudoréplication), d'où un p « significatif » pour presque n'importe
+  quels deux segments.
 - Persistance de session — sauvegarde/restauration d'une session d'analyse
   complète en JSON, plus un registre SQLite local des enregistrements
   récemment analysés et des résultats autonomiques par événement enregistrés
@@ -141,6 +349,81 @@ et export.
   d'une page (bande de signal, tableau des métriques clés, diagramme de
   Poincaré et résumé des événements anormaux), un PDF annoté par épisode
   pour les événements anormaux, et CSV.
+- **Provenance dans chaque rapport.** Le rapport texte Summary (bloc
+  PROVENANCE), la feuille Cover d'Excel, les notes du projet Prism et le
+  pied de page du PDF indiquent les mêmes lignes : la **fenêtre
+  d'analyse** et la **durée analysée** (fin − début de la fenêtre, plus
+  l'étendue du premier au dernier pic R analysé), les **filtres**
+  enregistrés lors de la détection des pics, les bornes RR et les
+  intervalles exclus de la VRC, la **correction d'artefacts** (battements
+  retirés, par type), la **formule de QTc réellement utilisée** (avec le RR
+  précédent), les définitions des intervalles et le template d'ondes.
+  Chaque valeur porte son unité : VLF / LF / HF sont des puissances en
+  **ms²**, les n.u. ne concernent que LFn / HFn. **Valeurs modifiées
+  (cette version) :** la « durée » affichée par la ligne de verdict du
+  Summary et la tuile de durée était l'instant absolu du dernier battement
+  (elle comptait aussi le temps avant le début d'une fenêtre d'analyse) ;
+  c'est désormais la durée analysée. La ligne « Duration » de la feuille
+  Cover devient **Recording duration** (longueur du signal), et la colonne
+  `Duration_s` de la feuille HR_Statistics est remplacée par
+  `Recording_duration_s`, `Window_start_s`, `Window_end_s` et
+  `Analysed_duration_s`. Le rapport Summary et la page PDF, en partie en
+  français auparavant, sont désormais entièrement en anglais.
+  **Autres corrections de provenance (cette version) :** une fenêtre
+  d'analyse dont la fin dépasse la fin du signal est ramenée à la fin du
+  signal partout où elle est rapportée (la durée analysée et
+  `Window_end_s` comptaient du temps inexistant ; la ligne indique la fin
+  saisie). Une ligne **Signal crop** indique le recadrage au chargement
+  (Start / End crop) en temps fichier : tous les temps des rapports sont
+  relatifs à son début. La ligne **Filters** donne les fréquences de coupure
+  du passe-bande réellement appliquées à la fréquence d'échantillonnage de
+  l'enregistrement : le filtre borne chaque coupure à [0,01 ; 0,99] ×
+  Nyquist, si bien qu'à 2 kHz une coupure basse de 1 Hz vaut en réalité
+  10 Hz, et la ligne le dit désormais (le filtrage lui-même est inchangé).
+  Les effectifs de la correction d'artefacts sont présentés comme portant
+  sur tout l'enregistrement (elle s'applique avant le fenêtrage), et la
+  mention « exclus de la VRC » n'apparaît que pour des résultats qui
+  excluent réellement ces intervalles (les anciens résultats les
+  pontaient). Une session enregistrée conserve désormais la fenêtre sur
+  laquelle les résultats ont été calculés et les filtres / le recadrage
+  avec lesquels le signal a été préparé, et la restauration reprépare le
+  signal à partir de ceux-ci plutôt que des valeurs des widgets modifiées
+  après la détection (anciennes sessions : inchangé).
+- **Asymétrie RR (valeurs modifiées).** Les **indices de Porta** et de
+  **Guzik** du Summary suivent désormais les conventions publiées, les
+  mêmes que HRV_PI / HRV_GI de NeuroKit (feuille Excel HRV_NonLinear) :
+  PI de Porta (Porta et al. 2008) = points sous la ligne d'identité du
+  diagramme de Poincaré (accélérations, ΔRR < 0) / points hors de la
+  ligne, les ΔRR = 0 ne comptent donc plus au dénominateur ; GI de Guzik
+  (Guzik et al. 2006) = Σ des distances à la ligne des points au-dessus
+  (décélérations, ΔRR > 0) / Σ des distances de tous les points hors de la
+  ligne. Le Summary affichait auparavant la part des accélérations dans
+  Σ ΔRR² (complément d'un GI en distances au carré) et un PI comptant les
+  zéros au dénominateur. Les deux valent 50 % pour une série symétrique et
+  NaN quand aucun ΔRR n'est non nul ; le rapport, la feuille Cover de
+  l'Excel (« HR asymmetry ») et la table Non-linear de Prism (avec
+  désormais le GI) indiquent la convention. Dans cette table Prism, le
+  titre de ligne **« Porta Index » devient « Porta Index PI (%) »** (mêmes
+  valeurs HRV_PI de NeuroKit) et une ligne « Guzik Index GI (%) » est
+  ajoutée : une mise en page Prism qui cherche la ligne par son ancien
+  titre doit être mise à jour. Le diagramme en barres du Summary montre
+  décélérations et accélérations en part des paires à ΔRR ≠ 0 (la barre
+  des accélérations est le PI, la ligne à 50 % la symétrie) et donne les
+  paires à ΔRR = 0 comme un compte à part ; il divisait auparavant par
+  toutes les paires, d'où des barres qui ne correspondaient pas au PI.
+- La courbe **Quality over time** est datée par les battements
+  réellement comparés au gabarit : les pics trop proches des bords du
+  signal ne sont pas évalués, et la courbe associait les scores aux pics
+  depuis le premier, d'où un décalage d'un battement quand le premier pic
+  était exclu. La tuile « Poor-shape-match time » et la colonne
+  « quality » du CSV RR attribuent toutes deux chaque intervalle RR au
+  battement évalué qui le **commence** (Time_s − RR_ms de la ligne du CSV,
+  Time_s étant la fin de l'intervalle), comme le CSV le faisait quand
+  aucun battement de bord n'était écarté. Pour les résultats d'anciennes
+  versions, qui n'enregistraient pas les battements évalués, ceux-ci sont
+  reconstruits à la restauration de session à partir des pics restaurés
+  (même règle de bord) ; si c'est ambigu, la courbe, la tuile (« — ») et
+  la colonne du CSV sont toutes omises, et la barre d'état le signale.
 
 ### Interface
 

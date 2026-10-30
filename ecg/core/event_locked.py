@@ -134,14 +134,6 @@ def _positive(name: str, value: float) -> float:
     return v
 
 
-def _fraction(name: str, value: float) -> float:
-    """*value* as a float in (0, 1]; ValueError otherwise (NaN included)."""
-    v = float(value)
-    if not (np.isfinite(v) and 0.0 < v <= 1.0):
-        raise ValueError(f"{name} must lie in (0, 1], got {value!r}.")
-    return v
-
-
 def _onset_gaps(
     ons: np.ndarray, others: np.ndarray,
 ) -> "tuple[np.ndarray, np.ndarray]":

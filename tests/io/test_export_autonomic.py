@@ -215,7 +215,7 @@ def test_autonomic_only_workbook_needs_no_core_results(result):
     assert added == wb.sheetnames[1:]
     cover = _cover(wb)
     assert cover["Subject"] == "M7" and cover["File"] == "mouse_7.mat"
-    assert cover["Sampling rate"] == "2000 Hz" and cover["Duration"] == "240.0 s"
+    assert cover["Sampling rate"] == "2000 Hz" and cover["Recording duration"] == "240.0 s"
     assert "Analyze was not run" in cover["Core HRV"]
     assert "ks / kp calibration" in cover
     assert "Autonomic only" in wb["Cover"]["A1"].value

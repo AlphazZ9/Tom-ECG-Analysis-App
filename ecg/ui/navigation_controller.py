@@ -13,7 +13,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from ecg.core.models import event_kind_label
 from ecg.ui.theme import AMBER, BLUE_DARK, BORDER, MUTED, TEXT
+from ecg.ui.tab_keys import TAB_DETECTION
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
@@ -30,7 +32,7 @@ class NavigationController:
         """Keyboard left/right arrow navigation — only active on Detection tab."""
         app = self.app
         try:
-            if app.tabs.get() != "📈 Detection":
+            if app.tabs.get() != TAB_DETECTION:
                 return
         except Exception:
             return
@@ -159,7 +161,7 @@ class NavigationController:
         app.ui.nav_pos = max(0.0, min(t_nav - win / 2, sig_dur - win))
         self.sync_nav_pos_entry()
         try:
-            app.tabs.set("📈 Detection")
+            app.tabs.set(TAB_DETECTION)
         except Exception as e:
             log.debug("tabs.set Detection failed: %s", e)
         app._draw_detail()
@@ -226,7 +228,7 @@ class NavigationController:
         # Update title bar
         sev_icon = {"alert": "🔴", "warning": "🟠", "info": "🔵"}.get(ev.severity, "·")
         app.lbl_arr_event_title.configure(  # type: ignore[union-attr]
-            text=f"{sev_icon}  #{idx+1}  {ev.kind.replace('_',' ').title()}"
+            text=f"{sev_icon}  #{idx+1}  {event_kind_label(ev.kind)}"
                  f"  —  {ev.t_start:.2f} s → {ev.t_end:.2f} s  ({ev.hr_mean:.0f} bpm)",
             text_color=TEXT,
         )
@@ -301,10 +303,6 @@ class NavigationController:
         max_start = max(0.0, sig_dur - win)
         app.ui.nav_pos = max(0.0, min(max_start, t_click - win / 2.0))
         self.sync_nav_pos_entry()
-
-    def on_overview_scroll(self, event) -> None:
-        """Stub — scroll-to-zoom on the minimap is out of scope for Phase 3b."""
-        pass
 
     def on_detail_scroll(self, event) -> None:
         """Zoom the detail view's x-axis in/out centred on the cursor position.
