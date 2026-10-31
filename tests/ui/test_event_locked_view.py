@@ -1,5 +1,5 @@
 """
-HRV > Autonomic > Event-locked helpers (ecg.ui.event_locked_view) -- no Tk
+Time course > Event-locked helpers (ecg.ui.event_locked_view) -- no Tk
 window: panel parameters, events from the annotations, the per-event
 window means / traces of an Autonomic result (CSI family validity, HR and
 LF / HF judged on their own), the table / text / status, the cohort

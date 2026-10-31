@@ -339,7 +339,7 @@ class RightPanelMixin:
         self._btn(f, "🖼  Export Figures  (PNG)",      self._export_figures,    fpx, variant="secondary", h=28)
         self._btn(f, "📦  Export ZIP  (Excel+Figs)",  self._export_zip,        fpx, variant="secondary", h=28)
         self._btn(f, "📄  PDF Report  (1 page)",      self._export_pdf_report, fpx, variant="secondary", h=28)
-        self._btn(f, "🔬  Export Abnormal Events PDF", self._export_arrhythmia_pdf, fpx, variant="secondary", h=28)
+        self._btn(f, "🔬  Export Events PDF", self._export_arrhythmia_pdf, fpx, variant="secondary", h=28)
         self._btn(f, "🔬  Export GraphPad Prism",     self._export_prism,      fpx, variant="secondary", h=28)
 
     def _build_stat_section(self: ECGApp, parent) -> None:

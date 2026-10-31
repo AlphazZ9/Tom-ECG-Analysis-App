@@ -2,7 +2,7 @@
 """
 event_locked_controller.py
 --------------------------
-EventLockedController -- HRV > Autonomic > Event-locked: the per-event
+EventLockedController -- Time course > Event-locked: the per-event
 pre / post statistics of the Autonomic result around the time annotations
 (core.event_locked, Candia-Rivera et al., J Physiol 2025), their trace
 plot and table, the cohort registry (ecg.io.db event_locked table: save,
@@ -26,7 +26,8 @@ from ecg.io import db
 from ecg.ui.autonomic_view import _to_float, format_param, method_key
 from ecg.ui.event_locked_view import (
     ALL_LABELS, annotation_label_options, compute_event_locked,
-    draw_event_locked, event_status, event_table_frame, event_table_text,
+    EVENT_TABLE_TITLE, draw_event_locked, event_rows, event_status, event_table_frame,
+    event_table_text,
     events_signature, export_rows, normalise_event_params, other_annotation_onsets,
     parse_event_inputs, registry_params, registry_rows, select_events,
     subject_warning,
@@ -42,11 +43,11 @@ log = logging.getLogger("ecg")
 
 
 class EventLockedController:
-    IDLE_TEXT = ("  Compute the Autonomic indices (⟳ Compute above), add annotations "
+    IDLE_TEXT = ("  Compute the Autonomic mode, add annotations "
                  "(onset = their start), then ⟳ Compute event-locked")
     # invalidate() reasons -> label text (None: the idle hint)
     _STALE_TEXT = {
-        "peaks":       "  Peaks changed — compute the Autonomic indices, then event-locked, again",
+        "peaks":       "  Peaks changed — compute the Autonomic mode, then event-locked, again",
         "autonomic":   "  Autonomic indices recomputed — click ⟳ Compute event-locked again",
         "annotations": "  Annotations changed — click ⟳ Compute event-locked again",
     }
@@ -166,6 +167,7 @@ class EventLockedController:
         txt = getattr(self.app, "txt_event_locked", None)
         if txt is not None and hasattr(self.app, "_set_textbox"):
             self.app._set_textbox(txt, "")
+        self._show_rows(None)
         if had and reason in self._STALE_TEXT:
             # Kept in state, so a UI rebuild shows it again (show()).
             a.event_locked_stale = self._STALE_TEXT[reason]
@@ -176,6 +178,20 @@ class EventLockedController:
         # else: nothing was shown -- keep the label, so a repeated
         # invalidation (one peak edit can trigger several) does not erase
         # the stale notice of the first.
+
+    def _show_rows(self, el: "Any") -> None:
+        """The compact table beside the traces; empty without a result."""
+        fill = getattr(self.app, "_fill_event_rows", None)
+        head = getattr(self.app, "lbl_evt_table_head", None)
+        if fill is None or head is None:
+            return
+        fill(event_rows(el) if el is not None else [])
+        title = EVENT_TABLE_TITLE
+        if el is not None:
+            p = el.params
+            title = (f"PER EVENT · MEAN {float(p['pre_s']):g} S BEFORE VS "
+                     f"{float(p['post_s']):g} S AFTER")
+        head.configure(text=title)
 
     def _zscore(self) -> bool:
         chk = getattr(self.app, "chk_evt_z", None)
@@ -215,6 +231,7 @@ class EventLockedController:
         if txt is not None:
             self.app._set_textbox(txt, event_table_text(el),
                                   tsv=self.app._df_to_tsv(event_table_frame(el)))
+        self._show_rows(el)
         text, level = event_status(el)
         color = (_theme.GREEN if level == "ok"
                  else (_theme.ORANGE if level == "warn" else _theme.RED))
@@ -236,7 +253,7 @@ class EventLockedController:
         a = app.analysis
         res = a.autonomic_result
         if res is None:
-            self._fail("Compute the Autonomic indices first (⟳ Compute above).", _theme.ORANGE)
+            self._fail("Compute the Autonomic indices first (Autonomic mode).", _theme.ORANGE)
             return
         try:
             p = parse_event_inputs(app.cb_evt_label.get(), app.ent_evt_pre.get(),

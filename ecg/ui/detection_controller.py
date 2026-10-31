@@ -8,6 +8,7 @@ signal-quality scoring.
 """
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import threading
 from tkinter import messagebox
@@ -27,7 +28,6 @@ from ecg.ui.theme import (
     BLUE, BORDER, BORDER2, GREEN, LIGHT, MUTED, ORANGE, ORANGE_DEEP, RED,
     SPACE_M, SPACE_S,
 )
-from ecg.ui.widgets import update_quality_gauge
 from ecg.ui.dialogs import MethodAgreementDialog
 
 if TYPE_CHECKING:
@@ -42,7 +42,7 @@ class DetectionController:
 
     def update_undo_btns(self) -> None:
         """Update the toolbar's undo/redo buttons (single global pair, shared
-        by the Detection and Abnormal Events tabs)."""
+        by the Detection and Events tabs)."""
         n_u, n_r = len(self.app.detection.edit_undo), len(self.app.detection.edit_redo)
         for attr, n in [("btn_toolbar_undo", n_u), ("btn_toolbar_redo", n_r)]:
             try:
@@ -181,18 +181,6 @@ class DetectionController:
             quality = int(np.clip(100 * (1 - rr_cv) * ratio, 0, 100))
 
         self.app.detection.sig_quality = quality
-        color = GREEN if quality >= 70 else (ORANGE if quality >= 40 else RED)
-
-        def _update_gauge(q=quality, c=color) -> None:
-            self.app.lbl_quality.configure(text=f"Signal quality: {q}%", text_color=c)
-            # lbl_quality IS the gauge's caption label (see app._build_toolbar) --
-            # this immediately overwrites the line above with the finer
-            # Excellent/Good/Medium/Poor tiering, which is the intended
-            # visible result; the line above needs no changes of its own.
-            if self.app.quality_gauge is not None:
-                update_quality_gauge(self.app.quality_gauge, q)
-
-        self.app.after(0, _update_gauge)
 
     def on_det_method_change(self, choice: str) -> None:
         """Show/hide SG options frame based on selected detection method."""
@@ -269,8 +257,15 @@ class DetectionController:
         if self.app.signal.filtered is not None:
             self.app._draw_detail(self.app.ui.nav_pos)
 
+    def mark_peaks_edited(self) -> None:
+        """Note the time of a manual peak change, for the context strip."""
+        ui = getattr(self.app, "ui", None)
+        if ui is not None:
+            ui.peaks_edited_at = dt.datetime.now().isoformat(timespec="seconds")
+
     def push_edit_undo(self) -> None:
         """Snapshot state before a destructive edit action."""
+        self.mark_peaks_edited()
         snap = (frozenset(self.app.detection.manual_excluded), frozenset(self.app.detection.manual_added))
         self.app.detection.edit_undo.append(snap)
         if len(self.app.detection.edit_undo) > self.app._EDIT_UNDO_LIMIT:
@@ -278,21 +273,29 @@ class DetectionController:
         self.app.detection.edit_redo.clear()
         self.update_undo_btns()
 
+    def _drop_results(self) -> None:
+        """Discard the results and everything on screen derived from them.
+        No-op when there are none. A plot chain still running on them stops by
+        itself (run_plot_chain)."""
+        if self.app.analysis.results is None:
+            return
+        self.app.analysis.results  = None
+        self.app.analysis.epoch_df = None
+        self.app._reset_kpis()
+        self.app._reset_result_plots()
+        self.app._reset_hrv_readouts()
+
     def _invalidate_stale_results(self) -> None:
         """Call right before actually committing a peak-set change.
 
-        Rather than leaving SDNN/RMSSD/HRV tables/Poincaré/Summary/every
+        Rather than leaving SDNN/RMSSD/HRV tables/Poincaré/Report/every
         export showing the pre-edit numbers until the user remembers to
         click Analyze again. Must only be called on a code path that is
         actually about to change the accepted-peak set -- calling it
         unconditionally on click, before knowing whether the click will hit
         a peak, wipes results for a no-op click.
         """
-        if self.app.analysis.results is not None:
-            self.app.analysis.results  = None
-            self.app.analysis.epoch_df = None
-            self.app._reset_kpis()
-            self.app._reset_result_plots()
+        self._drop_results()
         # Outside the guard: the Autonomic view needs only peaks, so its
         # result can exist without core results.
         self.app.analysis_ctrl.invalidate_autonomic()
@@ -307,6 +310,7 @@ class DetectionController:
         excl, added = self.app.detection.edit_undo.pop()
         self.app.detection.manual_excluded = set(excl)
         self.app.detection.manual_added    = set(added)
+        self.mark_peaks_edited()
         self.apply_edit_state()
         n = len(self.app.detection.edit_undo)
         self.app._set_status(f"Undone  ({str(n) + ' left' if n else 'none'})  — Ctrl+Y to redo", ORANGE)
@@ -322,6 +326,7 @@ class DetectionController:
         excl, added = self.app.detection.edit_redo.pop()
         self.app.detection.manual_excluded = set(excl)
         self.app.detection.manual_added    = set(added)
+        self.mark_peaks_edited()
         self.apply_edit_state()
         self.app._set_status(f"Redone  ({len(self.app.detection.edit_redo)} remaining)", ORANGE)
         self.update_undo_btns()
@@ -330,11 +335,7 @@ class DetectionController:
         if self.app.signal.filtered is not None and self.app.detection.all_candidates is not None:
             # Undo/redo change the accepted-peak set just like a direct
             # edit does -- same stale-HRV invalidation as on_detail_click.
-            if self.app.analysis.results is not None:
-                self.app.analysis.results  = None
-                self.app.analysis.epoch_df = None
-                self.app._reset_kpis()
-                self.app._reset_result_plots()
+            self._drop_results()
             self.app.analysis_ctrl.invalidate_autonomic()
             self.run_detection(float(self.app.sl_thr.get()))  # type: ignore[union-attr]
             self.app._draw_detail(self.app.ui.nav_pos)
@@ -405,10 +406,7 @@ class DetectionController:
         self.app.detection.manual_excluded.clear()
         self.app.detection.manual_added.clear()
         # Invalidate any previous analysis — peaks have changed
-        self.app.analysis.results  = None
-        self.app.analysis.epoch_df = None
-        self.app._reset_kpis()
-        self.app._reset_result_plots()
+        self._drop_results()
         self.app.analysis_ctrl.invalidate_autonomic()
         self.app.detection.rpeaks_manual_excl  = np.array([], dtype=int)
         self.app.detection.rpeaks_manual_added = np.array([], dtype=int)
@@ -709,11 +707,7 @@ class DetectionController:
         """
         self.app.ui.thr_debounce_id = None
         # Peaks are about to change — invalidate stale results
-        if self.app.analysis.results is not None:
-            self.app.analysis.results  = None
-            self.app.analysis.epoch_df = None
-            self.app._reset_kpis()
-            self.app._reset_result_plots()
+        self._drop_results()
         self.app.analysis_ctrl.invalidate_autonomic()
         self.run_detection(value)
         self.app._draw_detail(self.app.ui.nav_pos)
@@ -731,28 +725,6 @@ class DetectionController:
                 self.apply_threshold_ui(value)
         except ValueError:
             pass
-
-    def update_quality_badge(self) -> None:
-        """Update the persistent quality badge in the KPI bar."""
-        if not hasattr(self.app, "_lbl_quality_badge"):
-            return
-        beat_corr = (self.app.analysis.results or {}).get("beat_corr")
-        if beat_corr is None or len(beat_corr) == 0:
-            self.app._lbl_quality_badge.configure(text="", fg_color="transparent")
-            return
-        mean_r = float(np.nanmean(beat_corr))
-        n_bad  = int(np.sum(beat_corr < 0.90))
-        pct    = 100.0 * n_bad / max(len(beat_corr), 1)
-        if mean_r >= 0.95:
-            col, label = GREEN,   f"● Excellent  {mean_r:.3f}"
-        elif mean_r >= 0.90:
-            col, label = GREEN,   f"● Good  {mean_r:.3f}"
-        elif mean_r >= 0.80:
-            col, label = ORANGE,  f"● Fair  {mean_r:.3f}  ({pct:.0f}% low)"
-        else:
-            col, label = RED,     f"● Poor  {mean_r:.3f}  ({pct:.0f}% low)"
-        self.app._lbl_quality_badge.configure(text=label, fg_color=col,
-                                           text_color="white")
 
     def check_method_agreement(self) -> None:
         """Cross-check the active detection result against independently
@@ -868,6 +840,8 @@ class DetectionController:
                 f"{n_disagree} unconfirmed"
             )
             self.app.detection.agreement_summary = summary
+            self.app.detection.agreement_pct = pct_confirmed
+            self.app.detection.agreement_peaks = primary
             if self.app.lbl_agreement_status is not None:
                 color = (GREEN if n_disagree == 0
                          else ORANGE if pct_confirmed >= 90 else RED)

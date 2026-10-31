@@ -110,6 +110,8 @@ class DetectionState:
     # Cross-method agreement (detection_controller.py: check_method_agreement())
     agreement_disagree_samples: Optional[np.ndarray] = None  # accepted peaks 0 other methods confirmed
     agreement_summary: str = ""                  # last run's human-readable summary line
+    agreement_pct: Optional[float] = None        # last run's % of beats confirmed by >=1 other method
+    agreement_peaks: Optional[np.ndarray] = None  # the peaks that run was on; other peaks = no value
 
 
 @dataclass
@@ -118,7 +120,10 @@ class AnalysisState:
     results: Optional[dict] = None
     epoch_df: Optional[pd.DataFrame] = None
     rolling_hrv_df: Optional[pd.DataFrame] = None
-    # HRV > Autonomic (core.autonomic, Candia-Rivera et al. 2025): the
+    # What Epochs and Sliding were last computed with, to draw those frames
+    # again after a UI rebuild or a session restore: {"epochs": {...}, "rolling": {...}}.
+    windowed_view: dict = field(default_factory=dict)
+    # Time course > Autonomic (core.autonomic, Candia-Rivera et al. 2025): the
     # time-resolved CSI / CPI of the accepted peaks (an AutonomicResult)
     # and, when requested, the SPWVD LF / HF (core.spwvd.spwvd_lf_hf()'s
     # dict, or {"error": reason} when it could not be computed). Derived
@@ -139,7 +144,7 @@ class AnalysisState:
     # Per-event pre/post table derived from autonomic_result
     # (core.event_locked.event_window_means); dropped with it.
     event_locked_df: Optional[pd.DataFrame] = None
-    # HRV > Autonomic > Event-locked: the full result behind that table
+    # Time course > Event-locked: the full result behind that table
     # (ecg.ui.event_locked_view.EventLockedResult -- table, traces, the
     # events and configuration it was built from); dropped with
     # autonomic_result and when the annotations it was locked to change.
@@ -159,6 +164,10 @@ class AnalysisState:
     # current ones (AnalysisController.arrhythmia_is_current) so exports
     # never write counts from an earlier peak set or analysis window.
     arrhythmia_basis: Optional[dict] = None
+    # How they were classified, to draw them again and say what they rest on:
+    # {"baseline": arrhythmia_baseline_info(), "brady_pct", "av_note", "av_on",
+    # "peaks", "fs"}; None before a run.
+    arrhythmia_run: Optional[dict] = None
     arr_selected_idx: int = -1                  # index into arrhythmia_events
     arr_nav_pos: float = 0.0                    # current t_start in arrhythmia ECG view
     arr_win: float = 3.0                        # seconds shown in arrhythmia ECG view
@@ -214,7 +223,9 @@ class UIState:
     rrhr_strip_visible: bool = True              # RR/HR/Quality sub-plot strip toggle
     show_spike_markers: bool = True              # RR/HR tachogram spike-marker toggle
     left_panel_collapsed: bool = False           # left sidebar hide/show toggle
-    right_panel_collapsed: bool = False          # right panel hide/show toggle
+    # Right panel hide/show toggle. Closed at first: the tabs and the Report hold the
+    # numbers and exports; Stats ⟨ opens it (quick statistics, more exports, ML saving).
+    right_panel_collapsed: bool = True
     # Filter preview (before/after overlay) -- computed on-demand for the
     # currently visible detail window only, never touches filtered signal or
     # any detection state.
@@ -230,14 +241,34 @@ class UIState:
     ov_drag_after_id: "str | None" = None        # minimap drag-to-scrub debounce handle
     scroll_sync_after_id: "str | None" = None    # detail scroll-zoom resync debounce handle
     nav_key_after_id: "str | None" = None        # arrow-key repeat redraw debounce handle
-    arr_scroll_after_id: "str | None" = None     # Abnormal Events scroll-zoom resync debounce handle
+    arr_scroll_after_id: "str | None" = None     # Events scroll-zoom resync debounce handle
     beat_nav_cid: Optional[int] = None           # mpl event ID for beat navigator
     rr_click_cid: Optional[int] = None           # mpl event connection id for RR click-to-navigate
     rr_spike_times: Optional[np.ndarray] = None  # cached spike times from the last plot_rr(), for the Detection-tab stepper
-    hrv_current_view: str = "RR / HR"
-    # HRV > Autonomic's own sub-view toggle ("Time series" / "Event-locked"),
-    # kept across a UI rebuild.
-    autonomic_subview: str = "Time series"
+    # Time course tab: the mode shown, kept across a UI rebuild and saved with
+    # the session. Replaces hrv_current_view and autonomic_subview, which a
+    # session may still hold (ecg.ui.tab_keys.time_course_mode).
+    time_course_mode: str = "Epochs"
+    # Morphology & Intervals: distribution plots open; a UI rebuild keeps it.
+    morph_dist_open: bool = False
+    # When each module's result last landed (ISO strings; the out-of-date banner).
+    module_computed_at: dict = field(default_factory=dict)
+    # Report: Include ticks that differ from the default, as {line: [ticked, the
+    # line's state when ticked]}: a tick holds until that state changes.
+    report_include: dict = field(default_factory=dict)
+    # Report: the text report open under the table; a UI rebuild keeps it.
+    report_text_open: bool = False
+    # Rhythm & HRV: human and raw NeuroKit metrics shown, kept across a rebuild.
+    hrv_show_all: bool = False
+    # The modules a job is running or about to run on (the computing state of
+    # the tab bar); ticks without a job, after which a chain that stopped
+    # (refused, failed) no longer counts as running.
+    running_modules: set = field(default_factory=set)
+    running_idle_ticks: int = 0
+    # Shown by the context strip (ISO strings, saved with the session): when
+    # core results last landed, when the peaks were last edited by hand.
+    computed_at: Optional[str] = None
+    peaks_edited_at: Optional[str] = None
     ctx_keys: list = field(default_factory=list)
     operation_start_time: Optional[float] = None
     figure_cache: dict = field(default_factory=dict)

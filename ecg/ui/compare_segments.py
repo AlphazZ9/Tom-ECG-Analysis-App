@@ -75,7 +75,7 @@ class CompareSegmentsMixin:
     ]
 
     def _open_compare_segments(self: ECGApp) -> None:
-        """Open the Segment Comparison window.
+        """Open the Segment Comparison window (Time course > Event-locked, Ctrl+M).
 
         Two configurable time windows (A / B) → side-by-side metric table
         + superimposed RR tachogram.  All stats run on a background thread.

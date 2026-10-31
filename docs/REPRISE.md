@@ -5,22 +5,20 @@ copier quelques `.mat` hors du dépôt (ils ne vont pas sur GitHub).
 
 ## État de ce commit
 - Audit P2/P3 : corrigé et vérifié sur signaux de synthèse.
-- Refonte des onglets selon la maquette : EN COURS. Étapes 1 (découpage de `app.py`) et 2 (table commune des
-  chiffres, `ecg/core/metric_table.py`, `ecg/ui/freshness.py`) faites ; la relecture de l'étape 2 n'était pas
-  forcément close à ce commit. Les onglets visibles ne sont pas encore réorganisés.
+- Refonte des onglets selon la maquette : faite (Signal & Detection, Rhythm & HRV, Time course,
+  Morphology & Intervals, Events, Report). `app.py` passe de 6 495 à 418 lignes.
+- Valeurs : identiques à la référence capturée avant la refonte sur « 248 - Baseline 5 min.mat ».
+  Seul l'arrondi de deux libellés d'état et l'affichage du score de qualité diffèrent.
+- La dernière passe de réparation n'a pas eu de contre-vérification indépendante.
 - Maquette : https://claude.ai/artifact/AqCuLQZVQAnpzGvWJmEyNJ (privée, même compte).
 
-## Plan de la refonte
-1. Découpage de `app.py` et constantes d'onglets
-2. Table commune des chiffres et état par module
-3. Coque de l'application et Signal & Detection
-4. Rhythm & HRV
-5. Time course (Epochs, Sliding, Autonomic, Event-locked)
-6. Morphology & Intervals, puis Events
-7. Report, suppression des anciennes vues, documentation
-
-Règle de la refonte : aucune valeur calculée ne change, seul son emplacement change.
-La délinéation (`ecg/core/wave_template.py`, `analyse_intervals`) n'y est pas modifiée.
+## Écarts à la maquette, à arbitrer
+- Events : pas de ligne de base « 30 s avant une annotation » (nouveau calcul, exclu de la refonte).
+- Epochs et Sliding gardent deux boucles de calcul : les fusionner changerait le RMSSD dans un cas testé.
+- Les onglets Intervals et Events gardent leur propre bouton, malgré « Analyze all ».
+- La restauration de session ne ramène pas Events, Autonomic ni Event-locked.
+- Le panneau Statistics (fermé au départ) et la barre latérale restent, contrairement à la maquette.
+- n et état ne figurent que dans les tables Metrics (Excel, Prism), pas dans les autres feuilles.
 
 ## À faire ensuite : mesure de PR et QT sur vrais signaux
 Sur vrais enregistrements, PR et QT battement par battement ne sont pas fiables : l'onde P (0,2-0,25) est au

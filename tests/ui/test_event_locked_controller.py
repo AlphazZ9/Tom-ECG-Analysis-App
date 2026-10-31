@@ -1,5 +1,5 @@
 """
-EventLockedController (HRV > Autonomic > Event-locked) without a Tk window
+EventLockedController (Time course > Event-locked) without a Tk window
 -- a stub app stands in for ECGApp: computing needs an Autonomic result and
 annotations; the result is stored, drawn and disclosed; it is dropped with
 the Autonomic result (peak change, recompute, new file) and when the

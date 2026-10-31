@@ -1,5 +1,5 @@
 """
-HRV > Autonomic view helpers (ecg.ui.autonomic_view) -- no Tk window:
+Time course > Autonomic view helpers (ecg.ui.autonomic_view) -- no Tk window:
 parameter parsing (strict, for a Compute click) and normalisation (tolerant,
 for sessions and UI rebuilds), the withheld-window spans, the
 recording-level summary and status, and the stacked figure drawn on a bare

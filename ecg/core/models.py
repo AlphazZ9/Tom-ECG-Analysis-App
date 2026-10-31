@@ -128,7 +128,7 @@ class MouseECG:
     # restricted, to this many valid intervals (~10 s of compute at 3000),
     # taken as the contiguous block with the fewest excluded intervals --
     # disclosed with its count and time span. Configurable in the
-    # Non-linear tab; 0 = no cap.
+    # Rhythm & HRV page; 0 = no cap.
     ENTROPY_MAX_BEATS: int = 2000
 
     # ── Compare Segments: non-overlapping block length ──────

@@ -3,8 +3,8 @@
 ecg.core.metric_table
 ---------------------
 One table of metric rows over the existing results: value, unit, basis n and
-state. The Summary cards, KPI tiles, text report, PDF rows and the Excel
-Metrics sheet read their numbers from it.
+state. The KPI tiles, the Report tab and its text report, the PDF rows and the
+Excel Metrics sheet read their numbers from it.
 
 It only READS what the analysis steps stored (results, frames, attrs) or calls
 the same core functions the views called; it defines no metric. Values are raw
@@ -27,7 +27,7 @@ import numpy as np
 import pandas as pd
 
 from ecg.core.analysis import (
-    _NL_ENTROPY_PREFIXES, analysed_duration_s, hrv_freq_is_legacy,
+    HR_RANGE_PCTL, _NL_ENTROPY_PREFIXES, analysed_duration_s, hrv_freq_is_legacy,
     hrv_freq_withheld_reason, intervals_use_legacy_definitions, mean_hr_bpm,
     noisy_time_pct, nonlinear_subset_text, qt_beat_variability,
     rr_asymmetry_indices, rr_exclusion_report, rr_valid_mask,
@@ -58,7 +58,7 @@ TIER_ALL = "all"
 # Sentinel: build_metric_table works out the RR asymmetry itself.
 AUTO_ASYMMETRY: Any = object()
 
-MIN_PAIRS_ASYMMETRY = 8     # below this the Summary shows no asymmetry block
+MIN_PAIRS_ASYMMETRY = 8     # below this no asymmetry block is shown
 BEAT_CORR_THRESHOLD = 0.90  # Poor-shape-match threshold of the quality tiles
 
 INTERVAL_COLUMNS = (("PR_ms", "PR"), ("QRS_ms", "QRS"), ("QT_ms", "QT"), ("QTc_ms", "QTc"))
@@ -70,7 +70,11 @@ _TIME_CURATED = {
     "HRV_SDNN":   ("SDNN", "ms", 1),
     "HRV_RMSSD":  ("RMSSD", "ms", 1),
     "HRV_pNN6":   ("pNN6", "%", 1),
-    "HRV_pNN20":  ("pNN20", "%", 1),
+}
+# Thresholds calibrated to human RR intervals: behind "Show all" in mice.
+_TIME_EXTRA = {
+    "HRV_pNN20": ("pNN20 (human)", "%", 1),
+    "HRV_pNN50": ("pNN50 (human)", "%", 1),
 }
 _TIME_UNITS = {
     "HRV_SDANN1": "ms", "HRV_SDNNI1": "ms", "HRV_SDANN2": "ms", "HRV_SDNNI2": "ms",
@@ -98,10 +102,10 @@ _NONLIN_CURATED = {
     "HRV_SD1":        ("SD1", "ms", 1),
     "HRV_SD2":        ("SD2", "ms", 1),
     "HRV_SampEn":     ("SampEn", "", 2),
-    "HRV_ApEn":       ("ApEn", "", 2),
     "HRV_DFA_alpha1": ("DFA α1", "", 2),
     "HRV_DFA_alpha2": ("DFA α2", "", 2),
 }
+_NONLIN_EXTRA = {"HRV_ApEn": ("ApEn", "", 2)}
 # Computed on successive valid pairs, not on single intervals.
 _PAIR_COLUMNS = {"HRV_RMSSD", "HRV_SDSD", "HRV_pNN6", "HRV_pNN20", "HRV_pNN50",
                  "HRV_SD1", "HRV_SD2"}
@@ -218,7 +222,7 @@ def results_rr_valid(r: dict) -> np.ndarray:
 
 def results_asymmetry(r: dict) -> "Optional[dict]":
     """rr_asymmetry_indices() of the successive valid RR pairs of *r*, under
-    the Summary's own rule (None below MIN_PAIRS_ASYMMETRY pairs)."""
+    the rule of the views (None below MIN_PAIRS_ASYMMETRY pairs)."""
     a, b = successive_valid_pairs(np.asarray(r.get("rr_ms", np.array([])), dtype=float),
                                   results_rr_valid(r))
     return rr_asymmetry_indices(a, b) if len(a) >= MIN_PAIRS_ASYMMETRY else None
@@ -297,9 +301,11 @@ def _hr_rows(r: dict, rep: dict) -> "list[MetricRow]":
 
 
 def _frame_rows(df: "Optional[pd.DataFrame]", prefix: str, module: str, group: str,
-                curated: dict, units: dict, basis: "Any") -> "list[MetricRow]":
+                curated: dict, units: dict, basis: "Any",
+                extra: "Optional[dict]" = None) -> "list[MetricRow]":
     """One row per readable column of a one-line result frame. *basis* maps a
-    column to (basis_n, basis_total, basis_text)."""
+    column to (basis_n, basis_total, basis_text); *extra* labels columns of the
+    "all" tier the way *curated* does its own."""
     if not _nonempty(df):
         return []
     rows = []
@@ -307,13 +313,26 @@ def _frame_rows(df: "Optional[pd.DataFrame]", prefix: str, module: str, group: s
         v = _first_value(df, str(col))
         if v is None:
             continue
-        meta = curated.get(col)
+        meta = curated.get(col) or (extra or {}).get(col)
         label, unit, dec = meta if meta else (str(col), "", 3)
         unit = units.get(col, unit)
         bn, bt, bx = basis(col)
         rows.append(MetricRow(f"{prefix}.{col}", module, group, label, v, unit, bn, bt, bx,
-                              tier=TIER_CURATED if meta else TIER_ALL, decimals=dec))
+                              tier=TIER_CURATED if col in curated else TIER_ALL,
+                              decimals=dec))
     return rows
+
+
+def _freq_basis(col: str, attrs: dict, n: "Optional[int]", total: "Optional[int]",
+                rr_text: str) -> tuple:
+    """(n, total, text) of a spectral metric: a band power also says its band,
+    from the attrs analyse_hrv_freq stored."""
+    bands = attrs.get("bands")
+    i = {"HRV_VLF": 0, "HRV_LF": 1, "HRV_HF": 2}.get(col)
+    if i is not None and bands is not None and len(bands) > i:
+        lo, hi = bands[i]
+        return n, total, f"Welch, {float(lo):g}–{float(hi):g} Hz; {rr_text}"
+    return n, total, rr_text
 
 
 def _pairs_n(r: dict) -> "Optional[int]":
@@ -377,6 +396,11 @@ def interval_rows(ivl: "Optional[pd.DataFrame]") -> "list[MetricRow]":
                               f"{label} SD across beats",
                               float(d.std()) if n else float("nan"), "ms", n, total,
                               text, tier=TIER_ALL, decimals=1))
+        for name, q in (("q1", 25), ("q3", 75)):
+            rows.append(MetricRow(f"intervals.{col}.{name}", "intervals", "Intervals",
+                                  f"{label} {name.upper()} across beats",
+                                  float(np.percentile(d, q)) if n else float("nan"), "ms", n, total,
+                                  text, tier=TIER_ALL, decimals=1))
     if "QT_ms" in ivl.columns:
         q = qt_beat_variability(ivl["QT_ms"].to_numpy(dtype=float))
         rows.append(MetricRow("intervals.QT_iqr", "intervals", "Intervals",
@@ -473,9 +497,10 @@ def _event_rows(events: "Optional[list]", summary: "Optional[dict]") -> "list[Me
 def _autonomic_rows(result: Any) -> "list[MetricRow]":
     if result is None:
         return []
-    p = dict(getattr(result, "params", {}) or {})
-    n = p.get("n_beats")
-    text = f"{n} windows, {p.get('n_windows_withheld', 0)} withheld" if n is not None else ""
+    # Whole-recording values: every valid pair, not the sliding windows (those
+    # are the module's status row).
+    n = dict(getattr(result, "params", {}) or {}).get("n_pairs_total")
+    text = f"{n} successive valid RR pairs" if n is not None else ""
     return [MetricRow(f"autonomic.{k}", "autonomic", "Autonomic", label,
                       getattr(result, attr, float("nan")), "ms", n, None, text, decimals=2)
             for k, attr, label in (("SD01_ms", "sd01", "SD01 (whole-recording SD1)"),
@@ -577,16 +602,17 @@ def build_metric_table(
             return n_rr, rep["n_intervals"], rr_text
 
         rows += _frame_rows(r.get("hrv_time"), "hrv_time", "core", "HRV time domain",
-                            _TIME_CURATED, _TIME_UNITS, time_basis)
+                            _TIME_CURATED, _TIME_UNITS, time_basis, _TIME_EXTRA)
         legacy = hrv_freq_is_legacy(r)
+        fd_attrs = dict(getattr(r.get("hrv_freq"), "attrs", {}) or {})
         rows += _frame_rows(r.get("hrv_freq"), "hrv_freq", "frequency", "HRV frequency domain",
                             _FREQ_CURATED, _FREQ_UNITS_LEGACY if legacy else _FREQ_UNITS,
-                            lambda col: (n_rr, rep["n_intervals"], rr_text))
+                            lambda col: _freq_basis(col, fd_attrs, n_rr, rep["n_intervals"], rr_text))
         nl = r.get("hrv_nonlin")
         attrs = dict(getattr(nl, "attrs", {}) or {})
         rows += _frame_rows(nl, "hrv_nonlin", "nonlinear", "HRV non-linear",
                             _NONLIN_CURATED, {},
-                            lambda col: _nonlinear_basis(col, attrs, n_pairs))
+                            lambda col: _nonlinear_basis(col, attrs, n_pairs), _NONLIN_EXTRA)
         rows += interval_rows(r.get("intervals"))
         ix = results_asymmetry(r) if asymmetry is AUTO_ASYMMETRY else asymmetry
         rows += _asymmetry_rows(ix)
@@ -602,11 +628,113 @@ def _with_state(row: MetricRow, state: str) -> MetricRow:
     return MetricRow(**{**row.__dict__, "state": state})
 
 
+# ── what the Report tab lists and an export can leave out ────────────────
+
+@dataclass(frozen=True)
+class ReportModule:
+    """One line of the Report tab: the MODULES behind it, by state."""
+    key: str
+    label: str
+    modules: "tuple[str, ...]"
+
+
+REPORT_QUALITY = "quality"
+REPORT_RHYTHM = "rhythm"
+REPORT_TIME_COURSE = "time_course"
+REPORT_AUTONOMIC = "autonomic"
+REPORT_INTERVALS = "intervals"
+REPORT_EVENTS = "events"
+REPORT_MODULES = (
+    ReportModule(REPORT_QUALITY, "Signal quality", ("core",)),
+    ReportModule(REPORT_RHYTHM, "Rhythm & HRV", ("core", "frequency", "nonlinear")),
+    ReportModule(REPORT_TIME_COURSE, "Time course", ("epochs", "rolling")),
+    # An event-locked table is read from the indices: they go out together.
+    ReportModule(REPORT_AUTONOMIC, "Autonomic CSI/CPI", ("autonomic", "event_locked")),
+    ReportModule(REPORT_INTERVALS, "Intervals", ("intervals",)),
+    ReportModule(REPORT_EVENTS, "Events", ("events",)),
+)
+_MODULE_REPORT = {"core": REPORT_RHYTHM, "frequency": REPORT_RHYTHM, "nonlinear": REPORT_RHYTHM,
+                  "epochs": REPORT_TIME_COURSE, "rolling": REPORT_TIME_COURSE,
+                  "autonomic": REPORT_AUTONOMIC, "event_locked": REPORT_AUTONOMIC,
+                  "intervals": REPORT_INTERVALS, "events": REPORT_EVENTS}
+# What the results hold for a Report line; ``hr`` stays, the Cover and the
+# provenance read its counts.
+_RESULT_KEYS = {
+    REPORT_RHYTHM: ("rr_ms", "rr_valid", "rr_t_s", "rr_df", "hrv_time", "hrv_freq", "hrv_nonlin"),
+    REPORT_INTERVALS: ("intervals",),
+}
+
+
+def report_module_of(row: MetricRow) -> "Optional[str]":
+    """The Report line a row goes out with; None for what every export states
+    (the artifact correction and the analysed duration: provenance)."""
+    if row.key.startswith("artifact.") or row.key == "core.duration_s":
+        return None
+    if row.key.startswith("quality."):
+        return REPORT_QUALITY
+    return _MODULE_REPORT.get(row.module)
+
+
+def filter_table(t: MetricTable, included: "Mapping[str, bool]") -> MetricTable:
+    """The rows of the Report lines ticked in *included* (absent = ticked)."""
+    return MetricTable([r for r in t.rows
+                        if included.get(report_module_of(r) or "", True)])
+
+
+def filter_results(results: "Optional[dict]", included: "Mapping[str, bool]") -> "Optional[dict]":
+    """*results* without what the unticked Report lines hold, the same dict when
+    nothing is left out: an export of everything is an export of the results."""
+    if results is None:
+        return None
+    drop = [k for line, keys in _RESULT_KEYS.items() if not included.get(line, True) for k in keys]
+    if not drop:
+        return results
+    return {k: v for k, v in results.items() if k not in drop}
+
+
+def report_key_results(t: MetricTable, autonomic_method: str = "",
+                       events_baseline: str = "") -> "dict[str, str]":
+    """The Key result of each Report line, in the text of the tab it comes from;
+    *autonomic_method* and *events_baseline* are what those tabs state of how
+    the values were obtained. A dash when the line has no value."""
+    quality = (f"score {t.text('quality.score', 0)} · corr {t.text('quality.mean_corr', 3)}"
+               if t.has("quality.score") else MISSING)
+    rhythm = (f"HR {metric_text(t, 'hr.mean')} bpm · SDNN {metric_text(t, 'hrv_time.HRV_SDNN')} ms · "
+              f"LF/HF {metric_text(t, 'hrv_freq.HRV_LFHF')}" if t.has("hr.mean") else MISSING)
+
+    def part(status_key: str, name: str) -> "list[str]":
+        row = t.row(status_key)
+        return [f"{row.basis_n} {name}"] if row is not None and row.basis_n is not None else []
+
+    time_course = " · ".join(part("epochs.status", "epochs")
+                             + part("rolling.status", "sliding windows")) or MISSING
+    auto_row, ev_row = t.row("autonomic.status"), t.row("event_locked.status")
+    autonomic = " · ".join(x for x in (
+        autonomic_method if auto_row is not None and auto_row.basis_text else "",
+        auto_row.basis_text if auto_row is not None else "",
+        ev_row.basis_text if ev_row is not None else "") if x) or MISSING
+    measured = t.row("intervals.beats_measured")
+    intervals = MISSING
+    if measured is not None:
+        intervals = (" · ".join(f"{name} {t.text(f'intervals.{col}')}" for col, name in INTERVAL_COLUMNS)
+                     + f" ms · {measured.value}/{measured.basis_total} beats measured")
+    ev = t.row("events.status")
+    events = MISSING
+    if ev is not None and ev.basis_n is not None:
+        events = " · ".join(x for x in (
+            f"{ev.basis_n} event{'s' if ev.basis_n != 1 else ''}",
+            (f"{t.value('events.n_premature')} premature beat"
+             f"{'s' if t.value('events.n_premature') != 1 else ''}") if t.has("events.n_premature") else "",
+            events_baseline) if x)
+    return {REPORT_QUALITY: quality, REPORT_RHYTHM: rhythm, REPORT_TIME_COURSE: time_course,
+            REPORT_AUTONOMIC: autonomic, REPORT_INTERVALS: intervals, REPORT_EVENTS: events}
+
+
 # ── texts shared by several views ────────────────────────────────────────
 
 def quality_tile_texts(t: MetricTable) -> "dict[str, str]":
     """The Signal Quality values shown identically by the KPI tiles and the
-    Summary panel (the score differs: '66' there, '66%' here)."""
+    Signal & Detection panel."""
     n_row = t.row("quality.n_bad")
     bad = MISSING
     if n_row is not None and n_row.basis_n:
@@ -627,3 +755,172 @@ def artifact_text(t: MetricTable) -> str:
     return (f"{t.value('artifact.removed')}  ({t.value('artifact.n_duplicate', 0)} dup · "
             f"{t.value('artifact.n_nonphysio', 0)} non-physio · "
             f"{t.value('artifact.n_ectopic', 0)} ectopic)")
+
+
+# ── what the Rhythm & HRV page shows ─────────────────────────────────────
+# One text per metric: the KPI cards, the table, the spectrum legend and the
+# Poincaré title all go through format_metric, so they cannot disagree.
+
+# key -> (scale, decimals, unit on screen). The raw value stays in the table.
+_SCREEN_FORMATS = {
+    "hr.mean":              (1.0, 0, "bpm"),
+    "hr.min":               (1.0, 0, "bpm"),
+    "hr.max":               (1.0, 0, "bpm"),
+    "hrv_time.HRV_MeanNN":  (1.0, 1, "ms"),
+    "hrv_time.HRV_SDNN":    (1.0, 1, "ms"),
+    "hrv_time.HRV_RMSSD":   (1.0, 1, "ms"),
+    "hrv_time.HRV_pNN6":    (1.0, 1, "%"),
+    "hrv_freq.HRV_VLF":     (1.0, 2, "ms²"),
+    "hrv_freq.HRV_LF":      (1.0, 2, "ms²"),
+    "hrv_freq.HRV_HF":      (1.0, 2, "ms²"),
+    "hrv_freq.HRV_LFn":     (100.0, 1, "n.u."),
+    "hrv_freq.HRV_HFn":     (100.0, 1, "n.u."),
+    "hrv_freq.HRV_LFHF":    (1.0, 2, ""),
+    "hrv_nonlin.HRV_SD1":   (1.0, 1, "ms"),
+    "hrv_nonlin.HRV_SD2":   (1.0, 1, "ms"),
+    "hrv_nonlin.HRV_SD1SD2": (1.0, 2, ""),
+    "hrv_nonlin.HRV_SampEn": (1.0, 2, ""),
+    "hrv_nonlin.HRV_DFA_alpha1": (1.0, 2, ""),
+    "hrv_nonlin.HRV_DFA_alpha2": (1.0, 2, ""),
+}
+_LEGACY_SCREEN_UNITS = {"a.u., legacy": "a.u.", "ln a.u., legacy": "ln a.u.",
+                        "fraction of TP, legacy": "% of TP"}
+
+# The curated rows of the page, in order, by group.
+RHYTHM_GROUPS = (
+    ("TIME DOMAIN", "core", ("hrv_time.HRV_MeanNN", "hrv_time.HRV_SDNN",
+                             "hrv_time.HRV_RMSSD", "hrv_time.HRV_pNN6")),
+    ("FREQUENCY", "frequency", ("hrv_freq.HRV_VLF", "hrv_freq.HRV_LF", "hrv_freq.HRV_HF",
+                                "hrv_freq.HRV_LFn", "hrv_freq.HRV_HFn", "hrv_freq.HRV_LFHF")),
+    ("NON-LINEAR", "nonlinear", ("hrv_nonlin.HRV_SD1", "hrv_nonlin.HRV_SD2",
+                                 "hrv_nonlin.HRV_SampEn", "hrv_nonlin.HRV_DFA_alpha1",
+                                 "hrv_nonlin.HRV_DFA_alpha2")),
+)
+_RHYTHM_LABELS = {f"{prefix}.{col}": meta[0] for prefix, curated in (
+    ("hrv_time", _TIME_CURATED), ("hrv_freq", _FREQ_CURATED), ("hrv_nonlin", _NONLIN_CURATED))
+    for col, meta in curated.items()}
+
+
+@dataclass(frozen=True)
+class RhythmCard:
+    key: str
+    name: str
+    value: str
+    unit: str
+    note: str
+
+
+@dataclass(frozen=True)
+class RhythmRow:
+    group: str
+    key: str
+    label: str
+    value: str
+    unit: str
+    basis: str
+    tier: str = TIER_CURATED
+
+
+def format_metric(key: str, value: Any, row: "Optional[MetricRow]" = None,
+                  missing: str = MISSING) -> str:
+    """The on-screen text of *value* for metric *key*; *missing* when it is
+    absent or not finite. Keys without a format use their row's decimals."""
+    v = _as_float(value)
+    if v is None or not np.isfinite(v):
+        return missing
+    fmt = _SCREEN_FORMATS.get(key)
+    if fmt is not None:
+        return f"{v * fmt[0]:.{fmt[1]}f}"
+    return f"{v:.{row.decimals if row is not None else 3}f}"
+
+
+def metric_text(t: MetricTable, key: str, missing: str = MISSING) -> str:
+    return format_metric(key, t.value(key, None), t.row(key), missing)
+
+
+def screen_unit(t: MetricTable, key: str) -> str:
+    """The unit next to metric_text: an older session's spectrum keeps its own."""
+    row = t.row(key)
+    if row is not None and "legacy" in row.unit:
+        return _LEGACY_SCREEN_UNITS.get(row.unit, row.unit)
+    fmt = _SCREEN_FORMATS.get(key)
+    if fmt is not None:
+        return fmt[2]
+    return row.unit if row is not None else ""
+
+
+def _module_note(t: MetricTable, module: str) -> str:
+    """Why a module's rows are missing: its status note, else not computed."""
+    row = t.row(f"{module}.status")
+    return (row.note if row is not None else "") or "not computed"
+
+
+def rhythm_cards(t: MetricTable) -> "list[RhythmCard]":
+    """The six KPI cards. Notes say what the code does: the HR range is the
+    2nd–98th percentile of the instantaneous HR (HR_RANGE_PCTL), not its extremes."""
+    def card(key, name, value_key, note):
+        return RhythmCard(key, name, metric_text(t, value_key), screen_unit(t, value_key), note)
+
+    lo, hi = HR_RANGE_PCTL
+    n_valid = t.value("hr.n_valid", None)
+    pairs = t.row("hrv_time.HRV_RMSSD")
+    return [
+        card("hr", "Heart rate", "hr.mean",
+             f"{lo:g}–{hi:g} %: {metric_text(t, 'hr.min')}–{metric_text(t, 'hr.max')}"),
+        card("sdnn", "SDNN", "hrv_time.HRV_SDNN",
+             f"{n_valid} valid RR" if n_valid is not None else MISSING),
+        card("rmssd", "RMSSD", "hrv_time.HRV_RMSSD",
+             f"{pairs.basis_n} successive valid pairs"
+             if pairs is not None and pairs.basis_n is not None else MISSING),
+        card("pnn6", "pNN6", "hrv_time.HRV_pNN6", "mouse threshold 6 ms"),
+        card("lf_hf", "LF / HF", "hrv_freq.HRV_LFHF",
+             f"LF {metric_text(t, 'hrv_freq.HRV_LFn')} · "
+             f"HF {metric_text(t, 'hrv_freq.HRV_HFn')} n.u."
+             if t.has("hrv_freq.HRV_LFHF") else _module_note(t, "frequency")),
+        card("sd1_sd2", "SD1 / SD2", "hrv_nonlin.HRV_SD1SD2",
+             f"{metric_text(t, 'hrv_nonlin.HRV_SD1')} / {metric_text(t, 'hrv_nonlin.HRV_SD2')} ms"
+             if t.has("hrv_nonlin.HRV_SD1") else _module_note(t, "nonlinear")),
+    ]
+
+
+def rhythm_rows(t: MetricTable, show_all: bool = False) -> "list[RhythmRow]":
+    """The page's metric table. Every curated row is listed, with a dash and the
+    module's reason when it is missing. *show_all* adds the "all" tier: the
+    human pNN thresholds and the raw NeuroKit columns with a finite value."""
+    rows = []
+    for group, module, keys in RHYTHM_GROUPS:
+        for key in keys:
+            row = t.row(key)
+            rows.append(RhythmRow(group, key, row.label if row else _RHYTHM_LABELS[key],
+                                  metric_text(t, key), screen_unit(t, key),
+                                  row.basis_text if row else _module_note(t, module)))
+    if show_all:
+        groups = {"hrv_time": "TIME DOMAIN", "hrv_freq": "FREQUENCY", "hrv_nonlin": "NON-LINEAR"}
+        for row in t.rows:
+            group = groups.get(row.key.split(".")[0])
+            if group and row.tier == TIER_ALL and t.finite(row.key) is not None:
+                rows.append(RhythmRow(group, row.key, row.label.replace("HRV_", ""),
+                                      metric_text(t, row.key), screen_unit(t, row.key),
+                                      row.basis_text, TIER_ALL))
+    return rows
+
+
+def nonlinear_basis_text(t: MetricTable) -> str:
+    """Which beats each non-linear block used, from the rows' own basis."""
+    parts = []
+    for name, key in (("Entropy", "hrv_nonlin.HRV_SampEn"), ("DFA", "hrv_nonlin.HRV_DFA_alpha1"),
+                      ("SD1 / SD2", "hrv_nonlin.HRV_SD1")):
+        row = t.row(key)
+        if row is not None and row.basis_text:
+            # A capped block's disclosure is a whole sentence, named already.
+            named = row.basis_text.startswith(name)
+            parts.append(row.basis_text if named else f"{name}: {row.basis_text}")
+    return "  ·  ".join(parts)
+
+
+def asymmetry_text(t: MetricTable) -> str:
+    if not t.has("asymmetry.n_tot"):
+        return f"RR asymmetry: needs ≥ {MIN_PAIRS_ASYMMETRY} successive valid RR pairs"
+    return (f"Porta PI {t.text('asymmetry.porta_pct')} %  ·  "
+            f"Guzik GI {t.text('asymmetry.guzik_pct')} %  ·  "
+            f"{t.row('asymmetry.n_tot').basis_text}")

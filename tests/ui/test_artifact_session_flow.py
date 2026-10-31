@@ -237,7 +237,7 @@ def _sync_async(app):
     app.btn_run_freq = app.btn_compute_epochs = None
     app._start_async_result = lambda btn, label, worker, done: done(worker())
     app._run_plot_chain = lambda tasks, on_complete=None: on_complete and on_complete()
-    app._plot_psd = app._plot_hrv_tables = app._plot_summary = lambda r: None
+    app._plot_psd = app._plot_hrv_tables = app._plot_table_views = lambda r: None
 
 
 def test_run_freq_runs_its_continuation_after_the_final_status(monkeypatch):
@@ -269,7 +269,7 @@ def _epoch_app(rr: "list[float]", hr: dict, epoch_s: float):
     app.txt_epochs = None
     app._set_textbox = lambda box, text, tsv=None: setattr(app, "epoch_text", text)
     app._df_to_tsv = lambda df: ""
-    app.lbl_epoch_info = app.lbl_epoch_count = app.lbl_summary_epoch_info = _Label()
+    app.lbl_epoch_info = app.lbl_epoch_count = _Label()
     app.tabs = SimpleNamespace(set=lambda name: None)
     return app, statuses
 

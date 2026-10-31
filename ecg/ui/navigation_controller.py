@@ -187,6 +187,32 @@ class NavigationController:
         app.analysis.arr_nav_pos = max(0.0, min(max_t, app.analysis.arr_nav_pos + direction * step))
         app._draw_arr_detail()
 
+    def arr_step_event(self, direction: int) -> None:
+        """Previous / Next: the event before or after the selected one, stopping
+        at either end; from none selected, the first or the last."""
+        app = self.app
+        n = len(app.analysis.arrhythmia_events)
+        if not n:
+            return
+        cur = app.analysis.arr_selected_idx
+        idx = (0 if direction > 0 else n - 1) if cur < 0 else cur + direction
+        if 0 <= idx < n:
+            self.select_arrhythmia_event(idx)
+            self._reveal_arr_card(idx)
+
+    def _reveal_arr_card(self, idx: int) -> None:
+        """Scroll the selected card into the list (past the listed cards: none)."""
+        app = self.app
+        try:
+            frame = app._arr_event_scroll
+            if idx >= len(app._arr_card_widgets) or frame is None:
+                return
+            frame.update_idletasks()
+            frame._parent_canvas.yview_moveto(
+                app._arr_card_widgets[idx].winfo_y() / max(frame.winfo_height(), 1))
+        except Exception as e:
+            log.debug("arr card reveal failed: %s", e)
+
     def select_arrhythmia_event(self, idx: int) -> None:
         """Highlight selected card and load the ECG window for this event."""
         app = self.app

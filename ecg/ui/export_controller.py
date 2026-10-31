@@ -11,8 +11,9 @@ import io
 import logging
 import os
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import matplotlib
 import matplotlib.figure
@@ -32,12 +33,20 @@ from ecg.core.analysis import (
     successive_valid_pairs, wave_template_disclosure, rr_quality_at,
 )
 from ecg.core.detection import premature_summary_rows
-from ecg.core.metric_table import MetricTable, build_metric_table
+from ecg.core.metric_table import (
+    MODULE_LABELS, REPORT_AUTONOMIC, REPORT_EVENTS, REPORT_INTERVALS, REPORT_MODULES, REPORT_QUALITY,
+    REPORT_RHYTHM, REPORT_TIME_COURSE, MetricTable, build_metric_table, filter_results, filter_table,
+    results_asymmetry,
+)
 from ecg.core.filtering import filter_description, recorded_filter_text
 from ecg.core.models import (
     MouseECG, QTC_FORMULA_LABELS, event_kind_label, normalize_qtc_formula,
 )
 from ecg.ui.event_locked_view import event_table_frame, export_event_params
+from ecg.ui.report_view import (
+    ReportLine, autonomic_method_text, events_baseline_text, include_choices, left_out_labels,
+    provenance_rows, report_lines, report_states, report_text,
+)
 from ecg.ui.plots import (
     ellipsize_fig_text, fig_text_width_in, style_axes, wrap_fig_text,
 )
@@ -56,7 +65,7 @@ def pdf_interval_footer(ivl: "Optional[object]") -> str:
     """PDF report footer for the intervals on the page ('' without them):
     the landmark definitions behind PR / QRS / QT and the wave template
     whose search windows produced them (same text as the "Wave template"
-    row of the Summary report, Excel Cover sheet and Prism notes)."""
+    row of the text report, Excel Cover sheet and Prism notes)."""
     if ivl is None or getattr(ivl, "empty", True) or "QT_ms" not in ivl.columns:  # type: ignore[attr-defined]
         return ""
     return ("Intervals: " + interval_definitions_text(ivl)  # type: ignore[arg-type]
@@ -76,7 +85,7 @@ def pdf_provenance_text(
     recorded -- every time is relative to its start), the analysis window,
     the analysed duration (window end − start, not the time of the last
     beat), the filters and the artifact correction -- same values as the
-    Summary report's PROVENANCE block and the Excel Cover sheet."""
+    text report's PROVENANCE block and the Excel Cover sheet."""
     rows: "list[tuple[str, str]]" = []
     crop_text = signal_crop_text(signal_crop)
     if crop_text:
@@ -90,12 +99,16 @@ def pdf_provenance_text(
 
 
 def pdf_metric_rows(r: dict) -> "list[tuple[str, str, str]]":
-    """The PDF report's "Key metrics" rows (label, value text, status) for
+    """The PDF report's "Key metrics" rows (label, value text, basis 'n=1748') for
     results *r*, read from the metric table."""
     t = build_metric_table(r, asymmetry=None)
     metrics: "list[tuple[str, str, str]]" = []
 
-    def _row(label: str, v: "Optional[float]", unit: str) -> None:
+    def _n(key: str) -> str:
+        row = t.row(key)
+        return f"n={row.basis_n}" if row is not None and row.basis_n is not None else ""
+
+    def _row(label: str, v: "Optional[float]", unit: str, key: str = "") -> None:
         if v is None:
             return
         if unit in ("—",):
@@ -104,15 +117,15 @@ def pdf_metric_rows(r: dict) -> "list[tuple[str, str, str]]":
             val_str = f"{v:.1f} %"
         else:
             val_str = f"{v:.1f} {unit}"
-        metrics.append((label, val_str, ""))
+        metrics.append((label, val_str, _n(key)))
 
     fd = r.get("hrv_freq")
     if t.has("hr.mean_rr"):
-        _row("Mean HR", t.value("hr.mean_rr"), "bpm")
-        _row("Mean RR", t.value("rr.mean_rr"), "ms")
-    _row("SDNN",  t.finite("hrv_time.HRV_SDNN"),  "ms")
-    _row("RMSSD", t.finite("hrv_time.HRV_RMSSD"), "ms")
-    _row("pNN6",  t.finite("hrv_time.HRV_pNN6"),  "%")
+        _row("Mean HR", t.value("hr.mean_rr"), "bpm", "hr.mean_rr")
+        _row("Mean RR", t.value("rr.mean_rr"), "ms", "rr.mean_rr")
+    _row("SDNN",  t.finite("hrv_time.HRV_SDNN"),  "ms", "hrv_time.HRV_SDNN")
+    _row("RMSSD", t.finite("hrv_time.HRV_RMSSD"), "ms", "hrv_time.HRV_RMSSD")
+    _row("pNN6",  t.finite("hrv_time.HRV_pNN6"),  "%", "hrv_time.HRV_pNN6")
     if fd is not None and not fd.empty and hrv_freq_is_legacy(r):
         # An older session's nk.hrv_frequency table: its LFn = LF / TP
         # is not Task Force n.u. -- flagged rather than shown as one.
@@ -121,31 +134,199 @@ def pdf_metric_rows(r: dict) -> "list[tuple[str, str, str]]":
         # LFn / HFn (Task Force n.u., LF or HF / (LF + HF)) -- HRV_LF /
         # HRV_HF are absolute powers in ms², not fractions.
         lf = t.finite("hrv_freq.HRV_LFn"); hf = t.finite("hrv_freq.HRV_HFn")
-        if lf: _row("LF n.u.", lf*100, "%")
-        if hf: _row("HF n.u.", hf*100, "%")
+        if lf: _row("LF n.u.", lf*100, "%", "hrv_freq.HRV_LFn")
+        if hf: _row("HF n.u.", hf*100, "%", "hrv_freq.HRV_HFn")
     elif hrv_freq_withheld_reason(r):
-        # Missing LF/HF rows explained (the reason is in the Summary
+        # Missing LF/HF rows explained (the reason is in the text
         # report and the Excel Cover sheet).
         metrics.append(("LF / HF", "withheld", ""))
-    _row("SD1",    t.finite("hrv_nonlin.HRV_SD1"),    "ms")
-    _row("SD2",    t.finite("hrv_nonlin.HRV_SD2"),    "ms")
-    _row("SampEn", t.finite("hrv_nonlin.HRV_SampEn"), "—")
+    _row("SD1",    t.finite("hrv_nonlin.HRV_SD1"),    "ms", "hrv_nonlin.HRV_SD1")
+    _row("SD2",    t.finite("hrv_nonlin.HRV_SD2"),    "ms", "hrv_nonlin.HRV_SD2")
+    _row("SampEn", t.finite("hrv_nonlin.HRV_SampEn"), "—", "hrv_nonlin.HRV_SampEn")
     for col, lbl in [("PR_ms", "PR"), ("QRS_ms", "QRS"), ("QT_ms", "QT"), ("QTc_ms", "QTc")]:
         row = t.row(f"intervals.{col}")
         if row is not None and row.basis_n:
-            _row(lbl, row.value, "ms")
+            _row(lbl, row.value, "ms", f"intervals.{col}")
     # Beat-to-beat spread on this single lead -- not classical
     # (inter-lead) QT dispersion; IQR is the robust spread.
-    _row("QT IQR (beat-to-beat)", t.finite("intervals.QT_iqr"), "ms")
+    _row("QT IQR (beat-to-beat)", t.finite("intervals.QT_iqr"), "ms", "intervals.QT_iqr")
     return metrics
+
+
+@dataclass(frozen=True)
+class ExportData:
+    """What goes out, once the Report tab's Include took its share out."""
+    results: "Optional[dict]"
+    epoch_df: Any
+    rolling_df: Any
+    autonomic: "tuple"              # autonomic_export_data()
+    arr_events: "Optional[list]"
+    arr_summary: "Optional[dict]"
+    arr_stale: bool
+    included: "dict[str, bool]"
+    left_out: str                   # what was left out, '' for nothing
+
+
+@dataclass(frozen=True)
+class ReportView:
+    """What the Report tab shows."""
+    provenance: "list[tuple[str, str]]"
+    lines: "list[ReportLine]"
+    left_out: "list[str]"
+    text: str
+
+
+# Cover rows of a line left out (HRV_* rows go with their frames).
+_LEFT_OUT_SHEETS = {REPORT_RHYTHM: ("HR_Statistics", "RR_Timeseries")}
+_LEFT_OUT_COVER = {REPORT_RHYTHM: ("HR mean", "HR range"), REPORT_QUALITY: ("Signal quality",)}
+# The ZIP's figures: slot, file name, the Report line that governs it (None:
+# the signal itself, which the Excel keeps too).
+_ZIP_FIGURES = (
+    ("detail",       "00_detail",            None),
+    ("rr",           "01_rr_hr",             REPORT_RHYTHM),
+    ("rr_hist",      "02_rr_hist",           REPORT_RHYTHM),
+    ("psd",          "03_psd",               REPORT_RHYTHM),
+    ("poincare",     "05_poincare",          REPORT_RHYTHM),
+    ("intervals",    "06_intervals",         REPORT_INTERVALS),
+    ("beat",         "07_beat",              REPORT_INTERVALS),
+    ("autonomic",    "08_autonomic_csi_cpi", REPORT_AUTONOMIC),
+    ("event_locked", "09_event_locked",      REPORT_AUTONOMIC),
+)
+# Only once computed: their placeholder would otherwise be saved.
+_ZIP_ONCE_DRAWN = ("autonomic", "event_locked")
 
 
 class ExportController:
     def __init__(self, app: "ECGApp") -> None:
         self.app = app
 
+    # ── The Report tab: what is in the report, and what goes out ──────
+
+    def _running(self) -> "tuple[str, ...]":
+        """The modules a job is still working on, in MODULES order. Read directly:
+        ECGApp._running_modules counts the shell's ticks."""
+        running = getattr(getattr(self.app, "ui", None), "running_modules", None) or ()
+        return tuple(m for m in MODULE_LABELS if m in running)
+
+    def report_line_states(self) -> "dict[str, str]":
+        """Report line -> state; everything up to date for an app without the
+        freshness service, whose exports are then whole."""
+        fresh = getattr(self.app, "freshness", None)
+        if fresh is None:
+            return {m.key: "up to date" for m in REPORT_MODULES}
+        return report_states(fresh.states(), self._running())
+
+    def _still_computing(self) -> "list[str]":
+        """What is not in the exports yet, in the words of the 'left out' note:
+        Analyze goes on with Frequency and Non-linear after its first results."""
+        return [f"{MODULE_LABELS[m]} (still computing)" for m in self._running()]
+
+    def _confirm_while_computing(self) -> bool:
+        """False when the user prefers to wait for what is still computing."""
+        missing = [MODULE_LABELS[m] for m in self._running()]
+        if not missing:
+            return True
+        return messagebox.askyesno(
+            "Still computing",
+            f"{', '.join(missing)} still computing: an export now will not hold "
+            "these results, and will say so.\n\nExport now anyway?")
+
+    def report_choices(self) -> "dict[str, bool]":
+        """Report line -> included in the exports (report_view.include_choices).
+        A line not computed has nothing to send either way."""
+        ui = getattr(self.app, "ui", None)
+        return include_choices(self.report_line_states(), getattr(ui, "report_include", None))
+
+    def export_data(self) -> ExportData:
+        a = self.app.analysis
+        states = self.report_line_states()
+        choices = self.report_choices()
+        # Not computed: nothing to leave out, and the results it would filter
+        # (a placeholder interval frame) stay as they were.
+        included = {k: v or states[k] == "not computed" for k, v in choices.items()}
+        events, summary, stale = self.arrhythmia_export_data()
+        if not included[REPORT_EVENTS]:
+            events, summary, stale = None, None, False
+        time_on = included[REPORT_TIME_COURSE]
+        return ExportData(
+            results=filter_results(a.results, included),
+            epoch_df=a.epoch_df if time_on else None,
+            rolling_df=a.rolling_hrv_df if time_on else None,
+            autonomic=(self.autonomic_export_data() if included[REPORT_AUTONOMIC]
+                       else (None, None, None, None)),
+            arr_events=events, arr_summary=summary, arr_stale=stale, included=included,
+            left_out=", ".join(left_out_labels(states, choices) + self._still_computing()))
+
+    def _left_out_note(self, data: ExportData) -> str:
+        return f"  ·  left out: {data.left_out}" if data.left_out else ""
+
+    def report_view(self) -> ReportView:
+        """The Report tab's whole content, from the same data as the exports."""
+        app = self.app
+        a = app.analysis
+        t = self.metric_table()
+        states = self.report_line_states()
+        choices = self.report_choices()
+        res = self.autonomic_export_data()[0]
+        method = autonomic_method_text(getattr(res, "params", None))
+        fresh = getattr(app, "freshness", None)
+        reasons = {}
+        if fresh is not None:
+            for m in REPORT_MODULES:
+                reasons[m.key] = tuple(dict.fromkeys(
+                    why for x in m.modules for why in fresh.status(x).reasons))
+        lines = report_lines(t, states, choices, reasons, method,
+                             events_baseline_text(getattr(a, "arrhythmia_run", None)))
+        has_signal = app.signal.time is not None
+        peaks = app.detection.rpeaks_ok if a.results is None else None
+        provenance = provenance_rows(
+            t, a.results, app.signal.filepath, app.ent_subject.get(),
+            self.hrv_window() or (a.t_start, a.t_end), self.signal_end_s(), self.filter_text(),
+            app._qtc_formula(), method,
+            current_rr=app.analysis_ctrl.hrv_rr_bounds(quiet=True) if has_signal else None,
+            n_peaks=len(peaks) if peaks is not None else None)
+        return ReportView(provenance, lines, left_out_labels(states, choices) + self._still_computing(),
+                          self.report_text() if a.results else "")
+
+    def report_signature(self) -> tuple:
+        """What the Report tab shows rests on: unchanged, it is not rebuilt."""
+        app = self.app
+        a = app.analysis
+        r = a.results or {}
+        fresh = getattr(app, "freshness", None)
+        statuses = tuple((m, fresh.status(m)) for m in fresh.states()) if fresh is not None else ()
+        return (id(a.results), tuple(id(v) for v in r.values()), id(a.epoch_df),
+                id(a.rolling_hrv_df), id(a.autonomic_result), id(a.event_locked),
+                id(a.premature_summary), id(getattr(a, "arrhythmia_run", None)),
+                id(a.artifact_report), app.detection.sig_quality, statuses,
+                self._running(), id(app.detection.rpeaks_ok),
+                str(app.ui.report_include), app.signal.filepath, app.ent_subject.get(),
+                self.filter_text(), app._qtc_formula(), self.hrv_window(), self.signal_end_s())
+
+    def report_text(self) -> str:
+        """The text report of what goes out, from the shared table."""
+        app = self.app
+        data = self.export_data()
+        r = data.results or {}
+        fresh = getattr(app, "freshness", None)
+        lines = (report_lines(MetricTable(), self.report_line_states(), self.report_choices())
+                 if fresh is not None else None)
+        res = data.autonomic[0]
+        return report_text(
+            r, subject=app.ent_subject.get(), filepath=app.signal.filepath,
+            filter_text=self.filter_text(), window=self.hrv_window(),
+            signal_end_s=self.signal_end_s(), artifact_report=app.analysis.artifact_report,
+            qtc_formula=app._qtc_formula(), asymmetry=results_asymmetry(r),
+            signal_crop=self.signal_crop(), lines=lines, included=data.included,
+            table=filter_table(self.metric_table(), data.included),
+            autonomic_method=autonomic_method_text(getattr(res, "params", None)),
+            events_baseline=(events_baseline_text(getattr(app.analysis, "arrhythmia_run", None))
+                             if data.arr_summary or data.arr_events else ""))
+
+    # ── Exporters' data ───────────────────────────────────────────────
+
     def autonomic_export_data(self) -> "tuple":
-        """(AutonomicResult, SPWVD dict, event table, event params) of HRV >
+        """(AutonomicResult, SPWVD dict, event table, event params) of Time course >
         Autonomic for the exporters -- all None without an Autonomic
         result; the event parts None without an event-locked result."""
         a = self.app.analysis
@@ -159,7 +340,7 @@ class ExportController:
 
     ARRHYTHMIA_STALE_TEXT = ("Abnormal events not exported: the peaks, artifact "
                              "correction or analysis window changed since the "
-                             "classification — re-run it on the Abnormal Events tab.")
+                             "classification — re-run it on the Events tab.")
 
     def arrhythmia_export_data(self) -> "tuple":
         """(events, premature summary, stale) for the exporters. When the
@@ -207,7 +388,7 @@ class ExportController:
                                     bool(getattr(sig, "no_filter_mode", False)))
 
     def autonomic_only(self) -> bool:
-        """True when only HRV > Autonomic results exist (Analyze not run):
+        """True when only Time course > Autonomic results exist (Analyze not run):
         Export Excel then writes them alone (they need only the peaks)."""
         a = self.app.analysis
         return a.results is None and getattr(a, "autonomic_result", None) is not None
@@ -216,7 +397,7 @@ class ExportController:
         """*message*, plus where the Autonomic-only results can be exported
         when they exist (Export Excel)."""
         if self.autonomic_only():
-            return (message + "\n\nThe HRV > Autonomic results need only the peaks: "
+            return (message + "\n\nThe Time course > Autonomic results need only the peaks: "
                     "Export Excel saves them alone before Analyze.")
         return message
 
@@ -361,8 +542,9 @@ class ExportController:
         app = self.app
         if app.analysis.results is None:
             raise RuntimeError("No results available to export.")
+        data = self.export_data()
         return ExcelExporter.build_workbook(
-            results      = app.analysis.results,  # type: ignore[union-attr]
+            results      = data.results,  # type: ignore[arg-type]
             signal_flt   = app.signal.filtered,
             signal_raw   = app.signal.raw_norm,
             time         = app.signal.time,
@@ -371,7 +553,7 @@ class ExportController:
             filepath     = app.signal.filepath,
             subject      = app.ent_subject.get(),
             sig_quality  = app.detection.sig_quality,
-            epoch_df     = app.analysis.epoch_df,
+            epoch_df     = data.epoch_df,
             qtc_formula  = app._qtc_formula(),
             analysis_window = self.hrv_window(),
             artifact_report = app.analysis.artifact_report,
@@ -398,31 +580,36 @@ class ExportController:
 
     def write_excel(self, destination) -> None:
         """Write the formatted workbook to *destination* (path or BytesIO).
-        With an HRV > Autonomic result, its Autonomic / Autonomic_Series
+        With a Time course > Autonomic result, its Autonomic / Autonomic_Series
         (/ Autonomic_LFHF / EventLocked) sheets and Cover disclosure are
         added (the Cover then states the span the indices cover against
         the core results' analysis window). Without core results, an
-        Autonomic result is written alone (``autonomic_only``)."""
+        Autonomic result is written alone (``autonomic_only``). The Report tab's
+        Include decides what goes in; the Cover says what it left out."""
         app = self.app
-        res, spwvd, ev_table, ev_params = self.autonomic_export_data()
+        data = self.export_data()
+        res, spwvd, ev_table, ev_params = data.autonomic
         if self.autonomic_only():
             wb = ExcelExporter.build_autonomic_workbook(
                 app.ent_subject.get(), app.signal.filepath, app.signal.fs, app.signal.time)
         else:
             wb = self.build_excel_workbook()
         ExcelExporter.add_annotations_sheet(wb, app.analysis.annotations)
-        arr_events, arr_summary, arr_stale = self.arrhythmia_export_data()
         ExcelExporter.add_abnormal_events_sheets(
-            wb, arr_events, arr_summary,
-            stale_note=self.ARRHYTHMIA_STALE_TEXT if arr_stale else None)
+            wb, data.arr_events, data.arr_summary,
+            stale_note=self.ARRHYTHMIA_STALE_TEXT if data.arr_stale else None)
         if res is not None:
             ExcelExporter.add_autonomic_sheets(wb, res, spwvd, ev_table, ev_params,
                                                hrv_window=self.hrv_window())
         try:
-            ExcelExporter.add_metrics_sheet(wb, self.metric_table())
+            ExcelExporter.add_metrics_sheet(wb, filter_table(self.metric_table(), data.included))
         except Exception:
             # Additive: never lose the rest of the workbook over it.
             log.exception("Metrics sheet not written")
+        off = [k for k, on in data.included.items() if not on]
+        ExcelExporter.leave_out(
+            wb, tuple(s for k in off for s in _LEFT_OUT_SHEETS.get(k, ())),
+            tuple(s for k in off for s in _LEFT_OUT_COVER.get(k, ())), data.left_out)
         wb.save(destination)
 
     def export_excel(self) -> None:
@@ -430,6 +617,8 @@ class ExportController:
         only = self.autonomic_only()
         if not app.analysis.results and not only:
             messagebox.showwarning("No results", "Run analysis first.")
+            return
+        if not self._confirm_while_computing():
             return
         ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
         kind = "ECG_autonomic" if only else "ECG"
@@ -446,15 +635,30 @@ class ExportController:
             messagebox.showerror("Export failed", str(exc))
             return
         what = "Excel (Autonomic only — Analyze not run)" if only else "Excel"
-        stale = self.arrhythmia_export_data()[2]
+        data = self.export_data()
         app._set_status(f"{what} saved — {os.path.basename(path)}  ✓"
-                        + (f"  ·  {self.ARRHYTHMIA_STALE_TEXT}" if stale else ""),
-                        ORANGE if (only or stale) else GREEN)
+                        + self._left_out_note(data)
+                        + (f"  ·  {self.ARRHYTHMIA_STALE_TEXT}" if data.arr_stale else ""),
+                        ORANGE if (only or data.arr_stale or data.left_out) else GREEN)
+
+    def zip_figures(self, included: "dict[str, bool]") -> "list[tuple[str, str]]":
+        """(slot, file name) of the figures the ZIP holds for what Include says."""
+        figures = []
+        for slot_key, filename, line in _ZIP_FIGURES:
+            if line is not None and not included.get(line, True):
+                continue
+            if (slot_key in _ZIP_ONCE_DRAWN
+                    and getattr(self.app._slots.get(slot_key), "_draw_fn", None) is None):
+                continue
+            figures.append((slot_key, filename))
+        return figures
 
     def export_zip(self) -> None:
         app = self.app
         if not app.analysis.results:
             messagebox.showwarning("No results", self._needs_analyze("Run analysis first."))
+            return
+        if not self._confirm_while_computing():
             return
         sub  = app.ent_subject.get()
         ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -466,30 +670,15 @@ class ExportController:
         if not path:
             return
 
-        figure_keys = [
-            ("detail",    "00_detail"),
-            ("rr",        "01_rr_hr"),
-            ("rr_hist",   "02_rr_hist"),
-            ("psd",       "03_psd"),
-            ("poincare",  "05_poincare"),
-            ("intervals", "06_intervals"),
-            ("beat",      "07_beat"),
-        ]
         try:
+            data = self.export_data()
             with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
                 xl_buf = io.BytesIO()
                 self.write_excel(xl_buf)
                 xl_buf.seek(0)
                 zf.writestr(f"{sub}_ECG_{ts}.xlsx", xl_buf.read())
 
-                # The Autonomic figures only once computed (their placeholder
-                # would otherwise be saved).
-                for slot_key, filename in (("autonomic", "08_autonomic_csi_cpi"),
-                                           ("event_locked", "09_event_locked")):
-                    slot = app._slots.get(slot_key)
-                    if slot is not None and getattr(slot, "_draw_fn", None) is not None:
-                        figure_keys.append((slot_key, filename))
-                for slot_key, filename in figure_keys:
+                for slot_key, filename in self.zip_figures(data.included):
                     slot = app._slots.get(slot_key)
                     if slot and slot.fig:
                         try:
@@ -504,7 +693,8 @@ class ExportController:
             messagebox.showerror("ZIP export failed", str(exc))
             return
 
-        app._set_status(f"ZIP saved — {os.path.basename(path)}  ✓", GREEN)
+        app._set_status(f"ZIP saved — {os.path.basename(path)}  ✓" + self._left_out_note(data),
+                        ORANGE if data.left_out else GREEN)
 
     def export_pdf_report(self) -> None:
         """Generate a one-page PDF summary: ECG strip + KPI table + interpretation."""
@@ -520,6 +710,8 @@ class ExportController:
         except ImportError:
             messagebox.showerror("PDF", "matplotlib not available.")
             return
+        if not self._confirm_while_computing():
+            return
 
         sub  = app.ent_subject.get().strip() or "subject"
         ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -531,7 +723,9 @@ class ExportController:
         if not path:
             return
 
-        r   = app.analysis.results
+        # What the Report tab's Include lets out.
+        data = self.export_data()
+        r: dict = data.results  # type: ignore[assignment]
 
         # ── Collect metrics ───────────────────────────────────────────────
         ivl = r.get("intervals")
@@ -542,9 +736,9 @@ class ExportController:
         fg   = PLOT.get("text", GRAY_LIGHT)
         mut  = PLOT.get("muted","#6B7280")
 
-        # HRV > Autonomic computed: its method / window / ks / kp and the
-        # rat-calibration caveat go in the header (one more line).
-        auto_res, _sp, _evt, auto_ev = self.autonomic_export_data()
+        # Time course > Autonomic computed: its method / window / ks / kp and
+        # the rat-calibration caveat go in the header (one more line).
+        auto_res, _sp, _evt, auto_ev = data.autonomic
         auto_line = (autonomic_pdf_line(dict(auto_res.params),
                                         (auto_ev or {}).get("n_events"))
                      if auto_res is not None else "")
@@ -559,7 +753,8 @@ class ExportController:
             pdf_provenance_text(r, self.hrv_window(), self.signal_end_s(),
                                 app.analysis.artifact_report, self.filter_text(),
                                 self.signal_crop()),
-            pdf_interval_footer(ivl)) if t)
+            pdf_interval_footer(ivl),
+            f"Left out of this report: {data.left_out}" if data.left_out else "") if t)
         footer = (wrap_fig_text(footer, (0.96 - 0.06) * fig.get_figwidth(), 6.5)
                   if footer else "")
         n_foot = footer.count("\n") + 1 if footer else 0
@@ -575,6 +770,11 @@ class ExportController:
         qtc_label = QTC_FORMULA_LABELS[normalize_qtc_formula(app._qtc_formula())]
         fig.text(0.06, 0.945, f"ECG Report — {sub}",
                  fontsize=15, color=fg, fontweight="bold", va="bottom")
+        # The state of each line, as on the Report tab.
+        states = self.report_line_states()
+        fig.text(0.96, 0.950, wrap_fig_text(
+            "   ·   ".join(f"{m.label}: {states[m.key]}" for m in REPORT_MODULES), 6.5, 7),
+                 fontsize=7, color=mut, va="bottom", ha="right")
         # One line from 0.06 to 0.96 of the page: the file path is shortened
         # in the middle to the room the date and the QTc formula leave (a
         # long path pushed the QTc text past the page edge).
@@ -663,10 +863,12 @@ class ExportController:
         y = 0.95
         dy = min(0.10, 0.95 / (len(metrics) + 1))
         fs_row = 8 if dy >= 0.07 else 7
-        for lbl_h, val_h, st_h in [("Parameter", "Value", "")]:
+        for lbl_h, val_h, st_h in [("Parameter", "Value", "Basis")]:
             ax_tbl.text(0.02,  y, lbl_h, fontsize=7, color=mut,
                         transform=ax_tbl.transAxes, va="top")
             ax_tbl.text(0.57,  y, val_h, fontsize=7, color=mut,
+                        transform=ax_tbl.transAxes, va="top")
+            ax_tbl.text(0.84,  y, st_h, fontsize=7, color=mut,
                         transform=ax_tbl.transAxes, va="top")
             y -= dy
         for lbl, val, status in metrics:
@@ -675,7 +877,7 @@ class ExportController:
                         transform=ax_tbl.transAxes, va="top")
             ax_tbl.text(0.57, y, val, fontsize=fs_row, color=sc,
                         transform=ax_tbl.transAxes, va="top", fontweight="bold")
-            ax_tbl.text(0.90, y, status, fontsize=fs_row, color=sc,
+            ax_tbl.text(0.84, y, status, fontsize=fs_row, color=mut,
                         transform=ax_tbl.transAxes, va="top")
             y -= dy
 
@@ -715,14 +917,17 @@ class ExportController:
         ax_arr.set_facecolor(bg)
         ax_arr.axis("off")
         ax_arr.set_title("Abnormal events", loc="left", fontsize=9, color=fg, pad=4)
-        events, arr_summary, arr_stale = self.arrhythmia_export_data()
+        events, arr_summary, arr_stale = data.arr_events, data.arr_summary, data.arr_stale
         events = events or []
-        if arr_stale:
+        if not data.included[REPORT_EVENTS]:
+            ax_arr.text(0.0, 0.85, "Left out of this report",
+                        fontsize=7.5, color=mut, transform=ax_arr.transAxes, va="top")
+        elif arr_stale:
             ax_arr.text(0.0, 0.85, wrap_fig_text(self.ARRHYTHMIA_STALE_TEXT, 10.0, 7.5),
                         fontsize=7.5, color=mut, transform=ax_arr.transAxes, va="top")
         elif not events:
             ax_arr.text(0.0, 0.85, "None classified in this session\n"
-                                    "(run Abnormal Events tab to populate)",
+                                    "(run the Events tab to populate)",
                         fontsize=7.5, color=mut, transform=ax_arr.transAxes, va="top")
         else:
             by_kind: "dict[str, int]" = {}
@@ -758,7 +963,8 @@ class ExportController:
             messagebox.showerror("PDF export failed", str(exc))
             return
 
-        app._set_status(f"PDF report saved — {os.path.basename(path)}", GREEN)
+        app._set_status(f"PDF report saved — {os.path.basename(path)}" + self._left_out_note(data),
+                        ORANGE if data.left_out else GREEN)
 
     def export_prism(self) -> None:
         """Export all analysis results to a GraphPad Prism .pzfx file.
@@ -773,6 +979,7 @@ class ExportController:
         Column   HRV time-domain, frequency-domain and non-linear summaries
                  (the non-linear one includes NeuroKit's HRV_PI / HRV_GI
                  asymmetry indices -- there is no separate asymmetry table)
+                 and the shared table's rows with their basis n and state
         OneWay   ECG intervals per beat
         Notes    Project info: provenance, premature-beat and autonomic rows
         """
@@ -781,6 +988,8 @@ class ExportController:
             messagebox.showwarning(
                 "No results",
                 self._needs_analyze("Click Analyze before exporting to Prism."))
+            return
+        if not self._confirm_while_computing():
             return
 
         sub  = app.ent_subject.get().strip() or "subject"
@@ -794,20 +1003,21 @@ class ExportController:
         if not path:
             return
 
-        arr_events, arr_summary, _arr_stale = self.arrhythmia_export_data()
-        arr_events      = arr_events or []
+        data            = self.export_data()
+        arr_events      = data.arr_events or []
+        arr_summary     = data.arr_summary
         seg_a           = app.analysis.last_seg_a
         seg_b           = app.analysis.last_seg_b
         notes           = app.session.recording_notes
         fs              = float(app.signal.fs) if app.signal.fs else 1000.0
-        auto_res, auto_sp, auto_ev, auto_evp = self.autonomic_export_data()
+        auto_res, auto_sp, auto_ev, auto_evp = data.autonomic
 
         try:
             n_tables = PrismExporter.build_and_write(
                 path              = path,
-                results           = app.analysis.results,       # type: ignore[arg-type]
-                rolling_hrv_df    = app.analysis.rolling_hrv_df,
-                epoch_df          = app.analysis.epoch_df,
+                results           = data.results,               # type: ignore[arg-type]
+                rolling_hrv_df    = data.rolling_df,
+                epoch_df          = data.epoch_df,
                 subject           = sub,
                 arrhythmia_events = arr_events if arr_events else None,
                 segment_a         = seg_a,
@@ -825,40 +1035,49 @@ class ExportController:
                 artifact_report   = app.analysis.artifact_report,
                 filter_text       = self.filter_text(),
                 signal_crop       = self.signal_crop(),
+                left_out          = data.left_out,
+                metrics           = filter_table(self.metric_table(), data.included),
             )
         except Exception as exc:
             log.warning("Prism export failed: %s", exc)
-            messagebox.showerror("Prism export failed", str(exc))
+            messagebox.showerror(
+                "Prism export failed",
+                str(exc) + (f"\n\nLeft out on the Report tab: {data.left_out}" if data.left_out else ""))
             return
 
         app._set_status(
-            f"Prism: {n_tables} tables → {os.path.basename(path)}", GREEN)
+            f"Prism: {n_tables} tables → {os.path.basename(path)}" + self._left_out_note(data),
+            ORANGE if data.left_out else GREEN)
 
-    def copy_summary(self) -> None:
+    def copy_report(self) -> None:
         app = self.app
         if not app.analysis.results:
             messagebox.showwarning("No results", "Run analysis first.")
             return
         app.clipboard_clear()
-        app.clipboard_append(app.txt_sum.get("1.0", "end"))
-        app._set_status("Summary copied to clipboard", GREEN)
+        app.clipboard_append(self.report_text() + "\n")
+        data = self.export_data()
+        app._set_status("Report text copied to clipboard" + self._left_out_note(data),
+                        ORANGE if data.left_out else GREEN)
 
-    def save_summary_txt(self) -> None:
+    def save_report_txt(self) -> None:
         app = self.app
         if not app.analysis.results:
             messagebox.showwarning("No results", "Run analysis first.")
             return
+        if not self._confirm_while_computing():
+            return
         ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
         path = filedialog.asksaveasfilename(
             defaultextension=".txt",
-            initialfile=f"{app.ent_subject.get()}_ECG_summary_{ts}.txt",
+            initialfile=f"{app.ent_subject.get()}_ECG_report_{ts}.txt",
             filetypes=[("Text", "*.txt"), ("All", "*.*")],
         )
         if not path:
             return
         with open(path, "w", encoding="utf-8") as f:
-            f.write(app.txt_sum.get("1.0", "end"))
-        app._set_status(f"Summary saved: {os.path.basename(path)}", GREEN)
+            f.write(self.report_text() + "\n")
+        app._set_status(f"Report text saved: {os.path.basename(path)}", GREEN)
 
     def export_rr_csv(self) -> None:
         """Export RR intervals to a lightweight CSV (no Excel dependency)."""

@@ -4,6 +4,7 @@ peaks puts core, frequency, non-linear, intervals, epochs, rolling, Autonomic,
 event-locked and events out of date; recomputing brings them back. A new file
 clears it; a restored session counts as up to date unless a check disagrees.
 """
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -84,6 +85,7 @@ class _Slots(dict):
 class _App:
     """Every method the controllers call is a no-op unless defined here."""
     _generation = 0
+    _async_busy = False
 
     def __init__(self, sig, fs, peaks) -> None:
         self.analysis = AnalysisState()
@@ -358,6 +360,137 @@ def test_restored_results_from_another_window_are_out_of_date(app):
     app.analysis.t_start = 5.0        # the window entries were applied after Analyze
     _restored(app)
     assert app.freshness.status("core").reasons == ("analysis window changed",)
+
+
+def _save_and_restore(a):
+    """Through JSON, as the session file does."""
+    saved = json.loads(json.dumps(a.freshness.saved_basis()))
+    a.analysis.basis.clear()
+    a.analysis.analysed_window = (0.0, 0.0)
+    a.freshness.stamp_restored(saved)
+
+
+def _compute_series(a):
+    _analyze(a)
+    a.analysis_ctrl.compute_epochs()
+    a.analysis_ctrl.compute_rolling_hrv()
+
+
+def test_restored_epochs_and_rolling_keep_a_changed_window(app):
+    _compute_series(app)
+    app.analysis.t_start, app.analysis.t_end = 2.0, 10.0   # applied, not re-run
+    _save_and_restore(app)
+    for m in ("core", "epochs", "rolling"):
+        assert app.freshness.status(m).reasons == ("analysis window changed",), m
+    # Back to the window they were computed on: up to date again.
+    app.analysis.t_start, app.analysis.t_end = 0.0, 0.0
+    for m in ("core", "epochs", "rolling"):
+        assert app.freshness.status(m).state == UP_TO_DATE, m
+
+
+def test_restored_epochs_and_rolling_keep_changed_rr_bounds(app):
+    _compute_series(app)
+    app.ent_maxrr.value = "300"
+    _save_and_restore(app)
+    for m in ("core", "epochs", "rolling"):
+        assert app.freshness.status(m).reasons == ("RR bounds changed",), m
+
+
+def test_restored_epochs_and_rolling_recomputed_later_stay_up_to_date(app):
+    """Computed on a later window than the core results: they alone are current."""
+    _analyze(app)
+    app.analysis.t_start = 2.0
+    app.analysis_ctrl.compute_epochs()
+    app.analysis_ctrl.compute_rolling_hrv()
+    saved = json.loads(json.dumps(app.freshness.saved_basis()))
+    app.analysis.basis.clear()
+    app.analysis.analysed_window = (0.0, 0.0)
+    app.freshness.stamp_restored(saved)
+    assert app.freshness.status("core").state == OUT_OF_DATE
+    assert app.freshness.status("epochs").state == UP_TO_DATE
+    assert app.freshness.status("rolling").state == UP_TO_DATE
+
+
+def test_restored_rolling_stays_stale_after_a_peak_edit_before_saving(app):
+    _compute_series(app)
+    _edit_peaks(app)
+    assert app.analysis.rolling_hrv_df is not None
+    _save_and_restore(app)
+    assert app.freshness.status("rolling").reasons == ("peaks changed",)
+    # A second save and restore does not launder it.
+    _save_and_restore(app)
+    assert app.freshness.status("rolling").reasons == ("peaks changed",)
+
+
+def _compute_saved_modules(a):
+    _analyze(a)
+    ctrl = a.analysis_ctrl
+    ctrl.run_freq()
+    ctrl.run_nonlinear()
+    ctrl.run_intervals()
+    ctrl.compute_epochs()
+    ctrl.compute_rolling_hrv()
+
+
+SAVED_MODULES = ("core", "frequency", "nonlinear", "intervals", "epochs", "rolling")
+
+
+def test_results_older_than_a_peak_edit_stay_out_of_date_after_a_restore(app):
+    """The Abnormal Events viewer's edit keeps the results: reopening the
+    session must not stamp them as computed on the edited peaks."""
+    _compute_saved_modules(app)
+    r = app.analysis.results
+    app.detection.rpeaks_ok = np.delete(app.detection.rpeaks_ok, 50)
+    for _ in range(2):      # a second save and restore does not launder it
+        _save_and_restore(app)
+        assert app.analysis.results is r
+        for m in SAVED_MODULES:
+            assert app.freshness.status(m).reasons == ("peaks changed",), m
+
+
+def test_an_unedited_session_is_up_to_date_after_a_restore(app):
+    _compute_saved_modules(app)
+    for _ in range(2):
+        _save_and_restore(app)
+        for m in SAVED_MODULES:
+            assert app.freshness.status(m).state == UP_TO_DATE, m
+
+
+def test_results_dropped_by_an_edit_stay_out_of_date_after_a_restore(app):
+    """Not 'not computed': the strip still shows when they were computed."""
+    _compute_series(app)
+    app.analysis_ctrl.run_freq()
+    _edit_peaks(app)
+    assert app.analysis.results is None
+    for _ in range(2):
+        _save_and_restore(app)
+        states = _states(app)
+        for m in ("core", "frequency", "epochs", "rolling"):
+            assert states[m] == OUT_OF_DATE, m
+        assert app.freshness.status("core").reasons
+        # Never computed: nothing to re-run.
+        assert states["nonlinear"] == states["intervals"] == NOT_COMPUTED
+
+
+def test_session_without_a_saved_basis_follows_the_core_results(app):
+    _compute_series(app)
+    app.analysis.t_start = 2.0
+    _restored(app)          # an older session: nothing recorded
+    for m in ("core", "epochs", "rolling"):
+        assert app.freshness.status(m).reasons == ("analysis window changed",), m
+
+
+@pytest.mark.parametrize("bad", [
+    "nope", {"epochs": "nope", "rolling": None}, {"epochs": {}, "rolling": {"window": [1.0]}},
+    {"epochs": {"window": ["a", "b"], "rr": [1, 2]}, "rolling": {"window": [0, 0], "rr": None}},
+])
+def test_unreadable_saved_basis_falls_back_to_the_core_results(app, bad):
+    _compute_series(app)
+    app.analysis.basis.clear()
+    app.analysis.analysed_window = (0.0, 0.0)
+    app.freshness.stamp_restored(bad)
+    assert app.freshness.status("epochs").state == UP_TO_DATE
+    assert app.freshness.status("rolling").state == UP_TO_DATE
 
 
 def test_legacy_session_parts_ask_for_a_rerun(app):

@@ -1,5 +1,5 @@
 """
-Abnormal Events tab and exports for the RR-based premature beats, through
+Events tab and exports for the RR-based premature beats, through
 a stub app (no Tk window): the classification puts back the beats that
 automatic artifact correction removed as ectopic, the list header / status
 / ribbon / TSV report isolated beats, couplets and runs with per-hour
@@ -50,6 +50,9 @@ class _Slot:
     def update(self, fn) -> None:
         self.draw_fn = fn
 
+    def _show_placeholder(self) -> None:
+        self.draw_fn = None
+
 
 def _rr_mixture() -> "list[float]":
     return ([120.0] * 30 + [70.0, 170.0] + [120.0] * 30
@@ -67,7 +70,7 @@ def _stub_app(peaks, artifact_report=None):
         _set_progress=lambda p, m: None,
         _set_status=lambda text, color=None: statuses.append(text),
         ent_arr_baseline=_Entry(2), ent_arr_brady_pct=_Entry(20), ent_arr_min_beats=_Entry(10),
-        _slots={"arr_detail": _Slot()},
+        _slots={"arr_detail": _Slot(), "arr_ribbon": _Slot()},
         _arr_card_widgets=[], _arr_event_scroll=None,
         lbl_arrhythmia_status=_Label(), lbl_arr_premature=_Label(),
         tabs=SimpleNamespace(set=lambda name: None),
@@ -116,7 +119,7 @@ def test_auto_corrected_premature_beats_are_counted_in_the_tab():
 
     # the ribbon figure draws with the new kinds and their labels
     fig = Figure()
-    app._slots["arr_detail"].draw_fn(fig)
+    app._slots["arr_ribbon"].draw_fn(fig)
     legend_labels = [t.get_text() for leg in fig.legends for t in leg.get_texts()]
     assert "Premature couplet (RR-based)" in legend_labels
 

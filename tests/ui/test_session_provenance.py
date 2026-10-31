@@ -8,6 +8,7 @@ file time for the "Signal crop" provenance row. Older sessions without
 these keys fall back to the previous behaviour.
 """
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -65,6 +66,20 @@ def test_the_analysed_window_survives_a_round_trip(monkeypatch):
     bundle, _ = _restore(monkeypatch, app, state)
     assert bundle["analysed_window"] == (100.0, 160.0)
     assert (bundle["analysis_t_start"], bundle["analysis_t_end"]) == (200.0, 300.0)
+
+
+def test_the_freshness_basis_survives_a_round_trip(monkeypatch):
+    app = _app_with_results()
+    basis = {"epochs": {"window": [0.0, 0.0], "rr": [66.7, 333.3],
+                        "peaks_changed": False, "removed_changed": True}}
+    app.freshness = SimpleNamespace(saved_basis=lambda: basis)
+    state = SessionController(app).collect_session_state()
+    bundle, _ = _restore(monkeypatch, app, state)
+    assert bundle["freshness_basis"] == basis
+
+    del state["freshness_basis"]        # an older session
+    bundle, _ = _restore(monkeypatch, app, state)
+    assert bundle["freshness_basis"] is None
 
 
 def test_an_older_session_falls_back_to_the_window_entries(monkeypatch):

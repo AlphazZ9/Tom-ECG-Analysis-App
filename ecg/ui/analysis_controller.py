@@ -4,13 +4,14 @@ analysis_controller.py
 ------------------------
 AnalysisController -- HRV time/frequency/non-linear analysis, interval
 delineation, arrhythmia classification and its ECG-viewer edit mode,
-rolling-window and epoch HRV, the time-resolved autonomic indices (HRV >
+rolling-window and epoch HRV, the time-resolved autonomic indices (Time course >
 Autonomic: CSI / CPI, optional SPWVD LF / HF), and the QTc-formula recompute.
 """
 from __future__ import annotations
 
+import datetime as dt
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable, Mapping
 from tkinter import messagebox
 
 import customtkinter as ctk
@@ -37,11 +38,12 @@ from ecg.core.analysis import (
 )
 from ecg.core.autonomic import COV_METHODS, METHOD_NOTES, compute_autonomic_indices
 from ecg.core.filtering import break_line_at_gaps
+from ecg.core.metric_table import MISSING, format_metric
 from ecg.core.spwvd import spwvd_lf_hf
 from ecg.core.wave_template import WaveTemplate
 from ecg.io.session import session_exists
 from ecg.ui.autonomic_view import (
-    analysis_window_text, autonomic_status, draw_autonomic, format_param,
+    _ann_spans, analysis_window_text, autonomic_status, draw_autonomic, format_param,
     method_key, normalise_autonomic_params, params_differ,
     parse_autonomic_inputs, same_window, summary_frame, summary_text,
 )
@@ -56,12 +58,65 @@ from ecg.ui.theme import (
 )
 from ecg.ui.freshness import recorded_rr_bounds
 from ecg.ui.plots import style_axes
-from ecg.ui.tab_keys import TAB_HRV, TAB_EVENTS
+from ecg.ui.tab_keys import MODE_EPOCHS, MODE_SLIDING, TAB_EVENTS, TAB_TIME_COURSE
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
+
+
+def draw_windowed_panels(fig: Any, t: np.ndarray, df: pd.DataFrame,
+                         panels: "list[tuple[str, str, str, str]]",
+                         low_n: np.ndarray, gap_s: float,
+                         annotations: "Iterable[Mapping]" = ()) -> None:
+    """The stacked per-window figure of Epochs and Sliding, one axis per
+    (column, y label, colour, title) of *panels*. No fill-to-zero: it would force
+    the axis to start at 0 and flatten real HR / HRV swings. The line breaks at
+    gaps longer than *gap_s*, where skipped windows left no row: a gap, not
+    interpolated data. Windows of *low_n* are open, lighter markers. *annotations*
+    are drawn on every panel as on the Autonomic figure, without stretching the axis."""
+    axes = fig.subplots(len(panels), 1, sharex=True)
+    if len(panels) == 1:
+        axes = [axes]
+    # subplots_adjust() is a no-op (with a UserWarning) once
+    # constrained_layout is active on fig -- partial-override the
+    # engine's own hspace instead so the stacked panels keep
+    # their tighter author-tuned spacing (vs. CanvasSlot's wider
+    # default _CL_SPACE) rather than silently losing the tuning.
+    try:
+        fig.set_constrained_layout_pads(hspace=0.08)
+    except Exception as exc:
+        log.debug("draw_windowed_panels: set_constrained_layout_pads failed: %s", exc)
+    for ax, (col, ylabel, color, title) in zip(axes, panels):
+        style_axes(ax)
+        y = df[col].to_numpy(dtype=float)
+        ax.plot(*break_line_at_gaps(t, y, gap_s), color=color, lw=1.4, zorder=3)
+        if low_n.any():
+            ax.plot(t[low_n], y[low_n], "o", ms=4.5, mfc="none",
+                    mec=color, mew=1.0, alpha=0.6, zorder=4)
+        if (~low_n).any():
+            ax.plot(t[~low_n], y[~low_n], "o", ms=3.0, color=color, zorder=4)
+        ax.set_ylabel(ylabel, fontsize=8)
+        ax.set_title(title, loc="left", fontsize=8)
+        if ax is not axes[-1]:
+            ax.tick_params(labelbottom=False)
+    x0, x1 = axes[0].get_xlim()
+    anns = _ann_spans(annotations, x0, x1)
+    for ts, te, _label, col in anns:
+        for ax in axes:
+            ax.axvspan(ts, te, color=col, alpha=0.10, linewidth=0, zorder=0)
+            ax.axvline(ts, color=col, lw=1.1, alpha=0.8, zorder=5)
+    for ax in axes:
+        ax.set_xlim(x0, x1)
+    _ylo, yhi = axes[0].get_ylim()
+    for ts, te, label, col in anns:
+        if label:
+            axes[0].text(0.5 * (max(ts, x0) + min(te, x1)), yhi, label, ha="center", va="top",
+                         fontsize=7, color=col, fontweight="bold", zorder=8, clip_on=True,
+                         bbox=dict(boxstyle="round,pad=0.15", fc=PLOT["bg"], ec=col,
+                                   alpha=0.8, lw=0.6))
+    axes[-1].set_xlabel("Time (s)")
 
 
 class AnalysisController:
@@ -77,6 +132,15 @@ class AnalysisController:
     MIN_CONFIDENT_BEATS = 10
     MIN_VALID_INTERVALS = 3
     MIN_WINDOW_BEATS    = 5
+    # The ticks of Epochs: the base columns of its frame, and those only when ticked.
+    EPOCH_BASE_METRICS = ("HR", "SDNN", "RMSSD", "pNN6")
+    EPOCH_OPTIONAL = ("SD1", "SD2", "LF_nu", "HF_nu", "LF_HF")
+    # Under the plots of Epochs and Sliding.
+    WINDOWED_LEGEND = (
+        f"Hollow points: fewer than {MIN_CONFIDENT_BEATS} valid intervals in the window "
+        f"(with an LW metric ticked, also fewer than {POINCARE_MIN_PAIRS} valid pairs). "
+        f"Gaps in the line: windows skipped (fewer than {MIN_VALID_INTERVALS} valid "
+        f"intervals or {MIN_WINDOW_BEATS} beats).")
 
     # Single colour axis for an abnormal-event's KIND, shared by every
     # rendering of it -- the event ribbon, the RR-panel span highlighting,
@@ -238,6 +302,79 @@ class AnalysisController:
         if svc is not None and basis is not None:
             svc.stamp(module, basis)
 
+    def _basis_moved(self, basis: "dict | None") -> bool:
+        """The peaks, removed beats or window a job started on are no longer
+        the current ones. Its RR bounds are those of the core results it
+        extends, compared by the state check rather than here."""
+        if basis is None:
+            return False
+        now = self._capture_basis(rr_bounds=basis["rr"])
+        return now is not None and any(now[k] != basis[k] for k in ("peaks", "removed", "window"))
+
+    def _job_is_stale(self, what: str, label_attr: str, gen: int, basis: "dict | None") -> bool:
+        """True when a job's result must be dropped: the file changed (labels
+        already reset), or the peaks, removed beats or window moved while it
+        ran (it says so, or its label would read "Computing" for good)."""
+        # The job's end has just re-enabled its button.
+        self._disable_result_btns_without_results()
+        if getattr(self.app, "_generation", 0) != gen:
+            log.info("%s: stale result discarded (file changed)", what)
+            return True
+        if self.app.analysis.results is not None and not self._basis_moved(basis):
+            return False
+        log.info("%s: stale result discarded (peaks or window changed)", what)
+        text = f"{what} discarded — peaks or window changed while it ran: click Analyze"
+        lbl = getattr(self.app, label_attr, None)
+        if lbl is not None:
+            lbl.configure(text=f"  {text}", text_color=ORANGE)
+        self.app._set_status(text, ORANGE)
+        return True
+
+    def _disable_result_btns_without_results(self) -> None:
+        if self.app.analysis.results is None:
+            self.app._set_result_btns_enabled(
+                False, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl"))
+
+    def _refused_busy(self) -> bool:
+        """A job is running, so the busy guard would refuse a new one: say so
+        before any label reads Computing for a job that will not run."""
+        if not getattr(self.app, "_async_busy", False):
+            return False
+        self.app._set_status("Another operation is already running — please wait", ORANGE)
+        return True
+
+    def _when_idle(self, step: "Any") -> None:
+        """Run the next step of the Analyze chain once no job is running: one
+        started between two steps would have the busy guard refuse this one, and
+        the rest of the chain with it. Dropped, without a word, if the results
+        it would extend are gone by then."""
+        results = self.app.analysis.results
+        gen = getattr(self.app, "_generation", 0)
+
+        def _try() -> None:
+            if (self.app.analysis.results is not results
+                    or getattr(self.app, "_generation", 0) != gen):
+                log.info("Analyze chain stopped: its results were replaced or dropped")
+            elif getattr(self.app, "_async_busy", False):
+                self.app.after(200, _try)
+            else:
+                step()
+
+        _try()
+
+    def _mark_running(self, *modules: str) -> None:
+        """For the tab's computing state. No-op when the busy guard is about to
+        refuse the job."""
+        running = getattr(getattr(self.app, "ui", None), "running_modules", None)
+        if isinstance(running, set) and not getattr(self.app, "_async_busy", False):
+            running.update(modules)
+            self.app.ui.running_idle_ticks = 0
+
+    def _mark_landed(self, module: str) -> None:
+        running = getattr(getattr(self.app, "ui", None), "running_modules", None)
+        if isinstance(running, set):
+            running.discard(module)
+
     # ── Persistent result labels ──────────────────────────────────────
     # The sidebar analysis-window label (with its orange RR-exclusion line)
     # and the Frequency / Non-linear tab status labels are the disclosures
@@ -287,11 +424,13 @@ class AnalysisController:
         # to a reader. Multiplying the absolute power by 100 (an earlier
         # version) produced a tiny, meaningless number that openly
         # contradicted the table two inches below it.
-        n_lf = n_hf = n_lfhf = "—"
+        n_lf = n_hf = n_lfhf = MISSING
         try:
-            n_lf = f"{float(fd['HRV_LFn'].values[0])*100:.1f}%"
-            n_hf = f"{float(fd['HRV_HFn'].values[0])*100:.1f}%"
-            n_lfhf = f"{float(fd['HRV_LFHF'].values[0]):.1f}"
+            # Same strings as the cards, the table and the spectrum title.
+            n_lf = format_metric("hrv_freq.HRV_LFn", fd["HRV_LFn"].values[0])
+            n_hf = format_metric("hrv_freq.HRV_HFn", fd["HRV_HFn"].values[0])
+            n_lfhf = format_metric("hrv_freq.HRV_LFHF", fd["HRV_LFHF"].values[0])
+            n_lf, n_hf = (s if s == MISSING else f"{s}%" for s in (n_lf, n_hf))
         except Exception as _exc:
             log.debug("freq status: LF/HF% formatting failed: %s", _exc, exc_info=True)
         return f"  {done_label}  LFn={n_lf}  HFn={n_hf}  LF/HF={n_lfhf}", GREEN
@@ -305,9 +444,9 @@ class AnalysisController:
             if just_computed:
                 return "  Non-linear HRV could not be computed — see the log", ORANGE
             return "  Core done — click to compute SampEn / DFA (slow!)", "#9C27B0"
-        sampen = "—"
+        sampen = MISSING
         try:
-            sampen = f"{float(nl['HRV_SampEn'].values[0]):.3f}"
+            sampen = format_metric("hrv_nonlin.HRV_SampEn", nl["HRV_SampEn"].values[0])
         except Exception as _exc:
             log.debug("non-linear status: SampEn formatting failed: %s", _exc, exc_info=True)
         # Disclose which RR intervals were used: Poincaré/DFA use the whole
@@ -330,8 +469,8 @@ class AnalysisController:
         return f"  Done  SampEn={sampen}{note}", ORANGE if note else GREEN
 
     def refresh_result_labels(self, freq_done_label: str = "Done") -> None:
-        """Re-derive lbl_analysis_window, lbl_freq_status and
-        lbl_nonlin_status from the current results (no-op without results).
+        """Re-derive lbl_analysis_window, lbl_freq_status, lbl_nonlin_status
+        and lbl_ivl_status from the current results (no-op without results).
         Called after Analyze, after a UI rebuild and after a session
         restore. Main thread only."""
         r = self.app.analysis.results
@@ -341,6 +480,7 @@ class AnalysisController:
             ("lbl_analysis_window", self._analysis_window_label()),
             ("lbl_freq_status",     self._freq_status(r.get("hrv_freq"), freq_done_label)),
             ("lbl_nonlin_status",   self._nonlin_status(r.get("hrv_nonlin"))),
+            ("lbl_ivl_status",      self._intervals_status(r.get("intervals"))),
         ):
             lbl = getattr(self.app, attr, None)
             if lbl is not None:
@@ -390,27 +530,8 @@ class AnalysisController:
         bl_info     = arrhythmia_baseline_info(rpeaks, fs, baseline_s)
         bl_reliable = bool(bl_info["reliable"])
 
-        # AV conduction-delay detection needs per-beat PR data from Interval
-        # delineation, which is a separate, optional analysis step. Its
-        # DataFrame is not one row per peak (edge beats have no row), so PR
-        # (P onset -> QRS onset) is matched to these windowed rpeaks by sample
-        # index, NaN where a peak has no row (e.g. peaks edited since). The
-        # check only runs when at least half the peaks got a PR -- Intervals
-        # run on another analysis window leaves most peaks unmatched, and a
-        # sparse PR series would just fragment the runs.
-        pr_ms = None
-        av_note = "AV-delay check skipped — run Intervals on the current window"
-        ivl = (self.app.analysis.results or {}).get("intervals")
-        if ivl is not None and not ivl.empty:
-            pr_aligned = align_interval_column_to_peaks(ivl, rpeaks, fs, "PR_ms")
-            if np.isfinite(pr_aligned).sum() >= 0.5 * len(rpeaks):
-                pr_ms = pr_aligned
-                av_note = "AV-delay check on"
-            elif (np.isfinite(align_interval_column_to_peaks(ivl, rpeaks, fs, "R_peak_s")).sum()
-                  >= 0.5 * len(rpeaks)):
-                # Rows do match this window -- PR itself was mostly out of
-                # bounds, so re-running Intervals as-is would not help.
-                av_note = "AV-delay check skipped — PR measured on < 50% of beats"
+        pr_ms, av_note = self.av_delay_input(
+            (self.app.analysis.results or {}).get("intervals"), rpeaks, fs)
 
         # Real beats automatic / reviewed artifact correction removed
         # (ectopic, and very premature ones removed as duplicate /
@@ -448,169 +569,17 @@ class AnalysisController:
             self.app.analysis.premature_summary = summary
             self.refresh_premature_label()
 
-            kind_colors = self._KIND_COLORS
-            kind_icons = self._KIND_ICONS
-
-            # ── RR timeline (right panel, initial state) ──────
-            t_peaks = rpeaks / fs
-            rr_ms   = np.diff(rpeaks).astype(float) / fs * 1000
-            t_rr    = (t_peaks[:-1] + t_peaks[1:]) / 2
-            # The exact stretch classify_arrhythmias() took its baseline
-            # from: it starts at the first peak of the analysis window (not
-            # t=0) and widens past baseline_s when that held too few beats.
-            # Uses the baseline_s the classification ran with, not a fresh
-            # read of the entry, so a redraw can't drift from the events.
-            bl_t0, bl_t1 = bl_info["t_start"], bl_info["t_end"]
-
-            def draw_rr_timeline(fig):
-                from matplotlib.gridspec import GridSpec
-                # CanvasSlot's constrained_layout would recompute/override
-                # explicit margins below (same reason draw_intervals() opts
-                # out) -- a fig.legend() with no reserved top margin gets
-                # clipped by the figure boundary otherwise.
-                try:
-                    fig.set_layout_engine(None)
-                except Exception as exc:
-                    log.debug("draw_rr_timeline: set_layout_engine(None) failed: %s", exc)
-                gs = GridSpec(2, 1, figure=fig, height_ratios=[1, 6], hspace=0.12,
-                             left=0.08, right=0.98, top=0.80, bottom=0.10)
-                ax_ribbon = fig.add_subplot(gs[0, 0])
-                ax        = fig.add_subplot(gs[1, 0], sharex=ax_ribbon)
-                style_axes(ax_ribbon)
-                style_axes(ax)
-
-                # ── Event ribbon: ethogram-style strip, colored by kind ──
-                by_kind: "dict[str, list[tuple[float, float]]]" = {}
-                for ev in events:
-                    by_kind.setdefault(ev.kind, []).append(
-                        (ev.t_start, max(ev.duration_s, 0.05)))
-                for kind, spans in by_kind.items():
-                    ax_ribbon.broken_barh(
-                        spans, (0.1, 0.8),
-                        facecolors=kind_colors.get(kind, MUTED), zorder=2)
-                ax_ribbon.set_ylim(0, 1)
-                ax_ribbon.set_yticks([])
-                ax_ribbon.tick_params(labelbottom=False)
-                ax_ribbon.set_title("Event ribbon", loc="left", fontsize=8,
-                                    color=PLOT.get("muted", MUTED))
-                if by_kind:
-                    from matplotlib.lines import Line2D
-                    handles = [Line2D([0], [0], color=kind_colors.get(k, MUTED),
-                                      lw=5, label=event_kind_label(k))
-                               for k in by_kind]
-                    # top=0.80 above reserves real figure-level margin for
-                    # this -- fig.legend() (figure-relative 0-1 coords) is
-                    # still used over ax_ribbon.legend() since it isn't
-                    # bound by the ribbon axes' own (short) height.
-                    fig.legend(handles=handles, loc="upper center",
-                              bbox_to_anchor=(0.5, 0.99), ncol=min(len(handles), 6),
-                              fontsize=6.5, frameon=False,
-                              labelcolor=PLOT.get("text", GRAY_LIGHT))
-
-                # PLOT has no "ecg" key -- this always fell back to the
-                # literal default (a bright cyan barely visible against the
-                # Light theme's grid). "signal" is the real trace-colour
-                # token every other plot in the app already uses.
-                ax.plot(t_rr, rr_ms, color=PLOT.get("signal", CYAN_BRIGHT), lw=0.8, zorder=2)
-                ax.set_ylabel("RR (ms)"); ax.set_xlabel("Time (s)")
-
-                # Baseline and threshold lines (only if events contain
-                # brady/tachy, or the baseline is unreliable -- then the
-                # shading shows how much of the window it covers)
-                brady_events = [e for e in events if e.kind in ("bradycardia","tachycardia")
-                                and e.baseline_hr > 0]
-                if (brady_events or not bl_reliable) and np.isfinite(bl_info["baseline_hr"]):
-                    # The baseline and the brady_pct the classification used
-                    # (captured, same clamp) -- never a fresh read of the
-                    # entry, which may have been edited since.
-                    bl_hr  = float(bl_info["baseline_hr"])
-                    bl_rr  = 60_000.0 / bl_hr
-                    bpct   = brady_pct
-                    brady_rr = 60_000.0 / (bl_hr * (1 - bpct / 100))
-                    tachy_rr = 60_000.0 / (bl_hr * (1 + bpct / 100))
-                    # Shade baseline window
-                    ax.axvspan(bl_t0, bl_t1, alpha=0.08, color=GREEN_MID,
-                               zorder=0,
-                               label=("Baseline window" if bl_reliable else
-                                      "Baseline window (covers most of the window)"))
-                    ax.axvline(bl_t1, color=GREEN_MID, lw=1.0,
-                               ls=":", alpha=0.6, zorder=3)
-                    # Baseline RR line
-                    ax.axhline(bl_rr, color=GREEN_MID, lw=1.2,
-                               ls="--", alpha=0.8, zorder=4,
-                               label=f"Baseline {bl_hr:.0f} bpm")
-                    # Brady / tachy threshold lines -- neutral grey, not a
-                    # kind colour: AMBER/BLUE_MID here used to collide with
-                    # premature-beat/bradycardia's OWN kind colours below, so the
-                    # same hue meant a different thing depending which line
-                    # on the plot you were looking at.
-                    ax.axhline(brady_rr, color=PLOT.get("muted", MUTED), lw=0.9,
-                               ls="--", alpha=0.65, zorder=4,
-                               label=f"Brady threshold −{bpct:.0f}%")
-                    ax.axhline(tachy_rr, color=PLOT.get("muted", MUTED), lw=0.9,
-                               ls=":", alpha=0.65, zorder=4,
-                               label=f"Tachy threshold +{bpct:.0f}%")
-
-                ax.set_title(
-                    "RR series — click an event to zoom",
-                    loc="left", fontsize=9)
-                for ev in events:
-                    c = kind_colors.get(ev.kind, "#888")
-                    ax.axvspan(ev.t_start, max(ev.t_end, ev.t_start + 0.05),
-                               alpha=0.20, color=c, zorder=1)
-                    ax.axvline(ev.t_start, color=c, lw=0.7, ls="--",
-                               alpha=0.55, zorder=3)
-                if (brady_events or not bl_reliable) and np.isfinite(bl_info["baseline_hr"]):
-                    ax.legend(loc="upper right", fontsize=7,
-                              facecolor=PLOT.get("bg",NAVY),
-                              labelcolor=PLOT.get("text",GRAY_LIGHT),
-                              edgecolor=PLOT.get("border","#333"))
-
-            self.app._slots["arr_detail"].update(draw_rr_timeline)
-
-            # ── Build clickable event cards ───────────────────
-            for w in self.app._arr_card_widgets:
-                try: w.destroy()
-                except Exception: pass
-            self.app._arr_card_widgets.clear()
-
-            if not events:
-                lbl = ctk.CTkLabel(
-                    self.app._arr_event_scroll,
-                    text="No abnormal events detected\nfor the active context.",
-                    font=FONT_SMALL, text_color=MUTED, justify="center",
-                )
-                lbl.grid(row=0, column=0, pady=SPACE_L)
-                self.app._arr_card_widgets.append(lbl)
-            else:
-                for idx, ev in enumerate(events[:self.MAX_EVENT_CARDS]):
-                    self.build_arrhythmia_card(idx, ev, kind_icons)
-                if len(events) > self.MAX_EVENT_CARDS:
-                    lbl = ctk.CTkLabel(
-                        self.app._arr_event_scroll,
-                        text=(f"… {len(events) - self.MAX_EVENT_CARDS} more events not "
-                              f"listed — they are in the counts, the ribbon and the exports."),
-                        font=FONT_HINT, text_color=MUTED, justify="left", wraplength=230,
-                    )
-                    lbl.grid(row=self.MAX_EVENT_CARDS, column=0, sticky="ew", pady=SPACE_S)
-                    self.app._arr_card_widgets.append(lbl)
+            # What show_events() draws, also after a UI rebuild.
+            self.app.analysis.arrhythmia_run = {
+                "baseline": bl_info, "brady_pct": brady_pct, "av_note": av_note,
+                "av_on": pr_ms is not None, "pr_ms": pr_ms,
+                "peaks": np.asarray(rpeaks).copy(), "fs": fs}
+            self.show_events()
 
             # ── TSV store ─────────────────────────────────────
             self.app.analysis.arrhythmia_tsv = self.arrhythmia_tsv(events, summary)
 
             n = len(events)
-            n_prem = int(summary["n_premature"])
-            # Short form in the (crowded) action bar; the full reason and
-            # remedy go to the status bar.
-            av_short = "AV-delay check on" if pr_ms is not None else "AV-delay check skipped"
-            bl_short = "" if bl_reliable else "  ·  baseline unreliable"
-            self.app.lbl_arrhythmia_status.configure(  # type: ignore[union-attr]
-                text=(f"  {n} event{'s' if n != 1 else ''} — click to explore  ·  "
-                      f"{n_prem} premature beat{'s' if n_prem != 1 else ''} (RR-based)  ·  "
-                      f"{av_short}{bl_short}"),
-                text_color=RED if any(e.severity=="alert" for e in events)
-                           else (ORANGE if (n or not bl_reliable) else GREEN),
-            )
             # The baseline window spanning most of the analysed beats means
             # every brady/tachy call (or its absence) is made against a
             # reference that includes the event itself -- say so, in orange.
@@ -632,6 +601,48 @@ class AnalysisController:
             return
         self.app._start_async_result(
             self.app.btn_run_arrhythmia, "Classifying…", _worker, _done)
+
+    @staticmethod
+    def av_delay_input(ivl: "Any", rpeaks: "np.ndarray",
+                       fs: float) -> "tuple[np.ndarray | None, str]":
+        """(PR per peak or None, the note saying why) for the AV-delay check.
+
+        AV conduction-delay detection needs per-beat PR data from Interval
+        delineation, which is a separate, optional analysis step. Its
+        DataFrame is not one row per peak (edge beats have no row), so PR
+        (P onset -> QRS onset) is matched to these windowed rpeaks by sample
+        index, NaN where a peak has no row (e.g. peaks edited since). The
+        check only runs when at least half the peaks got a PR -- Intervals
+        run on another analysis window leaves most peaks unmatched, and a
+        sparse PR series would just fragment the runs."""
+        pr_ms = None
+        av_note = "AV-delay check skipped — measure intervals on the current window"
+        if ivl is not None and not ivl.empty:
+            pr_aligned = align_interval_column_to_peaks(ivl, rpeaks, fs, "PR_ms")
+            if np.isfinite(pr_aligned).sum() >= 0.5 * len(rpeaks):
+                pr_ms = pr_aligned
+                av_note = "AV-delay check on"
+            elif (np.isfinite(align_interval_column_to_peaks(ivl, rpeaks, fs, "R_peak_s")).sum()
+                  >= 0.5 * len(rpeaks)):
+                # Rows do match this window -- PR itself was mostly out of
+                # bounds, so re-running Intervals as-is would not help.
+                av_note = "AV-delay check skipped — PR measured on < 50% of beats"
+        return pr_ms, av_note
+
+    def note_intervals_measured(self, ivl: "pd.DataFrame") -> None:
+        """Intervals just measured: would the last classification's AV-delay
+        check now get another input? Its events and note stay as they ran, and
+        Events reads out of date until they are classified again."""
+        run = getattr(self.app.analysis, "arrhythmia_run", None)
+        if run is None:
+            return
+        pr_ms, av_note = self.av_delay_input(ivl, run["peaks"], run["fs"])
+        used = run.get("pr_ms")
+        same_pr = (pr_ms is None and used is None) or (
+            pr_ms is not None and used is not None
+            and np.array_equal(pr_ms, used, equal_nan=True))
+        run["av_outdated"] = not same_pr or av_note != run["av_note"]
+        self.refresh_events_head()
 
     def arrhythmia_removed_beats(self, fs: "float | None" = None) -> "tuple[np.ndarray, dict]":
         """removed_beats_for_classification() of the current artifact
@@ -685,7 +696,7 @@ class AnalysisController:
     @staticmethod
     def premature_summary_text(summary: "dict | None") -> str:
         """Short multi-line text of the premature-beat counts for the
-        Abnormal Events list header ('' before a classification)."""
+        Events list header ('' before a classification)."""
         if not summary:
             return ""
         def _r(x: float) -> str:
@@ -716,6 +727,264 @@ class AnalysisController:
         except Exception as exc:
             log.debug("lbl_arr_premature configure failed: %s", exc)
 
+    def show_events(self) -> None:
+        """The last classification on the Events tab: ribbon with the RR series,
+        cards, status and readout. From its run and after a UI rebuild, which
+        also shows the selected event again. No-op before a classification."""
+        a = self.app.analysis
+        run = getattr(a, "arrhythmia_run", None)
+        if run is None:
+            return
+        events = a.arrhythmia_events
+        self.draw_events_overview()
+        self.build_event_cards()
+        summary = a.premature_summary or {}
+        n = len(events)
+        n_prem = int(summary.get("n_premature", 0))
+        bl_reliable = bool(run["baseline"]["reliable"])
+        # Short form in the action bar; the full reason and remedy go to the
+        # baseline readout and the status bar.
+        av_short = "AV-delay check on" if run["av_on"] else "AV-delay check skipped"
+        bl_short = "" if bl_reliable else "  ·  baseline unreliable"
+        self.app.lbl_arrhythmia_status.configure(  # type: ignore[union-attr]
+            text=(f"  {n} event{'s' if n != 1 else ''} — click to explore  ·  "
+                  f"{n_prem} premature beat{'s' if n_prem != 1 else ''} (RR-based)  ·  "
+                  f"{av_short}{bl_short}"),
+            text_color=RED if any(e.severity=="alert" for e in events)
+                       else (ORANGE if (n or not bl_reliable) else GREEN),
+        )
+        self.refresh_premature_label()
+        self.refresh_events_head()
+        sync = getattr(self.app, "_sync_arr_edit_btn", None)
+        if sync is not None:
+            sync()
+        idx = a.arr_selected_idx
+        title = getattr(self.app, "lbl_arr_event_title", None)
+        if 0 <= idx < n:
+            self.app._select_arrhythmia_event(idx)
+        else:
+            # A new classification: nothing is selected, the zoom shows no event.
+            slot = self.app._slots.get("arr_detail")
+            if slot is not None:
+                slot._draw_fn = None
+                slot._show_placeholder()
+            if title is not None:
+                title.configure(text="← Click on an event", text_color=MUTED)
+
+    def refresh_events_head(self) -> None:
+        """The list title and the readout on the bar (no-op without them)."""
+        a = self.app.analysis
+        head = getattr(self.app, "lbl_arr_events_head", None)
+        if head is not None:
+            n = len(a.arrhythmia_events)
+            head.configure(text=f"{n} EVENT{'S' if n != 1 else ''}"
+                           if getattr(a, "arrhythmia_run", None) is not None else "EVENTS")
+        lbl = getattr(self.app, "lbl_arr_baseline", None)
+        if lbl is not None:
+            lbl.configure(text=self.events_readout_text(getattr(a, "arrhythmia_run", None)))
+
+    @staticmethod
+    def events_readout_text(run: "dict | None") -> str:
+        """What the events on screen were classified against: the baseline's
+        window and value, and whether the AV-delay check ran or why it did not."""
+        if not run:
+            return "Baseline —  ·  AV-delay check —"
+        bl = run["baseline"]
+        if np.isfinite(bl["baseline_hr"]):
+            text = (f"Baseline {bl['t_start']:.1f}–{bl['t_end']:.1f} s  ·  "
+                    f"{bl['baseline_hr']:.0f} bpm")
+        else:
+            text = "Baseline —"
+        if not bl["reliable"]:
+            text += " (unreliable: it covers most of the window)"
+        if run.get("av_outdated"):
+            av = "on" if run.get("av_on") else "skipped"
+            return f"{text}  ·  AV-delay check {av} — intervals measured since: classify again"
+        return f"{text}  ·  {run['av_note']}"
+
+    def event_at_time(self, x: float, tol_s: float) -> int:
+        """Index of the event under time *x*, or else the nearest within *tol_s*;
+        -1 for none. For a click on the ribbon."""
+        best, best_d = -1, float("inf")
+        for i, ev in enumerate(self.app.analysis.arrhythmia_events):
+            t1 = max(ev.t_end, ev.t_start + 0.05)
+            d = 0.0 if ev.t_start <= x <= t1 else min(abs(x - ev.t_start), abs(x - t1))
+            if d < best_d:
+                best, best_d = i, d
+        return best if best_d <= tol_s else -1
+
+    def on_arr_ribbon_click(self, event) -> None:
+        """A click on the ribbon or the RR series selects the event there."""
+        if event.xdata is None or event.button != 1 or event.inaxes is None:
+            return
+        lo, hi = event.inaxes.get_xlim()
+        idx = self.event_at_time(float(event.xdata), 0.01 * abs(hi - lo))
+        if idx >= 0:
+            self.app.nav_ctrl.select_arrhythmia_event(idx)
+            self.app.nav_ctrl._reveal_arr_card(idx)
+
+    def draw_events_overview(self) -> None:
+        """Ribbon and RR series of the last classification, above the cards. All
+        from what the classification ran with (arrhythmia_run), never a fresh read
+        of the entries, which may have been edited since."""
+        slot = self.app._slots.get("arr_ribbon")
+        run = getattr(self.app.analysis, "arrhythmia_run", None)
+        if slot is None or run is None:
+            return
+        events = self.app.analysis.arrhythmia_events
+        rpeaks, fs = run["peaks"], run["fs"]
+        bl_info, brady_pct = run["baseline"], run["brady_pct"]
+        bl_reliable = bool(bl_info["reliable"])
+        kind_colors = self._KIND_COLORS
+
+        t_peaks = rpeaks / fs
+        rr_ms   = np.diff(rpeaks).astype(float) / fs * 1000
+        t_rr    = (t_peaks[:-1] + t_peaks[1:]) / 2
+        # The exact stretch classify_arrhythmias() took its baseline
+        # from: it starts at the first peak of the analysis window (not
+        # t=0) and widens past baseline_s when that held too few beats.
+        # Uses the baseline_s the classification ran with, not a fresh
+        # read of the entry, so a redraw can't drift from the events.
+        bl_t0, bl_t1 = bl_info["t_start"], bl_info["t_end"]
+
+        def draw_rr_timeline(fig):
+            from matplotlib.gridspec import GridSpec
+            # CanvasSlot's constrained_layout would recompute/override
+            # explicit margins below (same reason draw_intervals() opts
+            # out) -- a fig.legend() with no reserved top margin gets
+            # clipped by the figure boundary otherwise.
+            try:
+                fig.set_layout_engine(None)
+            except Exception as exc:
+                log.debug("draw_rr_timeline: set_layout_engine(None) failed: %s", exc)
+            gs = GridSpec(2, 1, figure=fig, height_ratios=[1, 3], hspace=0.55,
+                         left=0.08, right=0.98, top=0.80, bottom=0.24)
+            ax_ribbon = fig.add_subplot(gs[0, 0])
+            ax        = fig.add_subplot(gs[1, 0], sharex=ax_ribbon)
+            style_axes(ax_ribbon)
+            style_axes(ax)
+
+            # ── Event ribbon: ethogram-style strip, colored by kind ──
+            # A beat or a pause must still show on a strip spanning the recording.
+            min_w = max(0.05, 0.003 * float(t_peaks[-1] - t_peaks[0]))
+            by_kind: "dict[str, list[tuple[float, float]]]" = {}
+            for ev in events:
+                by_kind.setdefault(ev.kind, []).append(
+                    (ev.t_start, max(ev.duration_s, min_w)))
+            for kind, spans in by_kind.items():
+                ax_ribbon.broken_barh(
+                    spans, (0.1, 0.8),
+                    facecolors=kind_colors.get(kind, MUTED), zorder=2)
+            ax_ribbon.set_ylim(0, 1)
+            ax_ribbon.set_yticks([])
+            ax_ribbon.tick_params(labelbottom=False)
+            ax_ribbon.set_title("Event ribbon", loc="left", fontsize=8,
+                                color=PLOT.get("muted", MUTED))
+            if by_kind:
+                from matplotlib.lines import Line2D
+                handles = [Line2D([0], [0], color=kind_colors.get(k, MUTED),
+                                  lw=5, label=event_kind_label(k))
+                           for k in by_kind]
+                # top=0.80 above reserves real figure-level margin for
+                # this -- fig.legend() (figure-relative 0-1 coords) is
+                # still used over ax_ribbon.legend() since it isn't
+                # bound by the ribbon axes' own (short) height.
+                fig.legend(handles=handles, loc="upper center",
+                          bbox_to_anchor=(0.5, 0.99), ncol=min(len(handles), 6),
+                          fontsize=6.5, frameon=False,
+                          labelcolor=PLOT.get("text", GRAY_LIGHT))
+
+            # PLOT has no "ecg" key -- this always fell back to the
+            # literal default (a bright cyan barely visible against the
+            # Light theme's grid). "signal" is the real trace-colour
+            # token every other plot in the app already uses.
+            ax.plot(t_rr, rr_ms, color=PLOT.get("signal", CYAN_BRIGHT), lw=0.8, zorder=2)
+            ax.set_ylabel("RR (ms)"); ax.set_xlabel("Time (s)")
+
+            # Baseline and threshold lines (only if events contain
+            # brady/tachy, or the baseline is unreliable -- then the
+            # shading shows how much of the window it covers)
+            brady_events = [e for e in events if e.kind in ("bradycardia","tachycardia")
+                            and e.baseline_hr > 0]
+            if (brady_events or not bl_reliable) and np.isfinite(bl_info["baseline_hr"]):
+                # The baseline and the brady_pct the classification used
+                # (captured, same clamp) -- never a fresh read of the
+                # entry, which may have been edited since.
+                bl_hr  = float(bl_info["baseline_hr"])
+                bl_rr  = 60_000.0 / bl_hr
+                bpct   = brady_pct
+                brady_rr = 60_000.0 / (bl_hr * (1 - bpct / 100))
+                tachy_rr = 60_000.0 / (bl_hr * (1 + bpct / 100))
+                # Shade baseline window
+                ax.axvspan(bl_t0, bl_t1, alpha=0.08, color=GREEN_MID,
+                           zorder=0,
+                           label=("Baseline window" if bl_reliable else
+                                  "Baseline window (covers most of the window)"))
+                ax.axvline(bl_t1, color=GREEN_MID, lw=1.0,
+                           ls=":", alpha=0.6, zorder=3)
+                # Baseline RR line
+                ax.axhline(bl_rr, color=GREEN_MID, lw=1.2,
+                           ls="--", alpha=0.8, zorder=4,
+                           label=f"Baseline {bl_hr:.0f} bpm")
+                # Brady / tachy threshold lines -- neutral grey, not a
+                # kind colour: AMBER/BLUE_MID here used to collide with
+                # premature-beat/bradycardia's OWN kind colours below, so the
+                # same hue meant a different thing depending which line
+                # on the plot you were looking at.
+                ax.axhline(brady_rr, color=PLOT.get("muted", MUTED), lw=0.9,
+                           ls="--", alpha=0.65, zorder=4,
+                           label=f"Brady threshold −{bpct:.0f}%")
+                ax.axhline(tachy_rr, color=PLOT.get("muted", MUTED), lw=0.9,
+                           ls=":", alpha=0.65, zorder=4,
+                           label=f"Tachy threshold +{bpct:.0f}%")
+
+            ax.set_title(
+                "RR series — click an event or the ribbon to zoom",
+                loc="left", fontsize=9)
+            for ev in events:
+                c = kind_colors.get(ev.kind, "#888")
+                ax.axvspan(ev.t_start, max(ev.t_end, ev.t_start + 0.05),
+                           alpha=0.20, color=c, zorder=1)
+                ax.axvline(ev.t_start, color=c, lw=0.7, ls="--",
+                           alpha=0.55, zorder=3)
+            if (brady_events or not bl_reliable) and np.isfinite(bl_info["baseline_hr"]):
+                ax.legend(loc="upper right", fontsize=7,
+                          facecolor=PLOT.get("bg",NAVY),
+                          labelcolor=PLOT.get("text",GRAY_LIGHT),
+                          edgecolor=PLOT.get("border","#333"))
+
+        slot.update(draw_rr_timeline)
+
+    def build_event_cards(self) -> None:
+        events = self.app.analysis.arrhythmia_events
+        kind_icons = self._KIND_ICONS
+        # ── Build clickable event cards ───────────────────
+        for w in self.app._arr_card_widgets:
+            try: w.destroy()
+            except Exception: pass
+        self.app._arr_card_widgets.clear()
+
+        if not events:
+            lbl = ctk.CTkLabel(
+                self.app._arr_event_scroll,
+                text="No abnormal events detected\nfor the active context.",
+                font=FONT_SMALL, text_color=MUTED, justify="center",
+            )
+            lbl.grid(row=0, column=0, pady=SPACE_L)
+            self.app._arr_card_widgets.append(lbl)
+        else:
+            for idx, ev in enumerate(events[:self.MAX_EVENT_CARDS]):
+                self.build_arrhythmia_card(idx, ev, kind_icons)
+            if len(events) > self.MAX_EVENT_CARDS:
+                lbl = ctk.CTkLabel(
+                    self.app._arr_event_scroll,
+                    text=(f"… {len(events) - self.MAX_EVENT_CARDS} more events not "
+                          f"listed — they are in the counts, the ribbon and the exports."),
+                    font=FONT_HINT, text_color=MUTED, justify="left", wraplength=230,
+                )
+                lbl.grid(row=self.MAX_EVENT_CARDS, column=0, sticky="ew", pady=SPACE_S)
+                self.app._arr_card_widgets.append(lbl)
+
     def build_arrhythmia_card(
         self, idx: int, ev: "ArrhythmiaEvent", kind_icons: dict,
     ) -> None:
@@ -734,8 +1003,9 @@ class AnalysisController:
         card.grid(row=idx, column=0, sticky="ew", padx=SPACE_S, pady=(0, SPACE_S))
         card.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkFrame(card, width=4, fg_color=c_kind,
-                     corner_radius=0).grid(row=0, column=0, rowspan=3, sticky="ns")
+        # height=1: a frame's default of 200 px would set the height of the card.
+        ctk.CTkFrame(card, width=4, height=1, fg_color=c_kind,
+                     corner_radius=0).grid(row=0, column=0, rowspan=4, sticky="ns")
 
         hdr = ctk.CTkFrame(card, fg_color="transparent")
         hdr.grid(row=0, column=1, sticky="ew", padx=(SPACE_S, SPACE_S), pady=(SPACE_S, SPACE_XS))
@@ -791,6 +1061,11 @@ class AnalysisController:
 
     def toggle_arr_edit_mode(self) -> None:
         self.app.analysis.arr_edit_mode = not self.app.analysis.arr_edit_mode
+        self.sync_arr_edit_btn()
+        self.app._draw_arr_detail()
+
+    def sync_arr_edit_btn(self) -> None:
+        """The button and hint follow the mode, also on a rebuilt tab."""
         if self.app.analysis.arr_edit_mode:
             self.app.btn_arr_edit.configure(
                 fg_color=ORANGE, hover_color=ORANGE_DEEP,
@@ -800,10 +1075,9 @@ class AnalysisController:
         else:
             self.app.btn_arr_edit.configure(
                 fg_color=BORDER, hover_color=BORDER2,
-                text_color=MUTED, text="Edit peaks in episode",
+                text_color=MUTED, text="Edit peaks here",
             )
             self.app.lbl_arr_edit_hint.pack_forget()
-        self.app._draw_arr_detail()
 
     def on_arr_detail_click(self, event) -> None:
         """Left-click: toggle exclusion.  Right-click: add/remove peak."""
@@ -933,8 +1207,8 @@ class AnalysisController:
 
     def qtc_formula(self) -> str:
         """Return 'mitchell', 'bazett', or 'fridericia' -- the formula the
-        stored QTc values use (``analysis.qtc_formula``, which the Intervals
-        tab selector sets). Kept in app state, not read off the combobox: a
+        stored QTc values use (``analysis.qtc_formula``, which the Morphology
+        & Intervals selector sets). Kept in app state, not read off the combobox: a
         UI rebuild recreates the combobox, and the exports must name the
         formula the values were actually computed with."""
         return normalize_qtc_formula(getattr(self.app.analysis, "qtc_formula", "mitchell"))
@@ -954,11 +1228,11 @@ class AnalysisController:
         formula = self.qtc_formula()
         self.app.analysis.results["intervals"] = recompute_qtc_column(ivl, formula)
         self.update_interval_plots()
-        # The Summary tab's QTc median would otherwise keep the old formula's value.
+        # What reads the shared table would otherwise keep the old formula's QTc.
         try:
-            self.app._plot_summary(self.app.analysis.results)
+            self.app._plot_table_views(self.app.analysis.results)
         except Exception as exc:
-            log.debug("on_qtc_formula_change: summary refresh failed: %s", exc)
+            log.debug("on_qtc_formula_change: table views refresh failed: %s", exc)
         self.app._set_status(
             f"QTc recomputed — formula: {QTC_FORMULA_LABELS[formula]}  ✓", GREEN)
 
@@ -973,6 +1247,64 @@ class AnalysisController:
             self.app._plot_intervals(self.app.analysis.results)
         except Exception as exc:
             log.debug("_update_interval_plots: %s", exc)
+
+    @staticmethod
+    def _window_lf_hf(ep: np.ndarray, fs: float, rr_lo: float, rr_hi: float, breaks: Any,
+                      bands: Any, t0: float) -> "tuple[float, float, float]":
+        """(LF n.u. %, HF n.u. %, LF/HF) of one window -- the exact same
+        analyse_hrv_freq() path as the Frequency panel (mouse-specific bands,
+        Welch PSD, its own MIN_BEATS_SPECTRAL guard and gap-withholding rule).
+        It returns an empty DataFrame -- NaN here -- rather than a number when a
+        window is too short, or its excluded intervals too long, for a meaningful
+        spectral estimate, instead of silently fabricating one."""
+        try:
+            fdf = analyse_hrv_freq(ep, fs, rr_min_ms=rr_lo, rr_max_ms=rr_hi,
+                                   breaks=breaks, bands=bands)
+            if not fdf.empty:
+                return (float(fdf["HRV_LFn"].values[0]) * 100.0,
+                        float(fdf["HRV_HFn"].values[0]) * 100.0,
+                        float(fdf["HRV_LFHF"].values[0]))
+        except Exception as exc:
+            log.debug("_window_lf_hf: analyse_hrv_freq failed at t=%.1f: %s", t0, exc)
+        return np.nan, np.nan, np.nan
+
+    def _low_confidence(self, n_valid: Any, n_pairs: Any = None) -> np.ndarray:
+        """The windows of Epochs and Sliding shown as hollow points: too few valid
+        intervals for their metrics, or too few valid pairs for the LW ones."""
+        low = np.asarray(n_valid) < self.MIN_CONFIDENT_BEATS
+        if n_pairs is not None:
+            low = low | (np.asarray(n_pairs) < POINCARE_MIN_PAIRS)
+        return low
+
+    def _frame_confidence(self, df: pd.DataFrame, valid: str, beats: str) -> "tuple[np.ndarray, str]":
+        """(hollow points, footnote) of a stored frame. A frame saved before the
+        valid counts were recorded is marked as it was then, by its beat count."""
+        if valid in df.columns:
+            return self._low_confidence(df[valid].values), ""
+        if beats in df.columns:
+            low = self._low_confidence(df[beats].values)
+        else:
+            low = np.zeros(len(df), dtype=bool)
+        return low, (f"\n\n  * Saved by an older version: no {valid} column — hollow markers "
+                     f"mean fewer than {self.MIN_CONFIDENT_BEATS} beats ({beats}), and "
+                     f"excluded intervals are not counted. Compute again to get them.")
+
+    def _blank_windowed_view(self, box: str, slot: str) -> None:
+        """Empty the table (with its Excel TSV) and the figure of Epochs or Sliding."""
+        widget = getattr(self.app, box, None)
+        if widget is not None:
+            self.app._set_textbox(widget, "")
+        canvas = getattr(self.app, "_slots", {}).get(slot)
+        if canvas is not None:
+            canvas._draw_fn = None
+            canvas._show_placeholder()
+
+    def clear_rolling_view(self) -> None:
+        """No Sliding frame: nothing of an earlier one stays on screen. Main thread only."""
+        self._blank_windowed_view("txt_rolling", "rolling_hrv")
+        lbl = getattr(self.app, "lbl_roll_status", None)
+        if lbl is not None:
+            lbl.configure(text="  Click Analyze first", text_color=MUTED)
 
     def compute_rolling_hrv(self) -> None:
         """Compute sliding-window HRV and render the timeline plot."""
@@ -1063,7 +1395,7 @@ class AnalysisController:
                         if len(diffs) else np.nan
                 # Poincare SD1/SD2 -- the app-wide definition
                 # (poincare_sd1_sd2, also used by the Non-linear panel,
-                # Compare Segments and the Summary), over successive valid
+                # Compare Segments and the Report), over successive valid
                 # pairs only. Cheap enough to always compute. SD1_LW/SD2_LW
                 # below are the explicitly named Ledoit-Wolf variant.
                 _pc = poincare_sd1_sd2(rr_all, ser["valid"])
@@ -1078,25 +1410,10 @@ class AnalysisController:
                         "n_poincare_pairs": np.nan,
                     }
                 )
-                # LF_nu/HF_nu/LF_HF -- reuses the exact same analyse_hrv_freq()
-                # path as the Frequency panel (mouse-specific bands, Welch
-                # PSD, its own MIN_BEATS_SPECTRAL guard and gap-withholding
-                # rule). Returns an empty DataFrame -- NaN below -- rather
-                # than a number when a window is too short, or its excluded
-                # intervals too long, for a meaningful spectral estimate,
-                # instead of silently fabricating one.
                 lf_nu = hf_nu = lf_hf = np.nan
                 if need_freq:
-                    try:
-                        fdf = analyse_hrv_freq(ep, fs, rr_min_ms=rr_lo,
-                                               rr_max_ms=rr_hi, breaks=breaks,
-                                               bands=bands)
-                        if not fdf.empty:
-                            lf_nu = float(fdf["HRV_LFn"].values[0]) * 100.0
-                            hf_nu = float(fdf["HRV_HFn"].values[0]) * 100.0
-                            lf_hf = float(fdf["HRV_LFHF"].values[0])
-                    except Exception as exc:
-                        log.debug("compute_rolling_hrv: analyse_hrv_freq failed at t=%.1f: %s", t0, exc)
+                    lf_nu, hf_nu, lf_hf = self._window_lf_hf(
+                        ep, fs, rr_lo, rr_hi, breaks, bands, t0)
                 rows.append({
                     "t_mid": round(t0 + win_s / 2, 2),
                     "HR":    round(hr,    1),
@@ -1126,6 +1443,7 @@ class AnalysisController:
             return {"rows": rows, "n_skipped": n_skipped}
 
         def _done(result):
+            self._mark_landed("rolling")
             if getattr(self.app, "_generation", 0) != _gen:
                 log.info("compute_rolling_hrv: stale result discarded (file changed)")
                 return
@@ -1140,138 +1458,110 @@ class AnalysisController:
             df = pd.DataFrame(rows)
             self.app.analysis.rolling_hrv_df = df
             self._stamp_basis("rolling", basis)
-            # Confidence from the intervals the metrics were computed from
-            low_n = df["n_valid"].values < self.MIN_CONFIDENT_BEATS
-            if need_article_poincare:
-                low_n |= df["n_poincare_pairs"].values < POINCARE_MIN_PAIRS
-
-            colors = {"HR": ORANGE_DARK, "SDNN": BLUE_DARK,
-                      "RMSSD": GREEN_DARK, "pNN6": PURPLE,
-                      "SD1": CORAL, "SD2": CYAN_BRIGHT,
-                      "CCD": NAVY, "SD1_LW": CORAL, "SD2_LW": CYAN_BRIGHT,
-                      "LF_nu": BLUE_MID, "HF_nu": GREEN, "LF_HF": AMBER}
-            ylabels = {"HR": "HR (bpm)", "SDNN": "SDNN (ms)",
-                       "RMSSD": "RMSSD (ms)", "pNN6": "pNN6 (%)",
-                       "SD1": "SD1 (ms)", "SD2": "SD2 (ms)",
-                       # Ledoit-Wolf, not the Autonomic view's "robust"
-                       # (Schafer-Strimmer) estimator -- named as such.
-                       "CCD": "CCD (ms)", "SD1_LW": "SD1 LW (ms)",
-                       "SD2_LW": "SD2 LW (ms)",
-                       "LF_nu": "LF (n.u., %)", "HF_nu": "HF (n.u., %)",
-                       "LF_HF": "LF/HF"}
-            # No reference bands (the experimental-context selector they
-            # came from was removed) -- draw_rolling below leaves this
-            # empty and just skips the shaded-band block entirely.
-            ref_bands: "dict[str, tuple[float,float]]" = {}
-
-            n_plots = len(active)
-
-            def draw_rolling(fig):
-                axes = fig.subplots(n_plots, 1, sharex=True)
-                if n_plots == 1:
-                    axes = [axes]
-                # subplots_adjust() is a no-op (with a UserWarning) once
-                # constrained_layout is active on fig -- partial-override the
-                # engine's own hspace instead so the stacked panels keep
-                # their tighter author-tuned spacing (vs. CanvasSlot's wider
-                # default _CL_SPACE) rather than silently losing the tuning.
-                try:
-                    fig.set_constrained_layout_pads(hspace=0.08)
-                except Exception as exc:
-                    log.debug("draw_rolling: set_constrained_layout_pads failed: %s", exc)
-                t = df["t_mid"].values
-
-                for ax, metric in zip(axes, active):
-                    style_axes(ax)
-                    y     = df[metric].values
-                    color = colors[metric]
-
-                    # Shaded reference band from context
-                    if metric in ref_bands:
-                        lo, hi = ref_bands[metric]
-                        ax.axhspan(lo, hi, alpha=0.10, color=color,
-                                   linewidth=0, zorder=0, label="Ref. range (context)")
-                        ax.axhline(lo, color=color, lw=0.6,
-                                   ls="--", alpha=0.45, zorder=1)
-                        ax.axhline(hi, color=color, lw=0.6,
-                                   ls="--", alpha=0.45, zorder=1)
-                        ax.legend(loc="upper right", fontsize=6, framealpha=0)
-
-                    # No fill-to-zero here (fill_between defaults to filling
-                    # down to y=0, which forces the axis to autoscale from 0
-                    # and flattens real HR/HRV swings into a sliver at the
-                    # top of the panel) -- a plain line plus the reference
-                    # band above is enough context. The line breaks where
-                    # skipped windows left no row (a pause, a sub-bound
-                    # stretch): a gap, not interpolated data.
-                    ax.plot(*break_line_at_gaps(t, y, step_s * 1.5),
-                            color=color, lw=1.4, zorder=3)
-                    # Low-confidence windows (< MIN_CONFIDENT_BEATS valid RR
-                    # intervals): open, lighter markers instead of filled
-                    # ones -- same convention as compute_epochs' draw_epochs().
-                    if low_n.any():
-                        ax.plot(t[low_n], y[low_n], "o", ms=4.5, mfc="none",
-                                mec=color, mew=1.0, alpha=0.6, zorder=4)
-                    if (~low_n).any():
-                        ax.plot(t[~low_n], y[~low_n], "o", ms=3.0, color=color, zorder=4)
-                    ax.set_ylabel(ylabels[metric], fontsize=8)
-                    ax.set_title(
-                        f"{metric}  —  window {win_s:.0f}s · step {step_s:.0f}s",
-                        loc="left", fontsize=8)
-                    if ax is not axes[-1]:
-                        ax.tick_params(labelbottom=False)
-
-                axes[-1].set_xlabel("Time (s)")
-
-            self.app._slots["rolling_hrv"].update(draw_rolling)
-            table_text = df.to_string(index=False)
-            if low_n.any():
-                table_text += (
-                    f"\n\n  * {int(low_n.sum())} window(s) have fewer than "
-                    f"{self.MIN_CONFIDENT_BEATS} valid RR intervals (n_valid) — "
-                    f"their metrics are noisy.")
-                if need_article_poincare:
-                    table_text += (
-                        f" Poincare metrics are withheld below "
-                        f"{POINCARE_MIN_PAIRS} valid successive RR pairs.")
-                table_text += " Hollow markers identify low-confidence windows."
-            n_excl_win = int((df["n_excluded"].values > 0).sum())
-            if n_excl_win:
-                bounds = rr_bounds_label({"rr_min_ms": rr_lo, "rr_max_ms": rr_hi})
-                table_text += (
-                    f"\n\n  * {n_excl_win} window(s) contain RR intervals outside "
-                    f"{bounds} or spanning removed beats (n_excluded) — "
-                    f"excluded from every metric, not bridged.")
-                if need_freq:
-                    table_text += (
-                        " LF/HF are withheld (blank) in windows whose excluded "
-                        "intervals are too long to interpolate across.")
-            if n_skipped:
-                table_text += (
-                    f"\n\n  * {n_skipped} window(s) skipped — fewer than "
-                    f"{self.MIN_VALID_INTERVALS} valid RR intervals (or "
-                    f"{self.MIN_WINDOW_BEATS} beats); no row, not NaN, and a "
-                    f"gap in the plotted lines.")
-            self.app._set_textbox(self.app.txt_rolling, table_text,
-                              tsv=self.app._df_to_tsv(df))
+            self.app.analysis.windowed_view["rolling"] = {
+                "win_s": win_s, "step_s": step_s, "active": active,
+                "rr": [rr_lo, rr_hi], "n_skipped": n_skipped}
+            n_excl_win = self.show_rolling()
             n = len(df)
             skip_note = f" · {n_skipped} skipped" if n_skipped else ""
             excl_note = (f"  ·  {n_excl_win} window(s) with excluded RR"
                          if n_excl_win else "")
-            self.app.lbl_roll_status.configure(  # type: ignore[union-attr]
-                text=f"  {n} windows{skip_note} · {win_s:.0f}s · step {step_s:.0f}s  ✓",
-                text_color=ORANGE if (n_skipped or n_excl_win) else GREEN)
             # Keep the core results' exclusion disclosure, as run_freq does.
             core_note = self.exclusion_status_note()
             self.app._set_status(
                 f"Rolling HRV — {n} windows computed{skip_note}{excl_note}{core_note}",
                 ORANGE if (n_excl_win or core_note) else GREEN)
-            self.app.tabs.set(TAB_HRV); self.app.after(50, lambda: self.app._on_hrv_view_change("Rolling"))
+            self.app.tabs.set(TAB_TIME_COURSE)
+            self.app.after(50, lambda: self.app._show_time_mode(MODE_SLIDING))
 
+        self._mark_running("rolling")
         self.app._start_async_result(
             self.app.btn_roll_compute, "Computing…", _worker, _done)
 
-    # ── Autonomic indices (HRV > Autonomic) ───────────────────────────
+    def show_rolling(self) -> int:
+        """Draw the stored Sliding frame -- figure, table (with its Excel TSV) and
+        status label -- from what it was computed with; a frame saved without
+        that record shows its ticked metrics and no window length. Returns the
+        number of windows with excluded RR; without a frame the view is emptied
+        and it returns 0. Main thread only."""
+        df = self.app.analysis.rolling_hrv_df
+        if df is None or df.empty:
+            self.clear_rolling_view()
+            return 0
+        view = self.app.analysis.windowed_view.get("rolling") or {}
+        t = df["t_mid"].to_numpy(dtype=float)
+        step_s = float(view.get("step_s") or (np.median(np.diff(t)) if len(t) > 1 else 1.0))
+        win_s = view.get("win_s")
+        where = (f"window {float(win_s):.0f}s · step {step_s:.0f}s" if win_s
+                 else f"step {step_s:.0f}s")
+        active = [m for m in (view.get("active") or
+                              [m for m, cb in self.app._roll_metrics.items() if cb.get()])
+                  if m in df.columns and df[m].notna().any()]
+        active = active or ["HR"]
+        rr_lo, rr_hi = view.get("rr") or self.hrv_rr_bounds(quiet=True)
+        n_skipped = int(view.get("n_skipped", 0))
+        need_freq = bool({"LF_nu", "HF_nu", "LF_HF"} & set(active))
+        need_article_poincare = bool({"CCD", "SD1_LW", "SD2_LW"} & set(active))
+        # Confidence from the intervals the metrics were computed from
+        low_n, old_note = self._frame_confidence(df, "n_valid", "n_beats")
+        if need_article_poincare and "n_poincare_pairs" in df.columns:
+            low_n = low_n | (df["n_poincare_pairs"].values < POINCARE_MIN_PAIRS)
+
+        colors = {"HR": ORANGE_DARK, "SDNN": BLUE_DARK,
+                  "RMSSD": GREEN_DARK, "pNN6": PURPLE,
+                  "SD1": CORAL, "SD2": CYAN_BRIGHT,
+                  "CCD": NAVY, "SD1_LW": CORAL, "SD2_LW": CYAN_BRIGHT,
+                  "LF_nu": BLUE_MID, "HF_nu": GREEN, "LF_HF": AMBER}
+        ylabels = {"HR": "HR (bpm)", "SDNN": "SDNN (ms)",
+                   "RMSSD": "RMSSD (ms)", "pNN6": "pNN6 (%)",
+                   "SD1": "SD1 (ms)", "SD2": "SD2 (ms)",
+                   # Ledoit-Wolf, not the Autonomic view's "robust"
+                   # (Schafer-Strimmer) estimator -- named as such.
+                   "CCD": "CCD (ms)", "SD1_LW": "SD1 LW (ms)",
+                   "SD2_LW": "SD2 LW (ms)",
+                   "LF_nu": "LF (n.u., %)", "HF_nu": "HF (n.u., %)",
+                   "LF_HF": "LF/HF"}
+        panels = [(m, ylabels[m], colors[m], f"{m}  —  {where}") for m in active]
+        # Annotations are read at draw time, like the Autonomic figure's.
+        self.app._slots["rolling_hrv"].update(lambda fig: draw_windowed_panels(
+            fig, t, df, panels, low_n, step_s * 1.5, list(self.app.analysis.annotations)))
+        table_text = df.to_string(index=False) + old_note
+        if low_n.any() and not old_note:
+            table_text += (
+                f"\n\n  * {int(low_n.sum())} window(s) have fewer than "
+                f"{self.MIN_CONFIDENT_BEATS} valid RR intervals (n_valid) — "
+                f"their metrics are noisy.")
+            if need_article_poincare:
+                table_text += (
+                    f" Poincare metrics are withheld below "
+                    f"{POINCARE_MIN_PAIRS} valid successive RR pairs.")
+            table_text += " Hollow markers identify low-confidence windows."
+        n_excl_win = int((df["n_excluded"].values > 0).sum()) if "n_excluded" in df.columns else 0
+        if n_excl_win:
+            bounds = rr_bounds_label({"rr_min_ms": rr_lo, "rr_max_ms": rr_hi})
+            table_text += (
+                f"\n\n  * {n_excl_win} window(s) contain RR intervals outside "
+                f"{bounds} or spanning removed beats (n_excluded) — "
+                f"excluded from every metric, not bridged.")
+            if need_freq:
+                table_text += (
+                    " LF/HF are withheld (blank) in windows whose excluded "
+                    "intervals are too long to interpolate across.")
+        if n_skipped:
+            table_text += (
+                f"\n\n  * {n_skipped} window(s) skipped — fewer than "
+                f"{self.MIN_VALID_INTERVALS} valid RR intervals (or "
+                f"{self.MIN_WINDOW_BEATS} beats); no row, not NaN, and a "
+                f"gap in the plotted lines.")
+        self.app._set_textbox(self.app.txt_rolling, table_text,
+                              tsv=self.app._df_to_tsv(df))
+        skip_note = f" · {n_skipped} skipped" if n_skipped else ""
+        self.app.lbl_roll_status.configure(  # type: ignore[union-attr]
+            text=f"  {len(df)} windows{skip_note} · {where.removeprefix('window ')}  ✓",
+            text_color=ORANGE if (n_skipped or n_excl_win) else GREEN)
+        return n_excl_win
+
+    # ── Autonomic indices (Time course > Autonomic) ───────────────────
     # Time-resolved cardiac sympathetic / parasympathetic indices (CSI /
     # CPI) of Candia-Rivera et al., J Physiol 2025 (core.autonomic), plus
     # the optional SPWVD LF / HF (core.spwvd). Same inputs as every other
@@ -1386,7 +1676,7 @@ class AnalysisController:
 
     def _invalidate_event_locked(self, reason: "str | None" = None) -> None:
         """Drop the event-locked result derived from the Autonomic result
-        (HRV > Autonomic > Event-locked) and blank its panel; *reason*
+        (Time course > Event-locked) and blank its panel; *reason*
         ("peaks", "autonomic", "annotations", None = idle) is what the
         panel's label says. Main thread only."""
         ctrl = getattr(self.app, "event_ctrl", None)
@@ -1419,6 +1709,15 @@ class AnalysisController:
         # current ones too.
         slot.update(lambda fig: draw_autonomic(
             fig, res, spwvd, list(self.app.analysis.annotations)))
+
+    def redraw_windowed_plots(self) -> None:
+        """Re-render Epochs and Sliding from what they show -- after the annotations
+        changed. No-op on a placeholder."""
+        slots = getattr(self.app, "_slots", None) or {}
+        for name in ("epochs", "rolling_hrv"):
+            slot = slots.get(name)
+            if slot is not None and slot._draw_fn is not None:
+                slot.update(slot._draw_fn)
 
     def autonomic_stale_reasons(self) -> "list[str]":
         """Why the displayed Autonomic result no longer matches the view:
@@ -1485,10 +1784,10 @@ class AnalysisController:
         self._set_autonomic_label(text, color)
         return text, color
 
-    def compute_autonomic(self) -> None:
+    def compute_autonomic(self, then: "Any" = None) -> None:
         """Compute the time-resolved CSI / CPI (and, when ticked, the SPWVD
         LF / HF) of the analysis window's peaks in the background, then
-        draw the Autonomic view."""
+        draw the Autonomic view. *then* runs once a result has landed."""
         app = self.app
         if app.detection.rpeaks_ok is None or app.signal.fs is None:
             app._set_status("No peaks yet — click Analyze first.", RED)
@@ -1557,6 +1856,7 @@ class AnalysisController:
             return {"result": res, "spwvd": spwvd}
 
         def _done(out: dict) -> None:
+            self._mark_landed("autonomic")
             if getattr(app, "_generation", 0) != gen:
                 log.info("compute_autonomic: stale result discarded (file changed)")
                 return
@@ -1577,7 +1877,10 @@ class AnalysisController:
             self._invalidate_event_locked("autonomic")
             text, color = self.show_autonomic() or ("", ORANGE)
             app._set_status(f"Autonomic indices — {text.strip()}", color)
+            if then is not None:
+                then()
 
+        self._mark_running("autonomic")
         app._start_async_result(app.btn_auto_compute, "Computing…", _worker, _done)
 
     def run_analysis(self) -> None:
@@ -1607,6 +1910,7 @@ class AnalysisController:
         params["hrv_rr_bounds"] = self.hrv_rr_bounds()
         params["break_tol_samples"] = self.break_tol_samples()
         prev_report = self.app.analysis.artifact_report
+        self._mark_running("core", "frequency", "nonlinear")
         self.app._start_async(
             self.app.btn_run, "Analysing\u2026", "Running HRV analysis\u2026",
             lambda: self.analysis_worker(params, prev_report),
@@ -1727,6 +2031,7 @@ class AnalysisController:
         self.app.analysis.analysed_window = bundle.get(
             "analysis_window", (self.app.analysis.t_start, self.app.analysis.t_end))
 
+        self._mark_landed("core")
         if self.app.analysis.results is None:
             return
         # Taken from the bundle, not the entries: the correction can change
@@ -1734,6 +2039,9 @@ class AnalysisController:
         self._stamp_basis("core", self._capture_basis(
             window=self.app.analysis.analysed_window,
             rr_bounds=recorded_rr_bounds(self.app.analysis.results)))
+        ui = getattr(self.app, "ui", None)
+        if ui is not None:
+            ui.computed_at = dt.datetime.now().isoformat(timespec="seconds")
         # Sync the peak label: show windowed count if a window was active,
         # otherwise show total artifact-corrected count.
         _rp_ok   = self.app.detection.rpeaks_ok
@@ -1784,9 +2092,6 @@ class AnalysisController:
         # Enable the per-tab buttons now that core results are available
         self.app._set_result_btns_enabled(
             True, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl", "btn_run_arrhythmia"))
-        if self.app.lbl_ivl_status is not None:
-            self.app.lbl_ivl_status.configure(  # type: ignore[union-attr]
-                text="  Core done — click to delineate P/Q/S/T waves", text_color=ORANGE)
         # Auto epochs start once frequency HRV -- itself an async job -- has
         # finished: scheduled independently (after(200) at the end of the
         # plot chain) they always hit the busy guard while run_freq was
@@ -1796,8 +2101,7 @@ class AnalysisController:
         def _core_results_done():
             # Frequency-domain HRV runs automatically as part of Analyze
             # rather than needing its own click -- a Welch PSD over a few
-            # hundred RR intervals is cheap (unlike Non-linear's SampEn/DFA,
-            # which stays opt-in), and it used to be the single most common
+            # hundred RR intervals is cheap, and it used to be the single most common
             # "click Analyze, then immediately click Freq HRV too" sequence
             # in the app.
             #
@@ -1811,7 +2115,12 @@ class AnalysisController:
             self.app._set_status(
                 f"Core analysis done — {n_used} peaks / {n_valid} valid{art_str}{win_str}"
                 f"{excl_str}  | Running Frequency HRV…", status_color)
-            self.run_freq(then=self.app._compute_epochs if auto_epochs else None)
+            # Non-linear after it, epochs last: each starts once the one before
+            # has finished, or the busy guard would refuse it.
+            self._when_idle(lambda: self.run_freq(then=lambda: self._when_idle(
+                lambda: self.run_nonlinear(
+                    then=(lambda: self._when_idle(self.app._compute_epochs))
+                    if auto_epochs else None))))
 
         try:
             self.app._draw_core_results(on_complete=_core_results_done)
@@ -1820,14 +2129,13 @@ class AnalysisController:
         # Populate interpretation tab with core values (freq/nonlinear added later)
         pass  # interpretation removed
         # Analysis window label (the window actually used) and the
-        # Frequency / Non-linear status labels. The window label also
+        # Frequency / Non-linear / Intervals status labels. The window label also
         # carries the RR-exclusion note, in orange: unlike the status bar it
         # stays until the window or the results change (and is re-derived
         # after a UI rebuild or a session restore), so the disclosure
         # persists however many status messages follow.
         self.refresh_result_labels()
         # Enable Save Session now that we have results
-        self.app._update_quality_badge()
         if self.app.btn_save_session is not None:
             self.app._set_save_session_enabled(True)
         self.app.session.dirty = True
@@ -1857,6 +2165,8 @@ class AnalysisController:
         if rp is None or len(rp) < 5:
             messagebox.showwarning("Not ready", "Not enough peaks in the analysis window.")
             return
+        if self._refused_busy():
+            return
         fs  = self.app.signal.fs
         _gen = getattr(self.app, "_generation", 0)  # snapshot — detect file change
         # Same bounds/breaks as the core results this extends (main thread).
@@ -1864,6 +2174,7 @@ class AnalysisController:
         breaks       = self.hrv_breaks()
         bands        = self.get_freq_bands()
         basis        = self._capture_basis(rr_bounds=(rr_lo, rr_hi))
+        self._mark_running("frequency")
         if self.app.lbl_freq_status is not None:
             self.app.lbl_freq_status.configure(text="  Computing…", text_color=ORANGE)  # type: ignore[union-attr]
 
@@ -1875,8 +2186,8 @@ class AnalysisController:
                                     bands=bands)
 
         def _done(result):
-            if self.app.analysis.results is None or getattr(self.app, "_generation", 0) != _gen:
-                log.info("_run_freq: stale result discarded (file changed)")
+            self._mark_landed("frequency")
+            if self._job_is_stale("Frequency HRV", "lbl_freq_status", _gen, basis):
                 return
             self.app.analysis.results["hrv_freq"] = result
             self._stamp_basis("frequency", basis)
@@ -1884,7 +2195,7 @@ class AnalysisController:
             tasks = [
                 ("PSD",       lambda: self.app._plot_psd(results)),
                 ("HRV tables (freq)", lambda: self.app._plot_hrv_tables(results)),
-                ("Summary",   lambda: self.app._plot_summary(results)),
+                ("Metrics",   lambda: self.app._plot_table_views(results)),
             ]
             # Spectrum withheld (too few valid intervals, or excluded
             # intervals too long to interpolate across): the label says
@@ -1915,7 +2226,7 @@ class AnalysisController:
 
     def entropy_cap(self) -> int:
         """Cap on valid RR intervals for the entropy/complexity block of
-        non-linear HRV, from the Non-linear tab's entry (only an explicit 0
+        non-linear HRV, from the Rhythm & HRV page's entry (only an explicit 0
         = no cap); the MouseECG.ENTROPY_MAX_BEATS default when the entry is
         missing, blank, invalid or negative -- a negative entry is a typo,
         not a request for the O(N²) entropy block on every beat. Poincaré
@@ -1937,8 +2248,11 @@ class AnalysisController:
             return MouseECG.ENTROPY_MAX_BEATS
         return val
 
-    def run_nonlinear(self) -> None:
-        """Compute non-linear HRV in background, then render."""
+    def run_nonlinear(self, then: "Any" = None) -> None:
+        """Compute non-linear HRV in background, then render.
+
+        *then* (optional, no arguments) runs once the rendering chain has
+        finished, as for run_freq: the last steps of an Analyze."""
         if self.app.analysis.results is None or self.app.detection.rpeaks_ok is None:
             messagebox.showwarning("Not ready", "Click Analyze first.")
             return
@@ -1950,6 +2264,8 @@ class AnalysisController:
         if sig is None:
             messagebox.showwarning("Not ready", "Signal not loaded.")
             return
+        if self._refused_busy():
+            return
         fs  = self.app.signal.fs
         _gen = getattr(self.app, "_generation", 0)
         # Same bounds/breaks as the core results this extends (main thread).
@@ -1957,6 +2273,7 @@ class AnalysisController:
         breaks       = self.hrv_breaks()
         entropy_cap  = self.entropy_cap()
         basis        = self._capture_basis(rr_bounds=(rr_lo, rr_hi))
+        self._mark_running("nonlinear")
         if self.app.lbl_nonlin_status is not None:
             self.app.lbl_nonlin_status.configure(  # type: ignore[union-attr]
                 text="  Computing SampEn / DFA… (may take 30 s+)", text_color=ORANGE)
@@ -1970,15 +2287,15 @@ class AnalysisController:
                                          breaks=breaks)
 
         def _done(result):
-            if self.app.analysis.results is None or getattr(self.app, "_generation", 0) != _gen:
-                log.info("_run_nonlinear: stale result discarded (file changed)")
+            self._mark_landed("nonlinear")
+            if self._job_is_stale("Non-linear HRV", "lbl_nonlin_status", _gen, basis):
                 return
             self.app.analysis.results["hrv_nonlin"] = result
             self._stamp_basis("nonlinear", basis)
             results: dict = self.app.analysis.results  # narrow for type checkers
             tasks = [
                 ("Non-linear metrics", lambda: self.app._plot_nonlinear(results)),
-                ("Summary",            lambda: self.app._plot_summary(results)),
+                ("Metrics",            lambda: self.app._plot_table_views(results)),
             ]
             # SampEn, beat-count truncation and withheld asymmetry indices
             # (same text after a UI rebuild or a session restore, see
@@ -1988,10 +2305,14 @@ class AnalysisController:
                 self.app.lbl_nonlin_status.configure(  # type: ignore[union-attr]
                     text=text, text_color=color)
             excl_note = self.exclusion_status_note()   # same as run_freq
-            self.app._run_plot_chain(
-                tasks,
-                on_complete=lambda: self.app._set_status(
-                    f"Non-linear HRV done{excl_note}", ORANGE if excl_note else GREEN))
+
+            def _finish() -> None:
+                self.app._set_status(f"Non-linear HRV done{excl_note}",
+                                     ORANGE if excl_note else GREEN)
+                if then is not None:
+                    then()
+
+            self.app._run_plot_chain(tasks, on_complete=_finish)
 
         self.app._start_async_result(self.app.btn_run_nonlin, "Computing…", _worker, _done)  # type: ignore[arg-type]
 
@@ -2013,6 +2334,45 @@ class AnalysisController:
                 self.app._default_template_notice_shown = True
                 messagebox.showwarning("Saved default template not used", notice)
         return wt
+
+    @staticmethod
+    def _measured_note(ivl: "pd.DataFrame", provenance: str) -> "tuple[str, str, int, int]":
+        """The Morphology status line of measured intervals: (text, colour,
+        beats measured, beats)."""
+        interval_cols = [c for c in ["PR_ms", "QRS_ms", "QT_ms"] if c in ivl.columns]
+        n_ok    = int((~ivl[interval_cols].isna().any(axis=1)).sum()) if interval_cols else 0  # type: ignore[arg-type]
+        n_total = len(ivl)
+        pct     = 100.0 * n_ok / n_total if n_total else 0.0
+        # Graded by completion ratio, not "any beat succeeded" -- a
+        # measurement drawn from a small, possibly-biased subset (wave
+        # delineation tends to fail on exactly the abnormal beats) is a
+        # very different result from a near-complete one, and both used
+        # to render identically as plain green.
+        if pct >= 90:
+            note_color = GREEN
+        elif pct >= 50:
+            note_color = ORANGE
+        else:
+            note_color = RED
+        tmpl_note = f"  ·  template: {provenance}" if provenance else ""
+        note = f"  {n_ok}/{n_total} beats measured ({pct:.0f}%){tmpl_note}"
+        if n_ok < n_total:
+            remedy = ("check template / filters" if n_ok == 0
+                      else "try Permissive Bounds or adjust Landmarks")
+            note += f"  — {n_total - n_ok} outside bounds: {remedy}"
+        return note, note_color, n_ok, n_total
+
+    def _intervals_status(self, ivl: "pd.DataFrame | None") -> "tuple[str, str]":
+        """(text, colour) of lbl_ivl_status for these results; the template
+        named is the one the intervals used, recorded in their attrs."""
+        # analyse_core's placeholder is a non-empty frame with RR_ms alone.
+        if ivl is None or ivl.empty or "QT_ms" not in ivl.columns:
+            return "  Core done — click to delineate P/Q/S/T waves", ORANGE
+        used = ivl.attrs.get("wave_template")
+        wt = (WaveTemplate.from_dict(used) if isinstance(used, dict)
+              else self.app.analysis.wave_template)
+        note, color, _, _ = self._measured_note(ivl, wt.provenance() if wt is not None else "")
+        return note, color
 
     def run_intervals(self) -> None:
         """Compute interval delineation (PR/QRS/QT/QTc) for every beat."""
@@ -2063,47 +2423,30 @@ class AnalysisController:
         def _done(df: "pd.DataFrame") -> None:
             if self.app.analysis.results is None or getattr(self.app, "_generation", 0) != _gen:
                 log.info("_run_intervals: stale result discarded (file changed)")
+                self._disable_result_btns_without_results()
                 return
             # The formula selector may have changed while the worker ran.
             if self.qtc_formula() != qtc_formula_for_worker:
                 df = recompute_qtc_column(df, self.qtc_formula())
             self.app.analysis.results["intervals"] = df
             self._stamp_basis("intervals", basis)
+            self.note_intervals_measured(df)
 
-            interval_cols = [c for c in ["PR_ms", "QRS_ms", "QT_ms"] if c in df.columns]
-            n_ok    = int((~df[interval_cols].isna().any(axis=1)).sum()) if interval_cols else 0  # type: ignore[arg-type]
-            n_total = len(df)
-
-            tmpl_note = f"  ·  template: {wt_for_worker.provenance()}"
             lbl_tmpl = getattr(self.app, "lbl_template_info", None)
             if lbl_tmpl is not None:
                 lbl_tmpl.configure(text=f"Template: {wt_for_worker.provenance()}",
                                    text_color=MUTED if wt_for_worker.source == "default"
                                    else GREEN)
-            pct       = 100.0 * n_ok / n_total if n_total else 0.0
-            # Graded by completion ratio, not "any beat succeeded" -- a
-            # measurement drawn from a small, possibly-biased subset (wave
-            # delineation tends to fail on exactly the abnormal beats) is a
-            # very different result from a near-complete one, and both used
-            # to render identically as plain green.
-            if pct >= 90:
-                note_color = GREEN
-            elif pct >= 50:
-                note_color = ORANGE
-            else:
-                note_color = RED
-            note = f"  {n_ok}/{n_total} beats measured ({pct:.0f}%){tmpl_note}"
-            if n_ok < n_total:
-                remedy = ("check template / filters" if n_ok == 0
-                          else "try Permissive Bounds or adjust Landmarks")
-                note += f"  — {n_total - n_ok} outside bounds: {remedy}"
+            note, note_color, n_ok, n_total = self._measured_note(df, wt_for_worker.provenance())
             if self.app.lbl_ivl_status is not None:
                 self.app.lbl_ivl_status.configure(text=note, text_color=note_color)  # type: ignore[union-attr]
 
             results: dict = self.app.analysis.results
             self.app._run_plot_chain(
                 [("ECG intervals", lambda: self.app._plot_intervals(results)),
-                 ("Summary",       lambda: self.app._plot_summary(results))],
+                 # The mean beat's overlay names the windows these intervals used.
+                 ("Beat template", lambda: self.app._plot_beat_template(results)),
+                 ("Metrics",       lambda: self.app._plot_table_views(results))],
                 on_complete=lambda: self.app._set_status(
                     f"Interval delineation done — {n_ok}/{n_total} beats", note_color))
 
@@ -2113,7 +2456,7 @@ class AnalysisController:
         """Proactively warn if the current Epoch (s) value can't fit the
         recording, instead of only finding out after clicking Compute epochs
         and getting the inline "too short" message. Called when the Epochs
-        sub-view is shown (see app._on_hrv_view_change) so the warning —
+        mode is shown (see app._show_time_mode) so the warning —
         and the orange entry border — are visible before the user presses
         anything. Mirrors compute_epochs()'s own feasibility check below.
         """
@@ -2152,7 +2495,19 @@ class AnalysisController:
             self.app.ent_epoch.configure(border_color=ORANGE)
         else:
             self.app.ent_epoch.configure(border_color=BORDER2)
+            # A warning of a former value goes: this now runs on every opening.
+            self.app.lbl_epoch_info.configure(text=self._epoch_info_text(), text_color=MUTED)
 
+    def _epoch_info_text(self) -> str:
+        df = self.app.analysis.epoch_df
+        return f"{len(df)} epoch(s) computed" if df is not None and not df.empty else ""
+
+    # Epochs and Sliding share their controls, figure and confidence rule, but
+    # NOT their numeric loop. Verdict of tests/ui/test_epoch_sliding_characterisation.py:
+    # identical HR, SDNN, RMSSD, pNN6 and counts on the same grid with pauses,
+    # removed beats and very short windows, except RMSSD on a window with a single
+    # successive valid pair: |difference| here (hrv_time_domain), NaN in Sliding
+    # (its guard wants two). Merging would change one of them, so they stay separate.
     def compute_epochs(self) -> None:
         """Compute epoch-level HRV in a background thread to keep the UI responsive.
 
@@ -2166,6 +2521,18 @@ class AnalysisController:
             return
         if self.app.signal.time is None:
             return
+
+        # What is ticked; the base columns are computed whatever is plotted, the
+        # others only when ticked, so a default run gives the same frame as ever.
+        ticks = getattr(self.app, "_epoch_metrics", None)
+        active = ([m for m, cb in ticks.items() if cb.get()] if isinstance(ticks, dict) and ticks
+                  else list(self.EPOCH_BASE_METRICS))
+        if not active:
+            self.app._set_status("Select at least one metric.", RED)
+            return
+        extra = set(active) - set(self.EPOCH_BASE_METRICS)
+        need_sd = bool({"SD1", "SD2"} & extra)
+        need_freq = bool({"LF_nu", "HF_nu", "LF_HF"} & extra)
 
         epoch_s   = max(MouseECG.EPOCH_MIN_S,
                         self.app._safe_float(self.app.ent_epoch, MouseECG.EPOCH_DEFAULT_S))
@@ -2190,6 +2557,7 @@ class AnalysisController:
         # Read on the main thread (Tk widgets / app state) before the worker.
         rr_lo, rr_hi = self.hrv_rr_bounds()
         breaks       = self.hrv_breaks()
+        bands        = self.get_freq_bands() if need_freq else None
         basis        = self._capture_basis()
         if len(starts) < 2:
             # Inline, non-blocking: a modal here used to re-fire on every
@@ -2243,7 +2611,7 @@ class AnalysisController:
                 diffs = np.abs(sdiff)
                 pnn6  = float(100.0 * np.sum(diffs > MouseECG.PNN_THRESHOLD) / len(diffs)) \
                         if len(diffs) else float("nan")
-                rows.append({
+                row = {
                     "Epoch_start_s": round(t0, 1),
                     "Epoch_end_s":   round(t1, 1),
                     "N_beats":       len(ep_rp),
@@ -2254,7 +2622,20 @@ class AnalysisController:
                     "SDNN":          round(sdnn, 2),
                     "RMSSD":         round(rmssd, 2),
                     "pNN6":          round(pnn6, 1),
-                })
+                }
+                # The ticked extras, with the same helpers and rounding as Sliding.
+                if need_sd:
+                    pc = poincare_sd1_sd2(ser["rr_ms"], ser["valid"])
+                    row.update(SD1=round(float(pc["sd1"]), 3) if np.isfinite(pc["sd1"]) else np.nan,
+                               SD2=round(float(pc["sd2"]), 3) if np.isfinite(pc["sd2"]) else np.nan)
+                if need_freq:
+                    lf_nu, hf_nu, lf_hf = self._window_lf_hf(
+                        ep_rp, fs, rr_lo, rr_hi, breaks, bands, t0)
+                    row.update(LF_nu=round(lf_nu, 1) if np.isfinite(lf_nu) else np.nan,
+                               HF_nu=round(hf_nu, 1) if np.isfinite(hf_nu) else np.nan,
+                               LF_HF=round(lf_hf, 3) if np.isfinite(lf_hf) else np.nan)
+                rows.append({k: v for k, v in row.items()
+                             if k not in self.EPOCH_OPTIONAL or k in extra})
                 # Progress via after() — safe cross-thread call, throttled to every 5%
                 pct = int((idx_ep + 1) / max(n_ep, 1) * 100)
                 if idx_ep % max(1, n_ep // 20) == 0:
@@ -2263,6 +2644,7 @@ class AnalysisController:
             return {"rows": rows, "n_skipped": n_skipped}
 
         def _done(result):
+            self._mark_landed("epochs")
             if getattr(self.app, "_generation", 0) != _gen:
                 log.info("compute_epochs: stale result discarded (file changed)")
                 return
@@ -2276,93 +2658,13 @@ class AnalysisController:
             df    = pd.DataFrame(rows)
             self.app.analysis.epoch_df = df
             self._stamp_basis("epochs", basis)
-            t_mid = ((df["Epoch_start_s"] + df["Epoch_end_s"]) / 2).values
-            # Confidence from the intervals the metrics were computed from
-            low_n = df["N_valid"].values < self.MIN_CONFIDENT_BEATS
-
-            # No reference bands (the experimental-context selector they
-            # came from was removed) -- draw_epochs below leaves this
-            # empty and just skips the shaded-band block entirely.
-            ref_bands: "dict[str, tuple[float, float]]" = {}
-
-            plot_specs = [
-                ("HR_mean", "HR (bpm)",   ORANGE_DARK, "Heart Rate per Epoch"),
-                ("SDNN",    "SDNN (ms)",  BLUE_DARK,   "SDNN per Epoch"),
-                ("RMSSD",   "RMSSD (ms)", GREEN_DARK,  "RMSSD per Epoch"),
-                ("pNN6",    "pNN6 (%)",   PURPLE,      "pNN6 per Epoch"),
-            ]
-
-            def draw_epochs(fig):
-                axes = fig.subplots(4, 1, sharex=True)
-                try:
-                    fig.set_constrained_layout_pads(hspace=0.08)
-                except Exception as exc:
-                    log.debug("draw_epochs: set_constrained_layout_pads failed: %s", exc)
-                for ax, (col, ylabel, color, title) in zip(axes, plot_specs):
-                    style_axes(ax)
-                    y = df[col].values
-                    if col in ref_bands:
-                        lo, hi = ref_bands[col]
-                        ax.axhspan(lo, hi, alpha=0.10, color=color, linewidth=0, zorder=0,
-                                   label="Ref. range (context)")
-                        ax.axhline(lo, color=color, lw=0.6, ls="--", alpha=0.45, zorder=1)
-                        ax.axhline(hi, color=color, lw=0.6, ls="--", alpha=0.45, zorder=1)
-                        ax.legend(loc="upper right", fontsize=6, framealpha=0)
-                    # No fill-to-zero (see draw_rolling) -- keeps real
-                    # HR/HRV swings from being squashed against the top edge.
-                    # The line breaks where skipped epochs left no row, so a
-                    # pause or sub-bound stretch shows as a gap rather than
-                    # as interpolated data.
-                    ax.plot(*break_line_at_gaps(t_mid, y, step * 1.5),
-                            color=color, lw=1.5, zorder=3)
-                    # Low-confidence epochs (< MIN_CONFIDENT_BEATS valid RR
-                    # intervals): open, lighter markers instead of filled
-                    # ones -- same data, visually distinguished rather than
-                    # silently identical.
-                    if low_n.any():
-                        ax.plot(t_mid[low_n], y[low_n], "o", ms=4.5, mfc="none",
-                                mec=color, mew=1.0, alpha=0.6, zorder=4)
-                    if (~low_n).any():
-                        ax.plot(t_mid[~low_n], y[~low_n], "o", ms=3.5, color=color, zorder=4)
-                    ax.set_ylabel(ylabel)
-                    ax.set_title(title, loc="left")
-                    if ax is not axes[-1]:
-                        ax.tick_params(labelbottom=False)
-                axes[-1].set_xlabel("Time (s)")
-
-            self.app._slots["epochs"].update(draw_epochs)
-            table_text = df.to_string(index=False)
-            if low_n.any():
-                table_text += (
-                    f"\n\n  * {int(low_n.sum())} epoch(s) have fewer than "
-                    f"{self.MIN_CONFIDENT_BEATS} valid RR intervals (N_valid) — "
-                    f"SDNN/RMSSD/pNN6 for those rows are noisy (hollow markers "
-                    f"on the plot above).")
-            n_excl_ep = int((df["N_excluded"].values > 0).sum())
-            if n_excl_ep:
-                bounds = rr_bounds_label({"rr_min_ms": rr_lo, "rr_max_ms": rr_hi})
-                table_text += (
-                    f"\n\n  * {n_excl_ep} epoch(s) contain RR intervals outside "
-                    f"{bounds} or spanning removed beats (N_excluded) — "
-                    f"excluded from every metric, not bridged.")
-            if n_skipped:
-                table_text += (
-                    f"\n\n  * {n_skipped} epoch(s) skipped — fewer than "
-                    f"{self.MIN_VALID_INTERVALS} valid RR intervals (or "
-                    f"{self.MIN_WINDOW_BEATS} beats); no row, and a gap in "
-                    f"the plotted lines.")
-            self.app._set_textbox(self.app.txt_epochs, table_text,
-                              tsv=self.app._df_to_tsv(df))
+            self.app.analysis.windowed_view["epochs"] = {
+                "epoch_s": epoch_s, "step_s": step, "active": active,
+                "rr": [rr_lo, rr_hi], "n_skipped": n_skipped}
+            n_excl_ep = self.show_epochs()
             n_ep = len(df)
-            # Update the label in the Epochs tab header
-            self.app.lbl_epoch_count.configure(
-                text=f"{n_ep} epochs × {epoch_s:.0f}s", text_color=BLUE)
-            self.app.lbl_epoch_info.configure(
-                text=f"{n_ep} epoch(s) computed", text_color=MUTED)
-            # Update the label in the Summary tab (shows last-computed epoch info)
-            self.app.lbl_summary_epoch_info.configure(
-                text=f"Last epoch run: {n_ep} × {epoch_s:.0f}s", text_color=MUTED)
-            self.app.tabs.set(TAB_HRV); self.app.after(50, lambda: self.app._on_hrv_view_change("Epochs"))
+            self.app.tabs.set(TAB_TIME_COURSE)
+            self.app.after(50, lambda: self.app._show_time_mode(MODE_EPOCHS))
             # Can be the last step of an Analyze (auto epochs): keep the core
             # results' exclusion disclosure (and its orange) rather than
             # ending on plain green -- an excluded interval in the tail after
@@ -2376,4 +2678,78 @@ class AnalysisController:
                 f"Epoch analysis done — {n_ep} epochs{skip_note}{excl_note}{core_note}",
                 ORANGE if (n_excl_ep or core_note) else GREEN)
 
+        self._mark_running("epochs")
         self.app._start_async_result(self.app.btn_compute_epochs, "Computing…", _worker, _done)
+
+    def show_epochs(self) -> int:
+        """Draw the stored Epochs frame -- figure, table (with its Excel TSV) and
+        labels -- from what it was computed with, or from the frame itself when
+        it was saved without that record. Returns the number of epochs with
+        excluded RR; without a frame the view is emptied and it returns 0. Main
+        thread only."""
+        df = self.app.analysis.epoch_df
+        if df is None or df.empty:
+            self.clear_epochs_view()
+            return 0
+        view = self.app.analysis.windowed_view.get("epochs") or {}
+        start, end = df["Epoch_start_s"].to_numpy(dtype=float), df["Epoch_end_s"].to_numpy(dtype=float)
+        t_mid = (start + end) / 2
+        epoch_s = float(view.get("epoch_s") or np.median(end - start))
+        step = float(view.get("step_s") or (np.min(np.diff(start)) if len(start) > 1 else epoch_s))
+        rr_lo, rr_hi = view.get("rr") or self.hrv_rr_bounds(quiet=True)
+        n_skipped = int(view.get("n_skipped", 0))
+        # Confidence from the intervals the metrics were computed from
+        low_n, old_note = self._frame_confidence(df, "N_valid", "N_beats")
+
+        specs = {
+            "HR":    ("HR_mean", "HR (bpm)",     ORANGE_DARK, "Heart Rate per Epoch"),
+            "SDNN":  ("SDNN",    "SDNN (ms)",    BLUE_DARK,   "SDNN per Epoch"),
+            "RMSSD": ("RMSSD",   "RMSSD (ms)",   GREEN_DARK,  "RMSSD per Epoch"),
+            "pNN6":  ("pNN6",    "pNN6 (%)",     PURPLE,      "pNN6 per Epoch"),
+            "SD1":   ("SD1",     "SD1 (ms)",     CORAL,       "SD1 per Epoch"),
+            "SD2":   ("SD2",     "SD2 (ms)",     CYAN_BRIGHT, "SD2 per Epoch"),
+            "LF_nu": ("LF_nu",   "LF (n.u., %)", BLUE_MID,    "LF (n.u.) per Epoch"),
+            "HF_nu": ("HF_nu",   "HF (n.u., %)", GREEN,       "HF (n.u.) per Epoch"),
+            "LF_HF": ("LF_HF",   "LF/HF",        AMBER,       "LF/HF per Epoch"),
+        }
+        panels = [specs[m] for m in (view.get("active") or self.EPOCH_BASE_METRICS)
+                  if m in specs and specs[m][0] in df.columns]
+        self.app._slots["epochs"].update(lambda fig: draw_windowed_panels(
+            fig, t_mid, df, panels, low_n, step * 1.5, list(self.app.analysis.annotations)))
+        table_text = df.to_string(index=False) + old_note
+        if low_n.any() and not old_note:
+            table_text += (
+                f"\n\n  * {int(low_n.sum())} epoch(s) have fewer than "
+                f"{self.MIN_CONFIDENT_BEATS} valid RR intervals (N_valid) — "
+                f"SDNN/RMSSD/pNN6 for those rows are noisy (hollow markers "
+                f"on the plot above).")
+        n_excl_ep = int((df["N_excluded"].values > 0).sum()) if "N_excluded" in df.columns else 0
+        if n_excl_ep:
+            bounds = rr_bounds_label({"rr_min_ms": rr_lo, "rr_max_ms": rr_hi})
+            table_text += (
+                f"\n\n  * {n_excl_ep} epoch(s) contain RR intervals outside "
+                f"{bounds} or spanning removed beats (N_excluded) — "
+                f"excluded from every metric, not bridged.")
+        if n_skipped:
+            table_text += (
+                f"\n\n  * {n_skipped} epoch(s) skipped — fewer than "
+                f"{self.MIN_VALID_INTERVALS} valid RR intervals (or "
+                f"{self.MIN_WINDOW_BEATS} beats); no row, and a gap in "
+                f"the plotted lines.")
+        self.app._set_textbox(self.app.txt_epochs, table_text,
+                              tsv=self.app._df_to_tsv(df))
+        n_ep = len(df)
+        # Update the label of the Epochs mode
+        self.app.lbl_epoch_count.configure(
+            text=f"{n_ep} epochs × {epoch_s:.0f}s", text_color=BLUE)
+        self.app.lbl_epoch_info.configure(text=self._epoch_info_text(), text_color=MUTED)
+        return n_excl_ep
+
+    def clear_epochs_view(self) -> None:
+        """No Epochs frame: nothing of an earlier one stays on screen, as after a
+        UI rebuild. Main thread only."""
+        self._blank_windowed_view("txt_epochs", "epochs")
+        for attr in ("lbl_epoch_count", "lbl_epoch_info"):
+            lbl = getattr(self.app, attr, None)
+            if lbl is not None:
+                lbl.configure(text="", text_color=MUTED)

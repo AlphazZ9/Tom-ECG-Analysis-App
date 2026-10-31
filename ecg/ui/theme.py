@@ -619,8 +619,9 @@ _SYNC_MODULES = (
     "ecg.ui.app_state_props", "ecg.ui.app_sidebar", "ecg.ui.app_toolbar",
     "ecg.ui.app_right_panel", "ecg.ui.app_async", "ecg.ui.app_helpers",
     "ecg.ui.app_delegates", "ecg.ui.params_dialog", "ecg.ui.compare_segments",
-    "ecg.ui.tab_detection", "ecg.ui.tab_hrv", "ecg.ui.tab_events",
-    "ecg.ui.tab_morphology", "ecg.ui.tab_summary",
+    "ecg.ui.tab_detection", "ecg.ui.tab_hrv", "ecg.ui.tab_time_course", "ecg.ui.tab_events",
+    "ecg.ui.tab_morphology", "ecg.ui.tab_report",
+    "ecg.ui.tabbar", "ecg.ui.context_strip",
 )
 
 

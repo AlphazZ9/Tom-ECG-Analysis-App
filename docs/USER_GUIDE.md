@@ -21,7 +21,7 @@ recordings will look different; the workflow is identical.
 6. [Autonomic indices (CSI / CPI) — Candia-Rivera et al. 2025](#autonomic-indices-csi--cpi--candia-rivera-et-al-2025)
 7. [Interval delineation](#interval-delineation)
 8. [Abnormal events](#abnormal-events)
-9. [Summary tab](#summary-tab)
+9. [Report tab](#report-tab)
 10. [Parameters & interpretation](#parameters--interpretation)
 11. [Exporting & saving your work](#exporting--saving-your-work)
 12. [Tips & troubleshooting](#tips--troubleshooting)
@@ -36,7 +36,23 @@ python ecg_app.py       # backward-compatible entry point
 ecg-analysis            # after `pip install -e .`
 ```
 
-The window opens on the **Detection** tab with no file loaded. The
+The app has five analysis tabs and a report, organised by question:
+
+| Tab | The question | Holds |
+|-----|--------------|-------|
+| **Signal & Detection** | Is the signal good and are the peaks right? | Signal, peak editing, quality panel |
+| **Rhythm & HRV** | What are the rhythm and its variability over the window? | RR / HR, time domain, frequency, non-linear, RR asymmetry |
+| **Time course** | How do they change over time? | Epochs, Sliding, Autonomic, Event-locked (one selector) |
+| **Morphology & Intervals** | What does a beat look like and how long are its intervals? | Steps: mean beat, landmarks, intervals |
+| **Events** | What happened that should not have? | Event ribbon, event list, ECG zoom |
+| **Report** | What goes out? | Provenance, module states, Include, exports |
+
+Above every tab, the **context strip** says what the numbers rest on (window,
+peaks, RR bounds, exclusions, artifact correction, QTc formula). Each tab head
+carries one state: ● up to date, ◆ out of date, ○ not computed; hover it for the
+reason.
+
+The window opens on the **Signal & Detection** tab with no file loaded. The
 toolbar along the top (**Open**, **Save**, **Detect Peaks**, **Analyze**,
 undo/redo, the signal-quality badge, and the theme toggle) stays visible
 no matter which tab you're on — everything downstream of loading a file
@@ -62,7 +78,7 @@ is filtered, detected, or analyzed until you click **Detect Peaks**.
 
 ## R-peak detection
 
-<img src="screenshots/01_detection_overview.png" width="800" alt="Detection tab overview">
+<img src="screenshots/01_detection_overview.png" width="800" alt="Signal &amp; Detection tab overview">
 
 Click **Detect Peaks** to run the selected detection method (**Method**
 dropdown in the left sidebar — Auto/NeuroKit2, Savitzky-Golay + derivative,
@@ -73,7 +89,7 @@ active amplitude threshold as a dashed red line — drag the **Threshold**
 slider in the sidebar (or type an exact value) to tighten or loosen
 detection without re-running the whole pipeline.
 
-<img src="screenshots/02_detection_zoom_normal.png" width="800" alt="Detection tab zoomed on a normal-rhythm window">
+<img src="screenshots/02_detection_zoom_normal.png" width="800" alt="Signal &amp; Detection tab zoomed on a normal-rhythm window">
 
 Use the navigation bar above the plot (◀◀ / ◀ / ▶ / ▶▶, or type a time and
 click **Go**) to move through the recording, and the **Window** field to
@@ -111,7 +127,7 @@ line is the active detection threshold.
 The screenshot above is zoomed into the demo recording's inserted
 bradycardia episode — note the visibly wider spacing between peaks
 compared to the baseline window shown earlier. This is exactly the kind
-of thing the [Abnormal Events](#abnormal-events) tab classifies
+of thing the [Events](#abnormal-events) tab classifies
 automatically across the whole recording, so you don't have to spot it
 by scrolling through manually.
 
@@ -119,32 +135,38 @@ by scrolling through manually.
 
 ## HRV analysis
 
-Click **Analyze** (or the per-view buttons described below) to compute
-heart-rate variability metrics. The **HRV** tab has seven linked sub-views,
-selectable from the row of buttons under the tab bar (the seventh,
-**Autonomic**, has a section of its own below).
+Click **Analyze all** in the header to compute heart-rate variability metrics. It
+runs the core analysis and Frequency, then Non-linear in the background, then the
+epochs when their auto-run is on; Intervals and Events keep their own buttons. While
+Frequency and Non-linear are still running, Rhythm & HRV and the Report tab say
+**computing**, and an export first asks whether to wait: if you go on, the Excel
+Cover, the Prism notes, the PDF footer and the text report name what is missing.
 
-### RR/HR
+**Rhythm & HRV** is one scrolling page. **Time course** holds Epochs, Sliding (the
+former Rolling), Autonomic and Event-locked, under one selector; the last two have a
+section of their own below.
 
-<img src="screenshots/04_hrv_rrhr.png" width="800" alt="HRV RR/HR sub-view">
+### Rhythm & HRV: key values, tachogram and Poincaré
 
-A tachogram of every RR interval and instantaneous heart rate across the
-recording, with automatic spike detection (sudden acceleration/
+<img src="screenshots/04_rhythm_hrv.png" width="800" alt="Rhythm &amp; HRV tab, top of the page">
+
+Six key values on top, then a tachogram of every RR interval and instantaneous
+heart rate across the recording, with automatic spike detection (sudden acceleration/
 deceleration) and click-to-navigate — click a point here and the
-Detection tab jumps straight to that moment.
+Signal & Detection tab jumps straight to that moment. The Poincaré scatter with its
+SD1/SD2 ellipse sits next to it.
 
-### Time Domain
+### Rhythm & HRV: metrics and spectrum
 
-<img src="screenshots/05_hrv_time_domain.png" width="800" alt="HRV Time Domain sub-view">
+<img src="screenshots/05_rhythm_metrics.png" width="800" alt="Rhythm &amp; HRV tab, metric table and power spectrum">
 
-The full time-domain metric set (SDNN, RMSSD, pNN6, SDANN, TINN, HTI...),
-without protocol-specific reference-range status markers.
+The metric table gives each value with its unit and what it was computed on.
+**Show all NeuroKit metrics** adds the extra metrics (SDANN, TINN, HTI...) to the
+table and opens the raw NeuroKit tables at the bottom of the page, one under the
+other, each with its **Copy for Excel**. No protocol-specific reference-range status
+markers are shown.
 
-### Frequency
-
-<img src="screenshots/06_hrv_frequency.png" width="800" alt="HRV Frequency sub-view">
-
-A Welch power spectral density plot with mouse-specific VLF/LF/HF band
+Next to the table, a Welch power spectral density plot with mouse-specific VLF/LF/HF band
 shading (not the human 0.04–0.15/0.15–0.4 Hz convention).
 
 The plotted spectrum **is** the one the numbers come from: the valid RR
@@ -153,24 +175,24 @@ method is applied (Hann window, 75 % overlap, ≈0.02 Hz resolution), and
 VLF / LF / HF are the integrals of that curve over the shaded bands —
 **absolute powers in ms²**. LFn / HFn are Task Force normalised units,
 LF or HF / (LF + HF), shown ×100 as n.u.; LF/HF = LF / HF; the HF peak gives
-the respiration estimate. Rolling HRV and Compare Segments use the same
+the respiration estimate. Sliding and Compare Segments use the same
 estimator. Earlier versions took VLF/LF/HF from a different, max-normalised
 NeuroKit spectrum (arbitrary units, mislabelled n.u.) and LFn / HFn as a
 share of a total power that included VLF and 5–20 Hz: re-run Frequency HRV
 on older sessions. Until then such a result is labelled **legacy NeuroKit
 spectrum** (VLF / LF / HF in arbitrary units, LFn / HFn as % of total
-power) in the Frequency table, the Summary, the PDF, the Excel Cover and
+power) in the Frequency table, the Report, the PDF, the Excel Cover and
 HRV_Frequency sheets and Prism, and the PSD title flags it. In the raw
 **HRV_Frequency** sheet each header carries its unit — `HRV_LF (ms²)`,
 `HRV_LFn (fraction of LF+HF)` (a fraction; ×100 gives the n.u. shown
 elsewhere), `HRV_LFpeak (Hz)`.
 
-### Non-linear
+### Rhythm & HRV: non-linear details, asymmetry and distribution
 
-<img src="screenshots/07_hrv_nonlinear.png" width="800" alt="HRV Non-linear sub-view">
+<img src="screenshots/06_rhythm_nonlinear.png" width="800" alt="Rhythm &amp; HRV tab, non-linear details, RR asymmetry and RR distribution">
 
-A Poincaré scatter with an SD1/SD2 ellipse overlay, sample entropy, DFA,
-and a multiscale entropy (MSEn) curve across coarse-graining scales.
+Sample entropy, DFA, and a multiscale entropy (MSEn) curve across coarse-graining
+scales, then RR asymmetry and the distribution of the valid RR intervals.
 
 Poincaré SD1/SD2, DFA α1/α2 and the asymmetry / fragmentation indices use
 **every valid beat of the analysis window**. Only the slow entropy block
@@ -179,24 +201,32 @@ Poincaré SD1/SD2, DFA α1/α2 and the asymmetry / fragmentation indices use
 rejected and reset to 2000). The block used is the
 contiguous stretch with the fewest excluded intervals, and its size and time
 span are shown in the status line ("entropy from 2,000 of 9,000 RR
-(100–340 s)"), on the MSE curve, in the Summary report and on the Excel Cover
+(100–340 s)"), on the MSE curve, in the text report and on the Excel Cover
 sheet. Earlier versions silently computed every non-linear metric on the
 first 1000 beats.
 
-### Epochs
+### Epochs (Time course)
 
-<img src="screenshots/08_hrv_epochs.png" width="800" alt="HRV Epochs sub-view">
+<img src="screenshots/08_time_epochs.png" width="800" alt="Time course tab, Epochs">
 
 Fixed-window HRV trends, with low-beat-count windows visually flagged so
-a noisy stretch doesn't get read as a real physiological change.
+a noisy stretch doesn't get read as a real physiological change. Annotations are
+drawn on every panel.
 
-### Rolling
+Epochs and Sliding share their metrics, their low-confidence rule (hollow points) and
+their layout, but keep two separate compute loops: the mockup's "same engine" is not
+done, because merging them would change values (a window with a single successive
+pair gives a different RMSSD in each, see
+`tests/ui/test_epoch_sliding_characterisation.py`).
 
-<img src="screenshots/09_hrv_rolling.png" width="800" alt="HRV Rolling sub-view">
+### Sliding (Time course)
 
-Sliding-window HRV trends with a results table alongside the plot —
+<img src="screenshots/09_time_sliding.png" width="800" alt="Time course tab, Sliding">
+
+Sliding-window HRV trends with a results table under the plot —
 useful for watching a metric drift continuously rather than in discrete
-epochs. The **Article-style Poincare** options add time-resolved CCD,
+epochs. The **Article-style Poincare** options, ticked in the Autonomic mode and
+computed here, add time-resolved CCD,
 SD1 and SD2 using Ledoit–Wolf shrinkage covariance. Set **Window** to 3 s
 and **Step** to 1 s to explore the temporal scale used in the rat study;
 also compare longer windows, because a 3 s mouse window can contain too
@@ -205,7 +235,7 @@ few RR pairs at lower heart rates. Values are only reported when at least
 These Ledoit–Wolf measurements are not the article's CSI / CPI indices and
 should not be read as sympathetic or parasympathetic measurements; for the
 article's method (one window per beat, CSI / CPI), use the **Autonomic**
-view — see
+mode — see
 [Autonomic indices](#autonomic-indices-csi--cpi--candia-rivera-et-al-2025).
 
 ### One definition per metric
@@ -213,19 +243,21 @@ view — see
 - **Mean HR** = 60000 / mean NN in every view and export. HR SD and
   min / max HR describe the instantaneous HR 60000 / RRᵢ: the sample SD
   (n − 1) and the **2nd / 98th percentiles** (robust to a stray missed or
-  extra beat), identical in the Summary, KPI bar, Excel ("HR range") and
+  extra beat), identical in the Report, KPI bar, Excel ("HR range") and
   Compare Segments. (Earlier versions sometimes averaged the instantaneous
   HR, which reads 0.1–1 bpm higher; Compare Segments showed the absolute
-  min / max and the Summary a population SD.) When an older session is
+  min / max and the earlier report a population SD.) When an older session is
   restored, its mean HR, HR SD and range are recomputed from the saved
   valid RR intervals, and the status bar says so.
 - **Poincaré SD1 / SD2** = SD of (RRᵢ − RRᵢ₊₁)/√2 and of (RRᵢ + RRᵢ₊₁)/√2
   over successive pairs of adjacent valid intervals — the same function in
-  Non-linear, Rolling, Compare Segments and the Summary. **SD1 LW / SD2 LW**
-  (Rolling) and the Autonomic methods are named variants with other
+  Non-linear, Sliding, Compare Segments and the Report. **SD1 LW / SD2 LW**
+  (Sliding) and the Autonomic methods are named variants with other
   covariance estimators.
 
 ### Compare Segments (Ctrl+M)
+
+Opens from Ctrl+M or from **⚖ Compare Segments…** in Time course > Event-locked.
 
 Pick two time ranges (or fill them around an event) and click **▶ Compare**:
 the table shows every metric for both segments, with the same definitions
@@ -246,7 +278,9 @@ almost any two segments "significant".
 
 ## Autonomic indices (CSI / CPI) — Candia-Rivera et al. 2025
 
-**HRV > Autonomic** computes time-resolved cardiac sympathetic (CSI) and
+<img src="screenshots/14_time_autonomic.png" width="800" alt="Time course tab, Autonomic">
+
+**Time course > Autonomic** computes time-resolved cardiac sympathetic (CSI) and
 parasympathetic (CPI) indices after Candia-Rivera et al., J Physiol 2025
 ([doi:10.1113/JP288400](https://doi.org/10.1113/JP288400)), following the
 authors' MATLAB code
@@ -299,7 +333,7 @@ The **Method** dropdown sets how SD1 / SD2 (and D) are estimated:
 - **Exact** / **Approximate** — the two other variants of
   `compute_rCSI_rCVI_type.m` (plain covariance; closed-form SD1 / SD2).
 - **Ledoit–Wolf** — sklearn shrinkage toward a scaled identity, the
-  estimator of the Rolling view's SD1 (LW) / SD2 (LW); for comparison
+  estimator of Sliding's SD1 (LW) / SD2 (LW); for comparison
   only. Relative to the exact covariance it typically raises SD1 by 3–12 %
   and lowers SD2 by 4–10 % on 25–35-pair windows (data-dependent; it can
   lower SD1 in some windows). The robust shrinkage rounds the ellipse
@@ -340,7 +374,9 @@ and CSI / CPI are still shown.
 
 ### Event-locked workflow
 
-Switch the view's toggle from **Time series** to **Event-locked**.
+<img src="screenshots/15_time_event_locked.png" width="800" alt="Time course tab, Event-locked">
+
+Choose **Event-locked** in the selector of Time course.
 
 1. **Mark the events.** Add one annotation per condition change (injection,
    stimulus…) in **Annotations**; its **start** time is the event onset.
@@ -354,9 +390,11 @@ Switch the view's toggle from **Time series** to **Event-locked**.
    across this recording's events, the shaded band ± the median absolute
    deviation, the faint lines the individual events. **z-score (display)**
    normalises each series by its whole-recording mean and SD, as in the
-   paper's figures; it changes the plot only. The table under it lists, per
-   event, the pre and post means and their delta for HR, D, SD1, SD2, CSI,
-   CPI (and LF / HF); **📋 Copy for Excel** copies one row per event. An
+   paper's figures; it changes the plot only. The table beside it gives, per
+   event, the onset, HR Δ, CSI and CPI pre → post and whether it is valid.
+   **Every series and the within-recording test** opens the full list: pre, post
+   and delta for HR, D, SD1, SD2, CSI, CPI (and LF / HF), and the Wilcoxon;
+   **📋 Copy for Excel** copies one row per event. An
    event is **valid** when **no other annotation starts inside its pre or
    post window or at its onset** (the paper's minimum duration per
    condition; every annotation counts, also those the Events filter leaves
@@ -490,9 +528,21 @@ figure exports need Analyze.
 
 ## Interval delineation
 
-<img src="screenshots/10_intervals.png" width="800" alt="Interval Delineation tab">
+<img src="screenshots/10_morphology_intervals.png" width="800" alt="Morphology &amp; Intervals tab">
 
-Click **Delineate Waves** to locate P/Q/R/S/J/T landmarks, the QRS onset
+The tab goes in three steps; the chip of the step you are on has a blue border.
+
+1. **Mean beat**, from Analyze all.
+2. **Check landmarks on the template.** Drag a landmark on the mean beat: its line
+   moves the centre of its search window, a window edge resizes it. The change goes to
+   this recording's template, as in the **⚙ Landmarks** dialog (which adds Auto-calibrate,
+   Refine from delineation and template files). After a drag, the moved landmark is in
+   colour and a grey line shows where it was for the intervals on screen; those stay
+   as measured, and step 3 turns out of date, until you measure again. Nothing records
+   that you checked: this step stays current until the beats are measured.
+3. **Measure every beat.**
+
+Click **Measure intervals** to locate P/Q/R/S/J/T landmarks, the QRS onset
 and the QRS offset (J point) on every beat and compute PR/QRS/QT/QTc
 intervals with the standard definitions:
 
@@ -523,10 +573,10 @@ above 3× the noise gets no PR. The mouse T-wave end is gradual: check where
 window — up to ±100 ms, at most 70 % of its preceding RR before R and of its
 following RR after R (a neighbour closer than Min RR is ignored) — so a
 premature beat only affects itself and its neighbours; the exports and the
-Summary report give the number of beats whose window was shortened (row
+text report give the number of beats whose window was shortened (row
 **Beat window**). QTc uses the preceding RR only when it is inside the Min /
 Max RR bounds set for HRV. Both QRS landmarks appear in
-**Landmarks** (Beat Template tab) as "QRS onset" and "J point" for display;
+**Landmarks** (Morphology & Intervals tab) as "QRS onset" and "J point" for display;
 neither they nor the P onset and T end are clamped to the template windows. A landmark
 that cannot be placed inside the beat window is left empty (the beat gets no
 PR/QRS/QT) rather than being set to a window edge, and a template
@@ -544,7 +594,7 @@ R are no longer reported at those default-window limits. Earlier versions
 measured PR to the Q nadir, QRS between the Q and S nadirs and QT from the R
 peak (QRS and QT were shorter than in the literature) and corrected QT with
 the following RR; a session saved by those versions is shown as **legacy** in
-this tab and in the exports until you click **Delineate Waves** again (its
+this tab and in the exports until you click **Measure intervals** again (its
 QTc is re-paired with the preceding RR, or left empty — and stated so — when
 the saved table has no R-peak times). The
 line under the plots states which definitions the numbers use.
@@ -552,10 +602,10 @@ line under the plots states which definitions the numbers use.
 **Wave template (per recording).** The search windows that guide the
 landmark detection belong to the recording. A newly opened recording starts
 from the saved default template, or the built-in mouse defaults when none
-was saved. Change it in **Landmarks** (Beat Template tab): drag lines or
+was saved. Change it in **Landmarks** (Morphology & Intervals tab): drag lines or
 window edges, **Auto-calibrate** on the mean beat, **Refine from
 delineation** (centres the P/Q/S/T windows on this recording's measured
-landmarks, after a first Delineate Waves run), **Load…** a template file,
+landmarks, after a first Measure intervals run), **Load…** a template file,
 then **Apply to this recording** — this writes nothing to disk and the
 template is saved with the recording's session. **Save as default
 template** is the only action that changes the default for recordings opened
@@ -569,7 +619,7 @@ line says so) and the new channel starts from the saved default. The
 template's provenance (built-in
 defaults / saved default template / loaded from *file* / auto-calibrated,
 refined or edited on this recording) is shown next to **Landmarks**, in the
-Intervals status line, and as the "Wave template" row of the Summary report,
+Intervals status line, and as the "Wave template" row of the text report,
 the Excel Cover sheet and the Prism notes, with the window centres. Earlier
 versions narrowed the template to each recording after every run and re-saved
 it as the default; a default written that way ("auto-updated") is ignored in
@@ -580,7 +630,7 @@ Under the QT violin, **beat-to-beat IQR · range** is the spread of QT across
 the beats of this single lead. It is **not** classical QT dispersion (an
 inter-lead measure of one beat) — earlier versions called it "dispersion";
 report the IQR, as the range is dominated by delineation outliers. The
-Summary report, the Excel Cover sheet and the Prism notes carry the same
+text report, the Excel Cover sheet and the Prism notes carry the same
 "Interval definitions" and "QT variability" rows, and the PDF report a QT IQR
 row and a definitions footer. The panel on the left is a beat
 verifier — step through individual beats (or the ensemble average) and
@@ -606,9 +656,9 @@ session.
 
 ## Abnormal events
 
-<img src="screenshots/11_abnormal_events.png" width="800" alt="Abnormal Events tab showing the event ribbon and episode cards">
+<img src="screenshots/11_events.png" width="800" alt="Events tab showing the event ribbon and episode cards">
 
-Click **Classify** to detect bradycardia/tachycardia runs, pauses,
+Click **Classify events** to detect bradycardia/tachycardia runs, pauses,
 premature beats (isolated, couplets and runs — RR-based, see below),
 irregular-rhythm runs, and AV conduction-delay
 episodes — all measured against this recording's own baseline heart
@@ -619,7 +669,11 @@ straight to that episode — in the screenshot above, the demo recording's
 inserted bradycardia, pause, and irregular run were all found and are
 listed with their exact timing and severity.
 
-**Baseline (s)**, **ΔHR threshold (%)**, and **Min duration (beats)** at
+The baseline is always the first N seconds of the analysis window. The mockup's
+second choice, "30 s before an annotation", is **not available**: it would be a new
+calculation, left out of this redesign, which changes no number.
+
+**Baseline**, **ΔHR threshold (%)**, and **Min run (beats)** at
 the top control sensitivity — widen the baseline window or loosen the
 threshold if real events are being missed, or tighten them if normal
 variability is being over-flagged.
@@ -689,17 +743,53 @@ them.
 
 ---
 
-## Summary tab
+## Report tab
 
-<img src="screenshots/12_summary.png" width="800" alt="Summary tab">
+<img src="screenshots/12_report.png" width="800" alt="Report tab">
 
-A single-page rollup of everything computed so far: signal quality over
-time, RR intervals with spikes marked, instantaneous HR, the Poincaré
-diagram, and the multiscale entropy curve — plus **Copy Report** and
-**Save .txt** to get a plain-text version for a lab notebook or a quick
-message to a colleague, without needing the full PDF/Excel export.
+What goes out, in one place. **Export…** in the header leads here. This screen, the
+text report, the PDF's key metrics and the **Metrics** tables of Excel and Prism read
+one table of value, unit, basis n and state (the PDF gives the module states in its
+header, the text report on the title of each block; in Prism a cell holds a number, so
+unit and state are in the row title). The other Excel sheets and Prism tables hold
+the series those values come from, without basis n or state.
 
-The text report opens with a **PROVENANCE** block — the rows needed to
+- **Provenance**: file, subject, analysis window and beats, filters, RR bounds,
+  excluded RR, artifact correction, HRV bands, QTc formula, Autonomic method.
+- **What is in this report**: one line per module (Signal quality, Rhythm & HRV,
+  Time course, Autonomic CSI/CPI, Intervals, Events) with its state, its key
+  result and an **Include** tick. A line out of date says why next to its value.
+- **Export Excel**, **GraphPad Prism**, **PDF report**, **Copy text** and
+  **Save .txt**. The buttons of the right panel's EXPORTS section do the same
+  exports (the panel starts closed: **Stats ⟨** in the header).
+
+**Include** decides what the Excel workbook, the ZIP (its workbook and its
+figures), the Prism file, the PDF report and the text report hold. It is on by default for what is
+up to date, off for what is out of date, and a line not computed has nothing to
+send. A tick holds until the line's state changes, and is saved with the session;
+opening another recording starts again from the defaults (or from that recording's
+saved session).
+Whatever a computed module left out is named: on the Excel Cover, in the Prism
+notes, in the PDF footer, in the text report and in the status bar. With every
+module included, the exports hold everything computed. The RR CSV, the figure exports and
+the Events PDF are exports of one thing you asked for: Include does not touch them.
+
+What a line left out takes with it:
+
+| Line | Excel | ZIP figures | Prism | PDF | Text |
+|------|-------|-------------|-------|-----|------|
+| Signal quality | Cover row, `quality.*` Metrics rows | — | — | — | — |
+| Rhythm & HRV | `HR_Statistics`, `RR_Timeseries`, `HRV_*`, Cover rows | `01_rr_hr`, `02_rr_hist`, `03_psd`, `05_poincare` | RR and HRV tables | Metric rows, Poincaré | Heart rate, HRV and RR asymmetry blocks |
+| Time course | `Epochs` | — | Sliding and Epoch tables | — | — |
+| Autonomic CSI/CPI | `Autonomic*`, `EventLocked`, Cover rows | `08_autonomic_csi_cpi`, `09_event_locked` | Autonomic and event tables, notes | Header line | — |
+| Intervals | `ECG_Intervals`, Cover rows | `06_intervals`, `07_beat` | Interval tables, notes | Metric rows, footer | Intervals block, definitions |
+| Events | `Premature_Beats`, `Abnormal_Events`, Cover rows | — | Notes | Events panel | — |
+
+The Excel **Metrics** sheet lists one row per value: value, unit, basis n, state.
+
+**▸ Text report** opens the plain-text version for a lab notebook or a quick
+message to a colleague, without needing the full PDF/Excel export. It opens with
+a **PROVENANCE** block — the rows needed to
 reproduce the numbers, identical to those of the Excel Cover sheet, the
 Prism project notes and the PDF footer:
 
@@ -709,7 +799,7 @@ Prism project notes and the PDF footer:
   saved before it was recorded.)
 - **Analysis window** (or "full recording") and **Analysed duration**:
   window end − start, plus the first → last analysed R-peak span. The
-  verdict line and the duration tile show this analysed duration. (Earlier
+  duration tile shows this analysed duration. (Earlier
   versions showed the absolute time of the last beat, which also counted
   the time before a windowed analysis start.) A window end entered past
   the end of the signal is clamped to the signal end, and the row says
@@ -752,7 +842,7 @@ asymmetries of short-term heart period variability are linked to
 autonomic regulation. *Am J Physiol Regul Integr Comp Physiol*
 295:R550–R557.
 
-The **Morphological quality over time** plot places each beat's template
+The **Morphological quality over time** plot (Signal & Detection) places each beat's template
 correlation at the time of that beat: peaks too close to the signal edges
 are not scored and are simply absent (earlier versions paired the scores
 with the peaks from the first one, a one-beat shift when the first peak
@@ -764,7 +854,7 @@ beats, they are rebuilt on restore from the restored peaks; when that is
 ambiguous the curve, the tile ("—") and the CSV column are all left out
 and the status bar says to re-run Analyze.
 
-The RR-asymmetry bar chart shows decelerations and accelerations as
+The RR-asymmetry bar chart (Rhythm & HRV) shows decelerations and accelerations as
 shares of the pairs with ΔRR ≠ 0, so the acceleration bar equals the
 Porta PI and the dashed 50 % line marks symmetry; the ΔRR = 0 pairs are
 given as a separate "No change" count under the bars. In the Prism
@@ -806,14 +896,15 @@ data for your strain and experimental conditions.
 - **Save Session** (toolbar, or `Ctrl+S`) writes a `.ecgsession` file with
   every result computed so far, so reopening it later restores the exact
   state — no need to re-run detection or analysis.
-- The **EXPORTS** section (right panel — it opens automatically the first
-  time an analysis finishes) covers everything else: a formatted Excel
+- The **Report** tab holds the exports with their Include ticks and the
+  provenance. The **EXPORTS** section of the right panel (closed at first: **Stats ⟨**
+  in the header) covers everything else: a formatted Excel
   workbook, GraphPad Prism `.pzfx`, a one-page PDF report (signal strip,
   key metrics, Poincaré diagram, abnormal-events summary), a
-  per-episode annotated PDF for abnormal events, and CSV. HRV > Autonomic
+  per-episode annotated PDF for abnormal events, and CSV. Time course > Autonomic
   results add their own Excel sheets and Prism tables (see
   [Exports](#exports) in the Autonomic section).
-- **💾 Save to cohort registry** (HRV > Autonomic > Event-locked) keeps
+- **💾 Save to cohort registry** (Time course > Event-locked) keeps
   each recording's per-event autonomic results in the local registry, for
   the cohort calibration of ks / kp.
 - If you're building a training set for the ML R-peak detector, **Save
@@ -839,5 +930,5 @@ data for your strain and experimental conditions.
   compare with validated data appropriate to your strain and protocol.
 - **Automated tests do not cover the full GUI** — if something looks
   wrong after an update, cross-check the affected tab's numbers against
-  the Summary tab or a known-good session file before trusting a new
+  the Report tab or a known-good session file before trusting a new
   result.

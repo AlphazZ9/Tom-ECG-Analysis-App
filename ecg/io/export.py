@@ -467,7 +467,7 @@ class ExcelExporter:
         recorded on the Cover sheet.
 
         The Cover sheet also records what is needed to reproduce the
-        numbers (analysis_provenance_rows, same rows as the Summary report
+        numbers (analysis_provenance_rows, same rows as the text report
         and the Prism notes): the recording duration, *analysis_window*
         ((t_start, t_end) the results were computed on, 0 = signal start /
         end) and the analysed duration (window end − start -- not the time
@@ -552,7 +552,7 @@ class ExcelExporter:
                                nonlinear_subset_text(_nl.attrs)
                                or "all valid RR intervals of the analysis window"))
             # HRV_PI / HRV_GI of the HRV_NonLinear sheet (NeuroKit's, same
-            # conventions as the Summary report's RR-asymmetry block).
+            # conventions as the text report's RR-asymmetry block).
             cover_rows.append(("HR asymmetry (HRV_PI, HRV_GI)", RR_ASYMMETRY_TEXT))
         if qtc_formula is not None:
             cover_rows.append(("QTc formula", qtc_formula_text(qtc_formula)))
@@ -668,7 +668,7 @@ class ExcelExporter:
         return wb
 
     AUTONOMIC_ONLY_NOTE = (
-        "not computed (Analyze was not run) — this workbook holds the HRV > "
+        "not computed (Analyze was not run) — this workbook holds the Time course > "
         "Autonomic results only; run Analyze for the core HRV / interval sheets")
 
     @classmethod
@@ -681,7 +681,7 @@ class ExcelExporter:
     ) -> "Workbook":
         """A workbook holding only a Cover sheet (subject, file, rate,
         duration, and that the core HRV results were not computed), for an
-        export of the HRV > Autonomic results before Analyze -- they need
+        export of the Time course > Autonomic results before Analyze -- they need
         only the detected peaks. Add the Autonomic sheets with
         ``add_autonomic_sheets`` (and ``add_annotations_sheet``)."""
         wb = Workbook()
@@ -734,7 +734,7 @@ class ExcelExporter:
     def add_abnormal_events_sheets(cls, wb, events: "Optional[list]",
                                    summary: "Optional[dict]",
                                    stale_note: "Optional[str]" = None) -> None:
-        """Append the Abnormal Events tab's results: a Premature_Beats
+        """Append the Events tab's results: a Premature_Beats
         sheet (one row of counts and per-hour rates -- isolated beats,
         couplets, runs >= 3, beats removed by artifact correction and
         still counted -- with the RR-based definition below it), an
@@ -767,6 +767,26 @@ class ExcelExporter:
             ws_ev = cast(OpenpyxlWorksheet, wb.create_sheet("Abnormal_Events"))
             cls.write_dataframe(ws_ev, abnormal_events_frame(events), header_color="B71C1C")
             cls.autofit_columns(ws_ev)
+
+    @classmethod
+    def leave_out(cls, wb, sheets: "tuple[str, ...]", cover_rows: "tuple[str, ...]",
+                  note: str) -> None:
+        """Take *sheets* and the *cover_rows* (by label) out of a built workbook,
+        and say on the Cover what was left out (*note*; the Report tab's Include).
+        No-op with nothing left out."""
+        for name in sheets:
+            if name in wb.sheetnames:
+                wb.remove(wb[name])
+        if "Cover" not in wb.sheetnames:
+            return
+        cover = wb["Cover"]
+        for row in range(cover.max_row, 0, -1):
+            if cover.cell(row=row, column=1).value in cover_rows:
+                cover.delete_rows(row)
+        if note:
+            row = cover.max_row + 1
+            cover.cell(row=row, column=1, value="Left out of this export")
+            cover.cell(row=row, column=2, value=note)
 
     @classmethod
     def add_metrics_sheet(cls, wb, table: Any) -> None:
@@ -981,6 +1001,25 @@ ANNOTATION_COLORS: list[tuple[str, str]] = [
 
 
 
+def metric_table_prism_frame(table: Any) -> "pd.DataFrame":
+    """The rows with a finite value, as a Prism Column table: value and basis n, the
+    unit and the state in the row title (a Prism cell holds a number)."""
+    titles, values, basis = [], [], []
+    for row in table.rows:
+        try:
+            value = float(row.value)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(value):
+            continue
+        unit = f" ({row.unit})" if row.unit else ""
+        state = f" · {row.state}" if row.state else ""
+        titles.append(f"{row.group}: {row.label}{unit}{state}")
+        values.append(value)
+        basis.append(float(row.basis_n) if row.basis_n is not None else float("nan"))
+    return pd.DataFrame({"Value": values, "Basis n": basis}, index=pd.Index(titles))
+
+
 class PrismExporter:
     """Pure utility — exports ECG analysis results to GraphPad Prism .pzfx format.
 
@@ -1032,8 +1071,16 @@ class PrismExporter:
         artifact_report: "Optional[dict]" = None,
         filter_text:     "Optional[str]" = None,
         signal_crop:     "Optional[dict]" = None,
+        left_out:        str = "",
+        metrics:         Any = None,
     ) -> int:
         """Build all tables and write directly to *path*.
+
+        *metrics* (a core.metric_table.MetricTable) adds a last table of its rows:
+        value and basis n, with the unit and the state in the row title.
+
+        *left_out* (what the Report tab's Include took out of the arguments)
+        is stated in the project notes.
 
         The project notes record what is needed to reproduce the tables
         (analysis_provenance_rows, same rows as the Excel Cover sheet):
@@ -1336,6 +1383,12 @@ class PrismExporter:
                 _add("Event-locked — pre / post (valid events)",
                      pd.DataFrame(cols_ev, index=pd.Index(titles)), x_col=0, row_name=True)
 
+        # ── 10. The shared table: the same numbers as the screen ────────
+        if metrics is not None:
+            df_m = metric_table_prism_frame(metrics)
+            if not df_m.empty:
+                _add("Metrics — value and basis n", df_m, x_col=0, row_name=True)
+
         if not tables:
             raise ValueError("No data available for Prism export. "
                              "Run the full analysis first.")
@@ -1371,6 +1424,9 @@ class PrismExporter:
                     event_params if has_events else None, hrv_window):
                 note_names.append(label)
                 note_values.append(value)
+        if left_out:
+            note_names.append("Left out of this export")
+            note_values.append(left_out)
         notes = pd.DataFrame({"Name": note_names, "Value": note_values})
 
         with warnings.catch_warnings():

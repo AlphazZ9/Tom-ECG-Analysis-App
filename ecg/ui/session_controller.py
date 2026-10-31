@@ -30,7 +30,8 @@ from ecg.core.ml_detector import save_training_sample, delete_training_sample
 from ecg.core.wave_template import WaveTemplate
 from ecg.ui.theme import GREEN, MUTED, ORANGE, RED
 from ecg.ui.tab_keys import (
-    TAB_DETECTION, TAB_HRV, TAB_INTERVALS, TAB_BEAT_TEMPLATE, TAB_EVENTS, TAB_SUMMARY,
+    TAB_DETECTION, TAB_HRV, TAB_MORPHOLOGY, TAB_EVENTS, TAB_REPORT,
+    time_course_mode,
 )
 
 if TYPE_CHECKING:
@@ -48,10 +49,20 @@ log = logging.getLogger("ecg")
 _TAB_KEY_MAP = {
     "Detection":     TAB_DETECTION,
     "HRV":           TAB_HRV,
-    "Intervals":     TAB_INTERVALS,
-    "Beat Template": TAB_BEAT_TEMPLATE,
+    # Merged into one flow; the two former tabs open it.
+    "Intervals":     TAB_MORPHOLOGY,
+    "Beat Template": TAB_MORPHOLOGY,
     "Arrhythmias":   TAB_EVENTS,
-    "Summary":       TAB_SUMMARY,
+    "Abnormal Events": TAB_EVENTS,
+    # Replaced by Report, with what it held.
+    "Summary":       TAB_REPORT,
+    # The emoji names themselves, retired when the tab bar got its state glyph.
+    "📈 Detection":       TAB_DETECTION,
+    "💓 HRV":             TAB_HRV,
+    "📏 Intervals":       TAB_MORPHOLOGY,
+    "〰 Beat Template":   TAB_MORPHOLOGY,
+    "⚠ Abnormal Events": TAB_EVENTS,
+    "📋 Summary":         TAB_REPORT,
     # "Arrhythmias" tab was renamed to "Abnormal Events" (less clinically-
     # loaded wording for a mouse study) -- map the pre-rename emoji name
     # forward too, same one-old-format-per-generation pattern as above.
@@ -60,19 +71,19 @@ _TAB_KEY_MAP = {
 
 
 def template_info_text(wt: WaveTemplate) -> str:
-    """Beat Template tab label: the recording's wave template provenance."""
+    """Morphology & Intervals label: the recording's wave template provenance."""
     return f"Template: {wt.provenance()}"
 
 
 def pending_template_info_text() -> str:
-    """Beat Template tab label for a recording with no template yet: the
+    """Morphology & Intervals label for a recording with no template yet: the
     saved default (or built-in) template its next Intervals run starts from.
     Quiet: refreshed on every file load, it must not log the "saved default
     not used" warning each time (Intervals reports that once per session)."""
     wt, notice = WaveTemplate.load_default_checked(quiet=True)
     unused = "; saved default not used" if notice else ""
     return (f"Template: {wt.provenance()}"
-            f" (used at the next Intervals run{unused})")
+            f" (used at the next measure{unused})")
 
 
 def wave_template_from_session(state: dict) -> "WaveTemplate | None":
@@ -285,12 +296,27 @@ class SessionController:
             "analysis_t_start": float(state.get("analysis_t_start", 0.0)),
             "analysis_t_end":   float(state.get("analysis_t_end",   0.0)),
             "analysed_window":  analysed_window,
+            # What each module was computed on (absent in older sessions).
+            "freshness_basis":  state.get("freshness_basis"),
+            # The context strip's times (absent in older sessions).
+            "computed_at":      state.get("computed_at"),
+            "peaks_edited_at":  state.get("peaks_edited_at"),
+            "report_include":   state.get("report_include"),
             "nav_pos":          float(state.get("nav_pos", 0.0)),
             "edit_mode":        bool(state.get("edit_mode", False)),
             "current_tab":      _TAB_KEY_MAP.get(
                 state.get("current_tab", "Detection"),
                 state.get("current_tab", "Detection")),
             "qtc_formula":      normalize_qtc_formula(state.get("qtc_formula", "mitchell")),
+            # None when the session names no mode: the current one stays. An
+            # older session may hold the two values this replaced.
+            "time_course_mode": time_course_mode(state.get("time_course_mode"),
+                                                 state.get("hrv_current_view"),
+                                                 state.get("autonomic_subview")),
+            "windowed_view":    state.get("windowed_view") or {},
+            # The ticks of Epochs and Sliding (absent in older sessions).
+            "epoch_metrics":    state.get("epoch_metrics"),
+            "roll_metrics":     state.get("roll_metrics"),
             # Raw: absent in sessions saved before the Autonomic view (then
             # None -- the current parameters stay); normalised on apply,
             # where an invalid key keeps the current value.
@@ -349,6 +375,7 @@ class SessionController:
         self.app.analysis.artifact_candidates = bundle["artifact_candidates"]
         self.app.analysis.epoch_df        = bundle["epoch_df"]
         self.app.analysis.rolling_hrv_df  = bundle["rolling_hrv_df"]
+        self.app.analysis.windowed_view   = dict(bundle.get("windowed_view") or {})
         self.app.analysis.annotations     = list(bundle["annotations"])
         self.app.analysis.pacing_periods  = list(bundle["pacing_periods"])
         # Per-recording wave template (None for older sessions: the saved
@@ -513,10 +540,16 @@ class SessionController:
         # the quality curve, the Poor-shape-match tile and the RR CSV agree
         # (when that cannot be done unambiguously all three leave it out).
         quality_note = self.restore_beat_quality_times(bundle)
-        # The restored results count as computed on these (re-detected) peaks.
+        # What the results rest on, relative to these (re-detected) peaks.
         fresh = getattr(self.app, "freshness", None)
         if fresh is not None:
-            fresh.stamp_restored()
+            fresh.stamp_restored(bundle.get("freshness_basis"))
+        ui = getattr(self.app, "ui", None)
+        if ui is not None:
+            ui.computed_at = bundle.get("computed_at")
+            ui.peaks_edited_at = bundle.get("peaks_edited_at")
+            include = bundle.get("report_include")
+            ui.report_include = dict(include) if isinstance(include, dict) else {}
 
         # ── Enable analysis buttons ──────────────────────────────────────
         self.app._set_save_session_enabled(True)
@@ -542,6 +575,15 @@ class SessionController:
         self.app._draw_detail(self.app.ui.nav_pos)
         self.app._update_ann_count()
         self.app._update_pacing_count()
+        # Time course: the frames the session brought back (no-op without),
+        # on the mode it was saved on.
+        show_mode = getattr(self.app, "_show_time_mode", None)
+        if show_mode is not None:
+            self.restore_window_ticks(bundle)
+            self.app.analysis_ctrl.show_epochs()
+            self.app.analysis_ctrl.show_rolling()
+            if bundle.get("time_course_mode"):
+                show_mode(bundle["time_course_mode"])
         # Restore active tab
         try:
             saved_tab = bundle["current_tab"]
@@ -558,6 +600,24 @@ class SessionController:
                 freq_done_label="Loaded from session ✓")
         self.app._update_kpis()
         self.update_session_ui(has_session=True, saved_at=saved_at)
+
+    def restore_window_ticks(self, bundle: dict) -> None:
+        """The metric ticks of Epochs and Sliding as saved, so the next Compute
+        keeps the columns on screen (compute_epochs builds its frame from them).
+        A session without them: what its frames were computed with, else the
+        current ticks stay."""
+        view = bundle.get("windowed_view") or {}
+        for attr, saved_key, view_key in (("_epoch_metrics", "epoch_metrics", "epochs"),
+                                          ("_roll_metrics", "roll_metrics", "rolling")):
+            ticks = getattr(self.app, attr, None) or {}
+            saved = bundle.get(saved_key)
+            if not isinstance(saved, dict):
+                active = (view.get(view_key) or {}).get("active")
+                saved = {m: m in active for m in ticks} if active else {}
+            for metric, on in saved.items():
+                cb = ticks.get(metric)
+                if cb is not None:
+                    cb.select() if on else cb.deselect()
 
     def restore_beat_quality_times(self, bundle: dict) -> str:
         """Rebuild beat_corr_t_s of restored results from an older version
@@ -673,6 +733,21 @@ class SessionController:
             state["epoch_df"] = self.app.analysis.epoch_df.to_dict(orient="list")
         if self.app.analysis.rolling_hrv_df is not None and not self.app.analysis.rolling_hrv_df.empty:
             state["rolling_hrv_df"] = self.app.analysis.rolling_hrv_df.to_dict(orient="list")
+        if self.app.analysis.windowed_view:
+            state["windowed_view"] = self.app.analysis.windowed_view
+        for attr, key in (("_epoch_metrics", "epoch_metrics"), ("_roll_metrics", "roll_metrics")):
+            ticks = getattr(self.app, attr, None)
+            if ticks:
+                state[key] = {m: bool(cb.get()) for m, cb in ticks.items()}
+        fresh = getattr(self.app, "freshness", None)
+        if fresh is not None:
+            state["freshness_basis"] = fresh.saved_basis()
+        ui = getattr(self.app, "ui", None)
+        if ui is not None:
+            state["computed_at"] = ui.computed_at
+            state["peaks_edited_at"] = ui.peaks_edited_at
+            state["report_include"] = ui.report_include
+            state["time_course_mode"] = ui.time_course_mode
         if self.app.analysis.annotations:
             state["annotations"] = self.app.analysis.annotations
         if self.app.analysis.pacing_periods:
@@ -681,7 +756,7 @@ class SessionController:
         # windows (and provenance) its delineation used / will use.
         if self.app.analysis.wave_template is not None:
             state["wave_template"] = self.app.analysis.wave_template.to_dict()
-        # HRV > Autonomic parameters (window, method, ks, kp, LF/HF) as
+        # Autonomic parameters (window, method, ks, kp, LF/HF) as
         # entered; the result itself is cheap to recompute and not saved.
         state["autonomic_params"] = self.app.analysis_ctrl.autonomic_widget_params()
         ectl = getattr(self.app, "event_ctrl", None)
@@ -951,8 +1026,9 @@ class SessionController:
         s: dict = {}
         for attr in ("ent_project_name", "ent_channel", "ent_subject", "ent_fs", "ent_t_start",
                      "ent_t_end", "ent_lp", "ent_hp", "ent_minrr", "ent_maxrr",
-                     "ent_epoch", "ent_overlap", "ent_thr", "ent_window",
-                     "ent_sg_target_fs", "ent_sg_window_ms"):
+                     "ent_epoch", "ent_overlap", "ent_roll_win", "ent_roll_step",
+                     "ent_thr", "ent_window",
+                     "ent_sg_target_fs", "ent_sg_window_ms", "ent_entropy_cap"):
             try:
                 s[attr] = getattr(self.app, attr).get()
             except Exception:
@@ -963,6 +1039,11 @@ class SessionController:
                 s[attr] = bool(getattr(self.app, attr).get())
             except Exception:
                 s[attr] = False
+        for attr in ("_roll_metrics", "_epoch_metrics"):
+            try:
+                s[attr] = {m: bool(cb.get()) for m, cb in getattr(self.app, attr).items()}
+            except Exception:
+                s[attr] = {}
         try:
             s["sl_thr"] = float(self.app.sl_thr.get())  # type: ignore[union-attr]
         except Exception:
@@ -1003,8 +1084,9 @@ class SessionController:
         """Restore widget values captured before a UI rebuild."""
         for attr in ("ent_project_name", "ent_channel", "ent_subject", "ent_fs", "ent_t_start",
                      "ent_t_end", "ent_lp", "ent_hp", "ent_minrr", "ent_maxrr",
-                     "ent_epoch", "ent_overlap", "ent_thr", "ent_window",
-                     "ent_sg_target_fs", "ent_sg_window_ms"):
+                     "ent_epoch", "ent_overlap", "ent_roll_win", "ent_roll_step",
+                     "ent_thr", "ent_window",
+                     "ent_sg_target_fs", "ent_sg_window_ms", "ent_entropy_cap"):
             val = s.get(attr)
             if val is None:
                 continue
@@ -1022,6 +1104,11 @@ class SessionController:
         self.app._on_project_name_change()
         self.app._update_topbar_filename()
 
+        for attr in ("_roll_metrics", "_epoch_metrics"):
+            for metric, on in (s.get(attr) or {}).items():
+                cb = (getattr(self.app, attr, None) or {}).get(metric)
+                if cb is not None:
+                    cb.select() if on else cb.deselect()
         sw_map = {
             "sw_show_raw": "sw_show_raw",
             "sw_filtering": "sw_filtering",

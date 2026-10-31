@@ -33,7 +33,7 @@ def _stub_app(results=None, combo_label=QTC_FORMULA_LABELS["mitchell"]):
         analysis=AnalysisState(results=results),
         cb_qtc_formula=_Combo(combo_label),
         _plot_intervals=lambda r: None,
-        _plot_summary=lambda r: None,
+        _plot_table_views=lambda r: None,
         _set_status=lambda text, color=None: statuses.append((text, color)),
     )
     return app, statuses

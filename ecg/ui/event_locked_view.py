@@ -2,7 +2,7 @@
 """
 event_locked_view.py
 --------------------
-Pure helpers of the HRV > Autonomic > Event-locked panel and of the ks / kp
+Pure helpers of the Time course > Event-locked mode and of the ks / kp
 calibration dialog -- the statistical protocol of Candia-Rivera et al.,
 J Physiol 2025 (core.event_locked) applied to the app's Autonomic result.
 
@@ -52,7 +52,7 @@ from ecg.ui import theme as _theme
 from ecg.ui.autonomic_view import (
     _band_text, _fmt, _to_bool, _to_float, is_rat_calibration, spwvd_ok,
 )
-from ecg.ui.plots import style_axes
+from ecg.ui.plots import style_axes, wrap_fig_text
 
 log = logging.getLogger("ecg")
 
@@ -101,6 +101,13 @@ WITHIN_RECORDING_NOTE = (
     "the Wilcoxon p-values below describe this recording only and are not "
     "population inference. Save the events to the cohort registry and test "
     "across animals (Calibrate ks/kp... > Per subject mean).")
+
+# The compact table beside the traces (TabTimeCourseMixin._fill_event_rows).
+EVENT_TABLE_TITLE = "PER EVENT · MEAN BEFORE VS AFTER"
+EVENT_TABLE_COLUMNS = ("Onset", "HR Δ", "CSI pre → post", "CPI pre → post", "Valid")
+EVENT_TABLE_NOTE = (
+    "The events of one animal describe this recording only. Group statistics (Wilcoxon, "
+    "one value per animal) run on the cohort registry.")
 
 VALIDITY_NOTE = (
     "An event is valid when no other annotation starts inside its pre or "
@@ -579,6 +586,45 @@ def _gains_text(p: Mapping) -> str:
             if math.isfinite(ks) and math.isfinite(kp) and is_rat_calibration(ks, kp)
             else "user-set")
     return f"ks {ks:g} / kp {kp:g} ({tail})"
+
+
+@dataclass(frozen=True)
+class EventRow:
+    onset: str
+    hr: str
+    csi: str
+    cpi: str
+    valid: str
+    is_valid: bool
+
+
+def event_rows(el: EventLockedResult) -> "list[EventRow]":
+    """One compact line per event: the same pre / post / delta cells as
+    event_table_text, a dash where that series is invalid for the event."""
+    def has(row: Any, key: str) -> bool:
+        return key in el.keys and bool(row[f"{key}_valid"])
+
+    def pair(row: Any, key: str) -> str:
+        if not has(row, key):
+            return "—"
+        return f"{_val(key, row[f'{key}_pre'])} → {_val(key, row[f'{key}_post'])}"
+
+    rows = []
+    t = el.table
+    for i in range(len(t)):
+        row = t.iloc[i]
+        ok = bool(row["valid"])
+        if ok:
+            valid = "yes"
+        elif not _flag_default(row.get("isolated"), True):
+            valid = "no · annotation in window"
+        else:
+            cover = 100 * min(_num(row["coverage_pre"]), _num(row["coverage_post"]))
+            valid = f"no · {cover:.0f} % coverage"
+        hr = f"{_val('hr', row['hr_delta'], True)} bpm" if has(row, "hr") else "—"
+        rows.append(EventRow(f"{float(row['onset_s']):.1f} s", hr, pair(row, "csi"),
+                             pair(row, "cpi"), valid, ok))
+    return rows
 
 
 def event_table_text(el: EventLockedResult, width: int = 100) -> str:
@@ -1394,7 +1440,8 @@ def draw_event_locked(fig: Any, el: EventLockedResult, zscore: bool = True,
             f"{p.get('method_label') or p.get('method', '')}  ·  window "
             f"{float(p.get('window_s', np.nan)):g} s  ·  {_gains_text(p)}"
             + ("  ·  z-scored per recording" if zscore else ""))
-    fig.suptitle(head, fontsize=8, color=_theme.PLOT["text"])
+    fig.suptitle(wrap_fig_text(head, min(6.0, 0.95 * fig.get_figwidth()), 8), fontsize=8,
+                 color=_theme.PLOT["text"])
 
     for ax, (name, keys) in zip(axes, panels):
         n_max = 0

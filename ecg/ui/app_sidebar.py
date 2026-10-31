@@ -11,9 +11,8 @@ from typing import TYPE_CHECKING
 import customtkinter as ctk  # type: ignore[import-untyped]
 from ecg.core.models import MouseECG
 from ecg.ui.theme import (
-    THEME, BG, PANEL, BORDER, BORDER2, TEXT, MUTED, LIGHT, BLUE, TEAL,
-    TEAL_DARK, SPACE_XS, SPACE_S, SPACE_M, SPACE_L, FONT_TITLE, FONT_LABEL,
-    FONT_SMALL, FONT_KPI_LABEL, FONT_BTN_SEC, FONT_SIDEBAR_HDR, FONT_MICRO,
+    BG, PANEL, BORDER, BORDER2, TEXT, MUTED, LIGHT, BLUE, SPACE_XS, SPACE_S, SPACE_M, SPACE_L, FONT_TITLE, FONT_LABEL,
+    FONT_SMALL, FONT_KPI_LABEL, FONT_BTN_SEC, FONT_MICRO,
     FONT_HINT, FONT_SUBSECTION, FONT_CARD_TITLE,
 )
 from ecg.ui.sidebar import CollapsibleSection
@@ -227,26 +226,6 @@ class SidebarMixin:
         self.lbl_session_info.pack(padx=SPACE_M, pady=(0, SPACE_S), fill="x")
         self._btn(s, "🗑  Clear Session Cache", self._delete_session, dict(padx=SPACE_M), variant="secondary", h=26)
         ctk.CTkFrame(s, height=1, fg_color=BORDER).pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
-        btn_compare_segments = ctk.CTkButton(
-            s, text="⚖  Compare Segments",
-            command=self._open_compare_segments,
-            # Dark mode lightens TEAL for legibility against the dark
-            # background (_adapt_for_mode in theme.py), which then leaves
-            # white label text well under WCAG contrast on the same fill --
-            # a dark label reads clearly against the lightened dark-mode
-            # TEAL instead.
-            fg_color=TEAL, hover_color=TEAL_DARK,
-            text_color=(BG if THEME.is_dark else "white"),
-            font=FONT_SIDEBAR_HDR, height=28, corner_radius=8,
-        )
-        btn_compare_segments.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_XS))
-        # Cross-reference the app's two other comparison features, which
-        # otherwise live in unrelated places (DETECTION section, Recent
-        # recordings popup) with nothing tying the three together.
-        self._bind_hover_tip(
-            btn_compare_segments,
-            "Other comparisons: Check Agreement (Detection section) · "
-            "Cohort Trends (Recent recordings)")
         ctk.CTkButton(
             s, text="↺  Reset to Mouse ECG Defaults",
             command=self._reset_params,

@@ -3529,7 +3529,7 @@ def _fmt_rate(x: float) -> str:
 
 def premature_summary_rows(summary: "Optional[dict]") -> "list[tuple[str, str]]":
     """(label, value) rows describing a premature_beat_summary() -- the
-    same rows on the Abnormal Events tab, the Excel and the PDF report."""
+    same rows on the Events tab, the Excel and the PDF report."""
     if not summary:
         return []
     s = summary

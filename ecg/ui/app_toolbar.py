@@ -14,9 +14,8 @@ from ecg.ui.theme import (
     THEME, NK_AVAILABLE, BG, PANEL, BORDER, BORDER2, TEXT, MUTED, LIGHT, BLUE,
     GREEN, ORANGE, BLUE_HOVER, PURPLE, PURPLE_DARK, TEAL, TEAL_DARK, GREEN_DARK,
     COLOR_PRIMARY, SPACE_XS, SPACE_S, SPACE_M, SPACE_L, FONT_SMALL,
-    FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR, FONT_HINT, FONT_BADGE,
+    FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR, FONT_HINT,
 )
-from ecg.ui.widgets import make_quality_gauge
 
 # Mixin of ECGApp: `self: ECGApp` shows pyright the whole app surface, so a
 # typo in self.xxx is reported. It is deliberately not a supertype of this
@@ -127,7 +126,7 @@ class ToolbarMixin:
 
         run_color = GREEN if NK_AVAILABLE else BORDER2
         self.btn_run = ctk.CTkButton(
-            analysis_chip, text="Analyze",
+            analysis_chip, text="Analyze all",
             command=self._run_analysis,
             fg_color=run_color, hover_color=GREEN_DARK if NK_AVAILABLE else BORDER2,
             text_color="white", font=FONT_BTN_PRIMARY, height=34,
@@ -135,6 +134,19 @@ class ToolbarMixin:
         self.btn_run.pack(side="left", padx=(0, SPACE_S))
         if not NK_AVAILABLE:
             self._bind_hover_tip(self.btn_run, "pip install neurokit2 to enable", ORANGE)
+        else:
+            self._bind_hover_tip(
+                self.btn_run,
+                "Core analysis, then Frequency and Non-linear HRV, then epochs when their "
+                "auto-run is on. Intervals and Events have their own buttons.")
+
+        self.btn_toolbar_export = ctk.CTkButton(
+            analysis_chip, text="Export…", width=84, height=34, font=FONT_BTN_SEC,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT, corner_radius=8,
+            command=self._show_export)
+        self.btn_toolbar_export.pack(side="left", padx=(0, SPACE_S))
+        self._bind_hover_tip(self.btn_toolbar_export,
+                             "Report tab: what goes in the exports, and the formats")
 
         # ── Edit chip: Undo / Redo toolbar mirrors ────────────────────────
         edit_chip = self._toolbar_chip(row)
@@ -182,38 +194,16 @@ class ToolbarMixin:
         # entirely. Kept single-line and truncated to fit instead -- see
         # _fit_status_text()/_refresh_status_text().
         self._status_font = tkfont.Font(font=FONT_SMALL)
-        self.lbl_status = ctk.CTkLabel(
-            row, text="Ready", font=FONT_SMALL, text_color=MUTED,
-            anchor="w", justify="left")
-        self.lbl_status.pack(side="left", fill="x", expand=True, padx=(SPACE_L, SPACE_M))
+        # Built by _build_status_label: the slack of the header is gone to the
+        # buttons and the file chip of the redesign, the tab row has room for it.
+        self.lbl_status = None
         self._status_text, self._status_color = "Ready", MUTED
         self._status_display_raw, self._status_display_color = "Ready", MUTED
-        # Bound to `row` (the toolbar row), not lbl_status itself -- row's
-        # size only changes from an actual window resize, whereas
-        # lbl_status's own size could in principle shift in response to
-        # its own .configure(text=...) call, which would re-trigger this
-        # handler and risk a layout feedback loop.
-        row.bind("<Configure>", lambda _e: self._refresh_status_text())
 
-        # ── Right: quality gauge + badge + Settings/Theme ─────────────────
+        # ── Right: Settings/Theme. Signal quality sits next to the signal it
+        # judges (Signal & Detection), not in the header. ─────────────────
         right = ctk.CTkFrame(row, fg_color="transparent")
         right.pack(side="right")
-
-        self.quality_gauge = make_quality_gauge(right, score=None, compact=True)
-        self.quality_gauge.pack(side="left", padx=(0, SPACE_M))
-        # lbl_quality now IS the gauge's own caption label -- update_signal_
-        # quality()'s existing lbl_quality.configure(...) call needs no
-        # changes; its output is immediately superseded by the more
-        # descriptive Excellent/Good/Medium/Poor caption update_quality_
-        # gauge() sets right after it (see detection_controller.py).
-        self.lbl_quality = self.quality_gauge.score_label
-
-        # Quality badge — updated by _update_quality_badge() after analysis
-        self._lbl_quality_badge = ctk.CTkLabel(
-            right, text="", font=FONT_BADGE,
-            text_color="white", fg_color="transparent",
-            corner_radius=6, width=120, height=22, anchor="center")
-        self._lbl_quality_badge.pack(side="left", padx=(0, SPACE_M))
 
         # Parameters moved back into the always-visible toolbar -- it's the
         # app's only settings dialog and the sidebar's bottom-of-scroll
@@ -242,6 +232,18 @@ class ToolbarMixin:
         )
         self.btn_toggle_right_panel.pack(side="left")
         self._bind_hover_tip(self.btn_toggle_right_panel, "Hide/show the right panel")
+
+    def _build_status_label(self: ECGApp, bar) -> None:
+        """The status readout, in the slack of the tab row *bar*."""
+        self.lbl_status = ctk.CTkLabel(
+            bar, text="Ready", font=FONT_SMALL, text_color=MUTED,
+            anchor="w", justify="left")
+        self.lbl_status.pack(side="left", fill="x", expand=True, padx=(SPACE_L, SPACE_S))
+        # Bound to *bar*, not lbl_status itself -- its size only changes from an
+        # actual window resize, whereas lbl_status's own size could in principle
+        # shift in response to its own .configure(text=...) call, which would
+        # re-trigger this handler and risk a layout feedback loop.
+        bar.bind("<Configure>", lambda _e: self._refresh_status_text(), add="+")
 
     def _set_btn_enabled(self: ECGApp, btn, enabled: bool, active_fg: str, active_hover: str,
                          active_text: str = "white", muted_fg: str = BORDER,

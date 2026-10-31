@@ -45,7 +45,23 @@ detection, HRV analysis, abnormal events, and export.
   stretches with very few detected beats that a pure beat-count percentage
   would understate).
 
-### HRV analysis (7 linked sub-views)
+### Tabs
+
+Five analysis tabs and a report, organised by question: **Signal & Detection**,
+**Rhythm & HRV**, **Time course** (Epochs, Sliding, Autonomic, Event-locked),
+**Morphology & Intervals** (steps: mean beat, landmarks, intervals), **Events** and
+**Report** (provenance, module states, Include, exports and text report). One
+context strip above every tab says what the numbers rest on; each tab head carries
+one state (up to date, out of date, not computed); the screens, the text report, the
+PDF's key metrics and the **Metrics** tables of Excel and Prism read one table of value,
+unit, basis n and state (the other sheets and tables hold the series behind them). A
+session saved on a former tab reopens on its new place.
+
+Older entries below name the tabs of their time: *Summary* is now Report, *HRV*
+sub-views are on Rhythm & HRV and Time course, *Rolling* is Sliding, *Beat Template*
+and *Intervals* are Morphology & Intervals, *Abnormal Events* is Events.
+
+### HRV analysis
 
 - **RR/HR** — tachogram with automatic spike (sudden acceleration/
   deceleration) detection, click-to-navigate; RR-interval distribution
@@ -251,7 +267,7 @@ detection, HRV analysis, abnormal events, and export.
   waves); earlier versions called these "ESV" (ventricular extrasystoles)
   and only reported runs of ≥ 3. Isolated beats, couplets and runs ≥ 3 are
   now each reported, with counts and per-hour rates (per hour of the
-  analysed span, first to last analysed beat) in the Abnormal Events tab,
+  analysed span, first to last analysed beat) in the Events tab,
   its status line and ribbon, the "Copy for Excel" text, the Excel
   (`Premature_Beats`, `Abnormal_Events` sheets and Cover rows), the PDF
   reports and the Prism notes. Beats that artifact correction removed as
@@ -385,7 +401,7 @@ detection, HRV analysis, abnormal events, and export.
 
 ## Autonomic indices (CSI / CPI) — Candia-Rivera et al. 2025
 
-**HRV > Autonomic** computes the time-resolved cardiac sympathetic and
+**Time course > Autonomic** computes the time-resolved cardiac sympathetic and
 parasympathetic indices of Candia-Rivera et al., *Modelling the
 time-resolved modulations of cardiac activity in rats*, J Physiol 2025
 ([doi:10.1113/JP288400](https://doi.org/10.1113/JP288400)), following the
@@ -585,7 +601,7 @@ With an Autonomic result, the Excel workbook gains an **Autonomic** sheet
 D0 and every parameter), **Autonomic_Series** (the 20 Hz CSI / CPI / HR / D
 / SD1 / SD2), **Autonomic_LFHF** and **EventLocked** sheets; the Prism file
 gains CSI / CPI, D / SD1 / SD2, LF / HF and event pre / post tables; the
-HRV > Autonomic figures are included in the figure and ZIP exports. The
+Time course > Autonomic figures are included in the figure and ZIP exports. The
 Excel Cover sheet, the Prism project notes and the PDF report header state
 the method, the window, ks / kp and the rat-calibration caveat, and the
 span the indices cover (first / last R peak, analysis window) — flagged
@@ -675,10 +691,13 @@ ecg-analysis            # after `pip install -e .`
 │   │                         # cohort table
 │   └── ui/                # CustomTkinter desktop application
 │       ├── app.py             # ECGApp main window (Adaptive Workbench layout)
+│       ├── app_*.py, tab_*.py # ECGApp mixins: panels and one module per tab
+│       ├── context_strip.py, tabbar.py, freshness.py # strip, tab states
+│       ├── report_view.py     # Report tab and text report helpers (pure, tested)
 │       ├── *_controller.py    # one controller per responsibility (SRP):
 │       │                      # analysis, detection, signal, navigation,
 │       │                      # session, export, event-locked
-│       ├── autonomic_view.py  # HRV > Autonomic helpers (pure, tested)
+│       ├── autonomic_view.py  # Time course > Autonomic helpers (pure, tested)
 │       ├── event_locked_view.py # Event-locked panel + ks / kp calibration
 │       │                      # helpers (pure, tested)
 │       ├── theme.py           # colour/font presets, live theme propagation

@@ -5,7 +5,7 @@ Beat-quality and RR-asymmetry views agree with the numbers they show:
   RR interval to the same (leading) scored beat;
 - a restored session from an older version gets the scored-beat times
   rebuilt from its peaks, or a status note when that is ambiguous;
-- the Summary RR-asymmetry bars are shares of the pairs with ΔRR ≠ 0, so
+- the Rhythm & HRV RR-asymmetry bars are shares of the pairs with ΔRR ≠ 0, so
   the acceleration bar is the Porta PI shown in the title ("—" when no
   pair is off the identity line).
 """
@@ -94,13 +94,13 @@ def test_restore_notes_unknown_scored_beats(recording):
     assert SessionController(app).restore_beat_quality_times({}) == ""
 
 
-# ── Summary RR-asymmetry bars ──────────────────────────────────────────────
+# ── Rhythm & HRV RR-asymmetry bars ──────────────────────────────────────────────
 
 def _asymmetry_axes(sig, fs, rp, r):
     app, _, _ = _stub_app(sig, fs, rp, r)
-    PlotController(app).plot_summary(app.analysis.results)
+    PlotController(app).plot_table_views(app.analysis.results)
     fig = Figure()
-    app._slots["sum_asymmetry"].draw_fn(fig)
+    app._slots["asymmetry"].draw_fn(fig)
     return fig.axes[0]
 
 

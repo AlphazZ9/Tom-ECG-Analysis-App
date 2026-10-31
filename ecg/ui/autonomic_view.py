@@ -2,7 +2,7 @@
 """
 autonomic_view.py
 -----------------
-Pure helpers of the HRV > Autonomic view: time-resolved cardiac sympathetic
+Pure helpers of the Time course > Autonomic mode: time-resolved cardiac sympathetic
 and parasympathetic indices (CSI / CPI, core.autonomic -- Candia-Rivera et
 al., J Physiol 2025) with optional SPWVD LF / HF power (core.spwvd).
 
@@ -626,13 +626,13 @@ def draw_autonomic(fig: Any, res: AutonomicResult,
 
     _line(axes[2], res.sd1, _theme.CORAL, "SD1")
     _line(axes[2], res.sd2, _theme.BLUE_DARK, "SD2")
-    axes[2].set_ylabel("SD1 / SD2 (ms)", fontsize=8)
+    axes[2].set_ylabel("SD1 / SD2\n(ms)", fontsize=8)
     axes[2].set_title(f"SD1 / SD2 — re-centred on SD01 = {_fmt(res.sd01, 2, 'ms')}, "
                       f"SD02 = {_fmt(res.sd02, 2, 'ms')}", loc="left", fontsize=8)
 
     _line(axes[3], res.csi, _theme.RED_MID, "CSI")
     _line(axes[3], res.cpi, _theme.GREEN_DARK, "CPI")
-    axes[3].set_ylabel("CSI / CPI (a.u.)", fontsize=8)
+    axes[3].set_ylabel("CSI / CPI\n(a.u.)", fontsize=8)
     axes[3].set_title(f"CSI = D̃ + {ks:g}·SD2  ·  CPI = D + {kp:g}·SD1   "
                       f"(D̃ = D mirrored about its mean)", loc="left", fontsize=8)
 
@@ -645,7 +645,7 @@ def draw_autonomic(fig: Any, res: AutonomicResult,
                      color=_theme.PURPLE, lw=1.0, label="LF", zorder=3)
         axes[4].plot(st[::ks2], np.asarray(spwvd["hf"], dtype=np.float64)[::ks2],  # type: ignore[index]
                      color=_theme.TEAL, lw=1.0, label="HF", zorder=3)
-        axes[4].set_ylabel("LF / HF (a.u.)", fontsize=8)
+        axes[4].set_ylabel("LF / HF\n(a.u.)", fontsize=8)
         axes[4].set_title(f"SPWVD power — LF {_band_text(sp.get('lf_band'))} Hz, "
                           f"HF {_band_text(sp.get('hf_band'))} Hz (unnormalised)",
                           loc="left", fontsize=8)

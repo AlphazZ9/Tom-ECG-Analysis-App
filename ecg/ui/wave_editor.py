@@ -34,6 +34,34 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("ecg")
 
+def hit_landmark(landmarks: "Any", keys: "Any", x_ms: float,
+                 radius_ms: float) -> "tuple[Optional[str], str]":
+    """(landmark, "center" | "lo" | "hi") whose line is nearest *x_ms*, within *radius_ms*."""
+    best_key: "Optional[str]" = None
+    best_d   = float("inf")
+    best_mode = "center"
+    for key in keys:
+        if key not in landmarks:
+            continue
+        c, hw = landmarks[key]
+        for val, mode in [(c, "center"), (c - hw, "lo"), (c + hw, "hi")]:
+            d = abs(x_ms - val)
+            if d < best_d and d < radius_ms:
+                best_d    = d
+                best_key  = key
+                best_mode = mode
+    return best_key, best_mode
+
+
+def dragged_landmark(center: float, half: float, mode: str, x_ms: float) -> "tuple[float, float]":
+    """(centre, half-window) once the line of *mode* is at *x_ms*."""
+    if mode == "center":
+        return round(x_ms, 1), half
+    if mode == "lo":
+        return center, round(max(2.0, center - x_ms), 1)
+    return center, round(max(2.0, x_ms - center), 1)
+
+
 class WaveTemplateMiniEditor(ctk.CTkToplevel):
     """Compact P/Q/R/S/T template editor — draggable lines on the mean beat.
 
@@ -49,7 +77,7 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
     template" (``WaveTemplate.save``); "Save to file..." / "Load..." exchange
     named template files. The provenance (default / calibrated or edited on
     this recording / loaded from a file) follows every action and is shown
-    in the Beat Template tab and in exports.
+    in the Morphology & Intervals tab and in exports.
 
     Replaces the previous 1400-line WaveTemplateEditor.  All logic lives here;
     the external WaveTemplate data model is unchanged.
@@ -76,7 +104,7 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
         "J_peak": "J peak",
         "T_peak": "T peak",
     }
-    # Aliases expected by callers that reference WaveTemplateEditor.WAVE_COLORS etc.
+    # For the plots that draw these waves.
     WAVE_COLORS       = _COLS
     WAVE_SHORT_LABELS = _LABELS
     _GRAB_R_MS = 5.0   # grab radius (ms) for click-on-line
@@ -256,20 +284,7 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
     # ── Drag interaction ─────────────────────────────────────────────────
 
     def _hit_test(self, x_ms: float) -> "tuple[Optional[str], str]":
-        best_key: "Optional[str]" = None
-        best_d   = float("inf")
-        best_mode = "center"
-        for key in self._KEYS:
-            if key not in self._lm:
-                continue
-            c, hw = self._lm[key]
-            for val, mode in [(c, "center"), (c - hw, "lo"), (c + hw, "hi")]:
-                d = abs(x_ms - val)
-                if d < best_d and d < self._GRAB_R_MS:
-                    best_d    = d
-                    best_key  = key
-                    best_mode = mode
-        return best_key, best_mode
+        return hit_landmark(self._lm, self._KEYS, x_ms, self._GRAB_R_MS)
 
     def _on_press(self, event: "Any") -> None:
         if event.inaxes is None or event.xdata is None or event.button != 1:
@@ -284,12 +299,7 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
         key  = self._drag_key
         x    = float(event.xdata)
         c, hw = self._lm[key]
-        if self._drag_mode == "center":
-            self._lm[key][0] = round(x, 1)
-        elif self._drag_mode == "lo":
-            self._lm[key][1] = round(max(2.0, c - x), 1)
-        elif self._drag_mode == "hi":
-            self._lm[key][1] = round(max(2.0, x - c), 1)
+        self._lm[key] = list(dragged_landmark(c, hw, self._drag_mode, x))
         self._mark_edited()
         self._draw()
 
@@ -338,8 +348,8 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
         if new is None:
             messagebox.showinfo(
                 "Not enough beats",
-                "Refining needs at least 10 fully delineated beats — run "
-                "Intervals first.", parent=self)
+                "Refining needs at least 10 fully delineated beats — Measure "
+                "intervals first.", parent=self)
             return
         self._lm = {k: list(v) for k, v in {**WaveTemplate.DEFAULTS,
                                             **new.landmarks}.items()}
@@ -400,7 +410,7 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
         messagebox.showinfo(
             "Template applied",
             "Template applied to this recording (kept in its session).\n"
-            "Re-run Intervals to use these search windows.",
+            "Measure intervals again to use these search windows.",
             parent=self,
         )
         self.destroy()
@@ -440,14 +450,11 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
         messagebox.showinfo(
             "Template saved",
             "Saved as the default template and applied to this recording.\n"
-            "Re-run Intervals to use these search windows.",
+            "Measure intervals again to use these search windows.",
             parent=self,
         )
         self.destroy()
 
-
-# Keep old name as alias so any leftover references don't break
-WaveTemplateEditor = WaveTemplateMiniEditor
 
 # ════════════════════════════════════════════════════════════
 #  SESSION RESULT SERIALISATION HELPERS

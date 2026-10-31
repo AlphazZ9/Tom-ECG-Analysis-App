@@ -159,6 +159,7 @@ class AsyncMixin:
 
         def _finish_error(exc: Exception, tb: str) -> None:
             self._async_busy = False
+            self.ui.running_modules.clear()   # a failed job ends its chain
             self._stop_progress(button, original_text)
             self._set_status(f"Error: {exc}", RED)
             self._show_error_dialog(original_text.strip(), exc, tb)

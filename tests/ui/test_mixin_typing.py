@@ -28,8 +28,8 @@ def _functions(cls):
             yield name, member
 
 
-def test_all_fourteen_mixins_are_covered():
-    assert len(_mixins()) == 14
+def test_all_fifteen_mixins_are_covered():
+    assert len(_mixins()) == 15
 
 
 def test_every_mixin_method_annotates_self_as_ecgapp():

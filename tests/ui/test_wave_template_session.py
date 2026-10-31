@@ -277,7 +277,7 @@ def test_template_label_does_not_keep_the_previous_recording(_profile):
     app.analysis.wave_template = None            # reset_for_new_file
     SessionController(app).update_session_ui(has_session=False)
     assert app.lbl_template_info.text == (
-        "Template: built-in mouse defaults (used at the next Intervals run)")
+        "Template: built-in mouse defaults (used at the next measure)")
     assert app.analysis.wave_template is None    # shown, not assigned
 
 
@@ -348,7 +348,7 @@ def test_another_channel_drops_the_template():
     assert app.signal.channel == "ECG2"
     status = app._set_status.call_args[0][0]
     assert "wave template of channel ECG1 dropped" in status
-    assert "used at the next Intervals run" in (
+    assert "used at the next measure" in (
         app.lbl_template_info.configure.call_args.kwargs["text"])
 
 
@@ -389,7 +389,7 @@ def test_pending_label_does_not_log_the_rejection(_profile, caplog):
         for _ in range(3):
             text = pending_template_info_text()
     assert text == ("Template: built-in mouse defaults (used at the next "
-                    "Intervals run; saved default not used)")
+                    "measure; saved default not used)")
     assert not [r for r in caplog.records if "was not used" in r.getMessage()]
     with caplog.at_level("WARNING"):
         WaveTemplate.load_default_checked()     # the Intervals path still logs

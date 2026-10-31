@@ -6,7 +6,7 @@ AV-delay check and shifted the quality curve):
 
 - Intervals -> AV delay: analyse_intervals rows reach
   AnalysisController.run_arrhythmia_analysis matched to the peaks;
-- Summary: PlotController.plot_summary writes the report, the metric tiles,
+- Table views and report: report_text and PlotController.plot_table_views write the report,
   the RR-asymmetry block and a quality-over-time curve timed by the beats
   actually scored;
 - Excel: ExportController.write_excel carries the ECG_Intervals and
@@ -27,7 +27,9 @@ from ecg.core.analysis import analyse_core, analyse_intervals
 from ecg.core.wave_template import WaveTemplate
 from ecg.ui.analysis_controller import AnalysisController
 from ecg.ui.export_controller import ExportController
-from ecg.ui.plot_controller import PlotController, _df_val
+from ecg.ui.plot_controller import PlotController
+from ecg.core.metric_table import results_asymmetry
+from ecg.ui.report_view import report_text
 from ecg.ui.state import AnalysisState, DetectionState, SignalState
 
 from tests.helpers import make_synth_ecg
@@ -70,6 +72,9 @@ class _Slot:
     def update(self, fn) -> None:
         self.draw_fn = fn
 
+    def _show_placeholder(self) -> None:
+        self.draw_fn = None
+
 
 class _Entry:
     def __init__(self, value) -> None:
@@ -98,8 +103,8 @@ def recording():
 def _stub_app(sig, fs, rp, r):
     statuses: list = []
     texts: dict = {}
-    slots = {k: _Slot() for k in ("arr_detail", "sum_rr", "sum_poincare",
-                                  "sum_asymmetry", "sum_quality_time")}
+    slots = {k: _Slot() for k in ("arr_detail", "arr_ribbon",
+                                  "asymmetry", "quality_time", "quality_hist")}
     app = SimpleNamespace(
         analysis=AnalysisState(results=r, analysed_window=(0.0, 0.0)),
         detection=DetectionState(rpeaks_ok=rp, sig_quality=90),
@@ -111,14 +116,11 @@ def _stub_app(sig, fs, rp, r):
         ent_arr_baseline=_Entry(2), ent_arr_brady_pct=_Entry(20), ent_arr_min_beats=_Entry(10),
         ent_subject=_Entry("m1"),
         _slots=slots, _arr_card_widgets=[], _arr_event_scroll=None,
-        lbl_arrhythmia_status=_Label(), lbl_arr_premature=_Label(), lbl_sum_verdict=None,
+        lbl_arrhythmia_status=_Label(), lbl_arr_premature=_Label(),
         tabs=SimpleNamespace(set=lambda name: None),
         btn_run_arrhythmia=object(),
         _start_async_result=lambda btn, text, worker, done: done(worker()),
-        _safe_df_val=_df_val,
-        _sum_metric_vals={k: _Label() for k in ("hr_mean", "pr", "qrs", "qt", "qtc", "pnn6")},
-        _sum_quality_vals={k: _Label() for k in ("sq_noisy_time", "sq_badbeats")},
-        txt_sum="txt_sum",
+        _quality_vals={k: _Label() for k in ("sq_noisy_time", "sq_badbeats")},
         _set_textbox=lambda widget, text, tsv=None: texts.__setitem__(widget, text),
         _qtc_formula=lambda: "mitchell",
     )
@@ -165,7 +167,7 @@ def test_intervals_from_another_window_skip_the_av_check(recording):
     app, statuses, _ = _stub_app(sig, fs, rp, dict(r))
     app._windowed_peaks = lambda: rp + 40          # no row matches these peaks
     _run_arrhythmia(app)
-    assert "AV-delay check skipped — run Intervals on the current window" in statuses[-1]
+    assert "AV-delay check skipped — measure intervals on the current window" in statuses[-1]
 
     sparse = r["intervals"].copy()
     sparse.loc[sparse.index[5:], "PR_ms"] = np.nan
@@ -174,14 +176,14 @@ def test_intervals_from_another_window_skip_the_av_check(recording):
     assert "PR measured on < 50% of beats" in statuses[-1]
 
 
-# ── Summary ────────────────────────────────────────────────────────────────
+# ── Report and table views ────────────────────────────────────────────────────────────────
 
-def test_summary_generation(recording):
+def test_report_and_table_views_generation(recording):
     sig, fs, rp, r = recording
     app, _, texts = _stub_app(sig, fs, rp, dict(r))
-    PlotController(app).plot_summary(app.analysis.results)
+    PlotController(app).plot_table_views(app.analysis.results)
 
-    report = texts["txt_sum"]
+    report = report_text(app.analysis.results, asymmetry=results_asymmetry(app.analysis.results))
     ivl = r["intervals"]
     for col, label in (("PR_ms", "PR"), ("QRS_ms", "QRS"), ("QT_ms", "QT")):
         med = pd.to_numeric(ivl[col], errors="coerce").dropna().median()
@@ -189,16 +191,17 @@ def test_summary_generation(recording):
                     if re.match(rf"\s*{label}\s+\d", ln))
         assert f"{med:.1f} ±" in line
     assert "Porta index (PI)" in report and "Guzik index (GI)" in report
-    assert app._sum_metric_vals["pr"].text not in ("", "—")
-    assert app._sum_metric_vals["qtc"].text not in ("", "—")
-    assert app._sum_quality_vals["sq_noisy_time"].text.endswith("%")
+    assert app._quality_vals["sq_noisy_time"].text.endswith("%")
 
     # Quality-over-time scatter: one point per scored beat, at its time.
     fig = Figure()
-    app._slots["sum_quality_time"].draw_fn(fig)
+    app._slots["quality_time"].draw_fn(fig)
     offsets = fig.axes[0].collections[0].get_offsets()
     np.testing.assert_allclose(np.asarray(offsets)[:, 0], r["beat_corr_t_s"])
     np.testing.assert_allclose(np.asarray(offsets)[:, 0], rp[1:] / fs)
+    # The point colours have their scale.
+    assert fig.axes[1].get_ylabel() == "correlation"
+    assert fig.axes[0].collections[0].get_clim() == (0.7, 1.0)
 
 
 # ── Excel export of intervals / events ─────────────────────────────────────

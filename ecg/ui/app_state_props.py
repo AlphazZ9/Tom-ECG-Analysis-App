@@ -142,10 +142,9 @@ class StateProps:
         self.btn_check_agreement: "Optional[ctk.CTkButton]"              = None
         self.lbl_agreement_status:"Optional[ctk.CTkLabel]"               = None
         self.lbl_file:             "Optional[ctk.CTkLabel]"              = None
-        self.lbl_context_subtitle: "Optional[ctk.CTkLabel]"              = None
         self.lbl_arrhythmia_status:"Optional[ctk.CTkLabel]"              = None
         self.lbl_roll_status:      "Optional[ctk.CTkLabel]"              = None
-        # HRV > Autonomic view (CSI / CPI) -- see _build_hrv_view_autonomic
+        # Time course > Autonomic (CSI / CPI) -- see _build_time_view_autonomic
         self.ent_auto_win:         "Optional[ctk.CTkEntry]"              = None
         self.ent_auto_minpairs:    "Optional[ctk.CTkEntry]"              = None
         self.cb_auto_method:       "Optional[ctk.CTkComboBox]"           = None
@@ -155,9 +154,7 @@ class StateProps:
         self.btn_auto_compute:     "Optional[ctk.CTkButton]"             = None
         self.lbl_auto_status:      "Optional[ctk.CTkLabel]"              = None
         self.txt_autonomic:        "Optional[ctk.CTkTextbox]"            = None
-        # HRV > Autonomic > Event-locked panel -- see _build_autonomic_event_panel
-        self._auto_subframes:      "dict[str, ctk.CTkFrame]"            = {}
-        self._auto_seg:            "Optional[ctk.CTkSegmentedButton]"   = None
+        # Time course > Event-locked -- see _build_time_view_event_locked
         self.cb_evt_label:         "Optional[ctk.CTkComboBox]"           = None
         self.ent_evt_pre:          "Optional[ctk.CTkEntry]"              = None
         self.ent_evt_post:         "Optional[ctk.CTkEntry]"              = None
@@ -167,6 +164,9 @@ class StateProps:
         self.txt_event_locked:     "Optional[ctk.CTkTextbox]"            = None
         self.lbl_arr_event_title:  "Optional[ctk.CTkLabel]"              = None
         self.lbl_arr_premature:    "Optional[ctk.CTkLabel]"              = None
+        self.lbl_arr_baseline:     "Optional[ctk.CTkLabel]"              = None
+        self.lbl_arr_stale:        "Optional[ctk.CTkLabel]"              = None
+        self.lbl_arr_events_head:  "Optional[ctk.CTkLabel]"              = None
         self._arr_card_widgets:    "list[ctk.CTkBaseClass]"              = []
         self._filter_advanced_group: "Optional[ctk.CTkFrame]"            = None
         self.lbl_filter_summary:  "Optional[ctk.CTkLabel]"              = None
@@ -174,19 +174,19 @@ class StateProps:
         # Navigation bar widgets (forward-declared so _reset_for_new_file can update them)
         self.ent_nav_pos:       "Optional[ctk.CTkEntry]"    = None
         self.lbl_sig_duration:  "Optional[ctk.CTkLabel]"    = None
-        # Intervals tab widgets
-        self.ent_max_beats:     "Optional[ctk.CTkEntry]"    = None  # removed from UI but kept for compat
+        # Morphology & Intervals tab widgets
         self.ent_entropy_cap:   "Optional[ctk.CTkEntry]"    = None  # non-linear entropy cap (RR)
         # Interpretation removed
         self._interp_cards:      "dict[str, tuple[ctk.CTkLabel, ctk.CTkLabel, str]]" = {}
         self._interp_ref_labels: "dict[str, ctk.CTkLabel]" = {}
-        # HRV unified tab internal state
-        self._hrv_subframes:     "dict[str, ctk.CTkFrame]" = {}
-        self._hrv_seg:           "Optional[ctk.CTkSegmentedButton]" = None
-        self._hrv_content_area:  "Optional[ctk.CTkFrame]"           = None
-        # Summary tab label widgets (populated in _build_tab_summary)
-        self._sum_quality_vals:  "dict[str, ctk.CTkLabel]" = {}
-        self._sum_metric_vals:   "dict[str, ctk.CTkLabel]" = {}
+        # Time course tab internal state
+        self._time_frames:       "dict[str, ctk.CTkFrame]" = {}
+        self._time_seg:          "Optional[ctk.CTkSegmentedButton]" = None
+        self._time_banner:       "Optional[ctk.CTkFrame]"           = None
+        self._time_banner_text:  "Optional[ctk.CTkLabel]"           = None
+        self._epoch_metrics:     "dict[str, ctk.CTkCheckBox]"       = {}
+        # Signal & Detection tab: quality panel values
+        self._quality_vals:      "dict[str, ctk.CTkLabel]" = {}
 
     # ─── Legacy state shims ───────────────────────────────────────────────
     # Backward-compatible properties for the old flat self._xxx attributes,
@@ -577,12 +577,6 @@ class StateProps:
     def _rr_click_cid(self: ECGApp, value: "Optional[int]") -> None:
         self.ui.rr_click_cid = value
 
-    @property
-    def _hrv_current_view(self: ECGApp) -> str:
-        return self.ui.hrv_current_view
-    @_hrv_current_view.setter
-    def _hrv_current_view(self: ECGApp, value: str) -> None:
-        self.ui.hrv_current_view = value
 
     @property
     def _ctx_keys(self: ECGApp) -> "list":

@@ -296,6 +296,7 @@ class ThemeDialog(ctk.CTkToplevel):
         # Destroy dialog before rebuilding so CTk appearance change
         # does not invalidate this window's widget handles mid-flight.
         self.destroy()
+        self._app._park_focus()
         apply_theme_config(THEME)
         self._app._rebuild_ui()
 
@@ -1725,7 +1726,7 @@ class CohortTrendsDialog(ctk.CTkToplevel):
 
 
 class CalibrationDialog(ctk.CTkToplevel):
-    """Cohort calibration of the CSI / CPI gains ks / kp (HRV > Autonomic >
+    """Cohort calibration of the CSI / CPI gains ks / kp (Time course >
     Event-locked > Calibrate ks/kp...), after Candia-Rivera et al.,
     J Physiol 2025.
 
@@ -1934,7 +1935,7 @@ class CalibrationDialog(ctk.CTkToplevel):
             filt = " matching the filters" if (label or project) else ""
             self._set_text(
                 f"  No valid event-locked row in the cohort registry{filt}.\n\n"
-                "  For each recording: HRV > Autonomic > ⟳ Compute, then Event-locked > "
+                "  For each recording: Time course > Autonomic > ⟳ Compute, then Event-locked > "
                 "⟳ Compute event-locked, then 💾 Save to cohort registry (with the "
                 "Subject ID and Project name set in the sidebar).")
         else:

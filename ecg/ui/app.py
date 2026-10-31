@@ -46,8 +46,7 @@ if not hasattr(np, "trapz"):
 from PIL import Image, ImageTk
 from ecg.io.session import session_exists
 from ecg.ui.theme import (
-    THEME, apply_theme_config, NK_AVAILABLE, APP_ICON_PATH, PANEL, CARD, BORDER,
-    TEXT, MUTED, BLUE, GREEN, BLUE_HOVER,
+    THEME, apply_theme_config, NK_AVAILABLE, APP_ICON_PATH, PANEL, BLUE, GREEN,
 )
 from ecg.ui.dialogs import ThemeDialog
 
@@ -62,10 +61,13 @@ from ecg.ui.params_dialog import ParamsDialogMixin
 from ecg.ui.compare_segments import CompareSegmentsMixin
 from ecg.ui.tab_detection import TabDetectionMixin
 from ecg.ui.tab_hrv import TabHrvMixin
+from ecg.ui.tab_time_course import TabTimeCourseMixin
 from ecg.ui.tab_events import TabEventsMixin
 from ecg.ui.tab_morphology import TabMorphologyMixin
-from ecg.ui.tab_summary import TabSummaryMixin
+from ecg.ui.tab_report import TabReportMixin
 from ecg.ui.tab_keys import TAB_ORDER
+from ecg.ui.tabbar import TabBar
+from ecg.ui.context_strip import ContextStripMixin
 
 log = logging.getLogger("ecg")
 
@@ -82,9 +84,11 @@ class ECGApp(
     CompareSegmentsMixin,
     TabDetectionMixin,
     TabHrvMixin,
+    TabTimeCourseMixin,
     TabEventsMixin,
     TabMorphologyMixin,
-    TabSummaryMixin,
+    TabReportMixin,
+    ContextStripMixin,
     ctk.CTk,
 ):
 
@@ -119,6 +123,7 @@ class ECGApp(
         self._init_state()
         self._build()
         self._bind_keyboard_shortcuts()
+        self._start_shell_tick()
 
     # ─── Startup helpers ──────────────────────────────────────
 
@@ -206,6 +211,7 @@ class ECGApp(
         # different shade that shows as a seam down both edges.
         self.main = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
         self.main.pack(side="left", fill="both", expand=True)
+        self._build_context_strip(self.main)
         self._build_tabs(self.main)
         # Global keyboard shortcuts -- guarded the same way as Left/Right
         # above: Ctrl+Z is the near-universal native-undo instinct, so
@@ -233,25 +239,19 @@ class ECGApp(
     # ─── Tabs ─────────────────────────────────────────────────
 
     def _build_tabs(self, parent) -> None:
-        self.tabs = ctk.CTkTabview(
-            parent, fg_color=PANEL,
-            segmented_button_fg_color=PANEL,
-            segmented_button_selected_color=BLUE,
-            segmented_button_selected_hover_color=BLUE_HOVER,
-            segmented_button_unselected_color=CARD,
-            segmented_button_unselected_hover_color=BORDER,
-            text_color=TEXT, text_color_disabled=MUTED,
-        )
+        self.tabs = TabBar(parent, command=self._on_main_tab_changed)
         self.tabs.pack(fill="both", expand=True)
         for name in TAB_ORDER:
             self.tabs.add(name)
+        self._build_status_label(self.tabs.bar)
 
         self._build_tab_detection()
         self._build_tab_hrv_unified()
-        self._build_tab_intervals()
-        self._build_tab_beat_template()
+        self._build_tab_time_course()
+        self._build_tab_morphology()
         self._build_tab_arrhythmias()
-        self._build_tab_summary()
+        self._build_tab_report()
+        self._bind_tab_state_hints()
 
     # ════════════════════════════════════════════════════════
     #  APPEARANCE / THEME
@@ -269,6 +269,12 @@ class ECGApp(
     def _restore_ui_state(self, s: dict) -> None:
         """Restore widget values captured before a UI rebuild."""
         self.session_ctrl.restore_ui_state(s)
+
+    def _park_focus(self) -> None:
+        """Move the focus to the window. Call before changing the appearance mode
+        when a rebuild follows: CTk restores the focus it finds there one tick
+        later (on Windows), which fails on a widget the rebuild has destroyed."""
+        self.focus_set()
 
     def _rebuild_ui(self) -> None:
         """Destroy and recreate the entire widget tree with the current theme.
@@ -347,22 +353,26 @@ class ECGApp(
         # RR-exclusion line and a withheld spectrum's reason survive a theme
         # toggle (no-op without results).
         self.analysis_ctrl.refresh_result_labels()
-        # The Autonomic result needs only peaks (not core results): its
-        # rebuilt view starts blank -- redraw it (no-op without a result),
-        # and the event-locked panel derived from it.
+        # Time course: results need only peaks (not core results), and their
+        # rebuilt views start blank -- redraw them (no-op without a result).
+        self.analysis_ctrl.show_epochs()
+        self.analysis_ctrl.show_rolling()
         self.analysis_ctrl.show_autonomic()
         self.event_ctrl.show()
+        # Events: cards, ribbon and readout of the last classification; the
+        # rebuilt tab starts blank, and the zoom on the selected event with it.
+        self.analysis_ctrl.show_events()
         # Pre-existing gap, not introduced by the Phase 1 top-bar rework:
         # the correlation badge was never repainted after a theme toggle
         # before, so it silently went blank on every _rebuild_ui(). Cheap
         # fix while already touching this exact code path.
-        self._update_quality_badge()
         # Same class of gap: the Detection-tab toolbar badges and the right
         # panel's ANNOTATIONS summary both need a refresh after a full
         # rebuild -- both widgets are guaranteed valid here since _build()
         # (called above) has already fully rebuilt every tab and panel.
         self._update_ann_count()
         self._update_pacing_count()
+        self._refresh_shell()
 
     # ════════════════════════════════════════════════════════
     #  11. LIVE THEME TOGGLE (no restart needed)
@@ -377,6 +387,7 @@ class ECGApp(
         """
         from ecg.ui.theme import THEME, apply_theme_config
         THEME.apply_preset("Dark" if not THEME.is_dark else "Light")
+        self._park_focus()
         apply_theme_config(THEME)
         THEME.save()
         ui_state = self._snapshot_ui_state()

@@ -481,7 +481,9 @@ class SignalController:
         self.app._reset_result_plots()
         self.app._reset_tab_status_labels()
         self.app.analysis_ctrl.invalidate_autonomic(peaks_changed=False)
-        self.app.analysis.basis.clear()
+        self.app.freshness.reset()
+        self.app.ui.computed_at = None
+        self.app.ui.peaks_edited_at = None
 
         if bundle["detected_ch"] != bundle["requested_ch"]:
             if self.app.ent_channel is not None:
@@ -510,6 +512,8 @@ class SignalController:
             self.app._set_review_artifacts_enabled(False)
         self.app.detection.agreement_disagree_samples = None
         self.app.detection.agreement_summary = ""
+        self.app.detection.agreement_pct = None
+        self.app.detection.agreement_peaks = None
         if self.app.btn_check_agreement is not None:
             self.app._set_check_agreement_enabled(False)
         if self.app.lbl_agreement_status is not None:
@@ -711,6 +715,7 @@ class SignalController:
                                  self.app.detection.manual_added)
         self.app.detection.manual_excluded.clear()
         self.app.detection.manual_added.clear()
+        self.app.ui.peaks_edited_at = None     # those edits are gone (context strip)
         # Invalidate all previous analysis state — new file, clean slate
         self.app.analysis.results       = None
         self.app.analysis.epoch_df      = None
@@ -747,6 +752,7 @@ class SignalController:
         self.app._reset_kpis()
         self.app._reset_result_plots()
         self.app._reset_tab_status_labels()
+        self.app._reset_hrv_readouts()
         self.app.analysis_ctrl.invalidate_autonomic()
 
         # ── UI feedback for auto-detected channel / fs ────────────────────────
@@ -1105,8 +1111,11 @@ class SignalController:
         self.app.analysis.results              = None
         self.app.analysis.epoch_df             = None
         self.app.analysis.rolling_hrv_df       = None
+        self.app.analysis.windowed_view        = {}
         self.app.analysis_ctrl.invalidate_autonomic(peaks_changed=False)
-        self.app.analysis.basis.clear()
+        self.app.freshness.reset()
+        self.app.ui.computed_at = None
+        self.app.ui.peaks_edited_at = None
         self.app.analysis.t_start      = 0.0
         self.app.analysis.t_end        = 0.0
         if self.app.ui.hover_after_id is not None:
@@ -1121,6 +1130,7 @@ class SignalController:
         self.app.analysis.arrhythmia_tsv       = ""
         self.app.analysis.premature_summary    = None
         self.app.analysis.arrhythmia_basis     = None
+        self.app.analysis.arrhythmia_run       = None
         self.app.analysis.arr_selected_idx     = -1
         self.app.analysis.arr_nav_pos          = 0.0
         self.app.analysis.arr_win              = 3.0
@@ -1147,6 +1157,7 @@ class SignalController:
         self.app.session.dirty        = False
         self.app.session.verified_for_training = False
         self.app._generation           = getattr(self.app, "_generation", 0) + 1  # invalidate async workers
+        self.app.ui.running_modules.clear()
 
         # ── 2. Result plots → placeholder ────────────────────────────────
         for slot in self.app._slots.values():
@@ -1162,6 +1173,10 @@ class SignalController:
                 lbl.configure(text="—", text_color=MUTED)
             except Exception as e:
                 log.debug("KPI label reset failed: %s", e)
+
+        self.app.plot_ctrl.reset_rhythm_view()
+        if getattr(self.app, "lbl_qtc_rr", None) is not None:
+            self.app.lbl_qtc_rr.configure(text="")
 
         # ── 4. Status labels ──────────────────────────────────────────────
         self.app._set_status("File loaded — run Detection", MUTED)
@@ -1200,13 +1215,16 @@ class SignalController:
                 text="  Click Analyze first", text_color=MUTED)
 
         # ── 8. Textboxes ──────────────────────────────────────────────────
-        for tb_attr in ("txt_rr", "txt_td", "txt_fd"):
+        for tb_attr in ("txt_rr", "txt_td", "txt_fd", "txt_nl"):
             tb = getattr(self.app, tb_attr, None)
             if tb is not None:
                 try:
                     self.app._set_textbox(tb, "")
                 except Exception as e:
                     log.debug("_set_textbox clear failed: %s", e)
+        # The tables, their Copy for Excel and labels of Epochs and Sliding.
+        self.app.analysis_ctrl.clear_epochs_view()
+        self.app.analysis_ctrl.clear_rolling_view()
 
         # ── 9. Arrhythmia event cards ─────────────────────────────────────
         if self.app._arr_card_widgets is not None:
@@ -1217,6 +1235,15 @@ class SignalController:
                     pass
             self.app._arr_card_widgets.clear()
         self.app.analysis_ctrl.refresh_premature_label()
+        self.app.analysis_ctrl.refresh_events_head()
+        sync = getattr(self.app, "_sync_arr_edit_btn", None)
+        if sync is not None:
+            sync()      # edit mode is off (above): so are the button and hint
+        for name in ("arr_ribbon", "arr_detail"):
+            slot = self.app._slots.get(name)
+            if slot is not None:
+                slot._draw_fn = None
+                slot._show_placeholder()
         if self.app.lbl_arr_event_title is not None:
             try:
                 self.app.lbl_arr_event_title.configure(  # type: ignore[union-attr]

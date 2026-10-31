@@ -1,5 +1,5 @@
 """
-The Summary tab's text report (summary_report_text) and duration tile:
+The Report tab's text report (report_view.report_text) and duration tile:
 VLF / LF / HF are absolute powers in ms² (n.u. only for LFn / HFn), the
 duration is the analysed one (window end − start) rather than the absolute
 time of the last beat, everything is in English with units, the QTc label
@@ -18,7 +18,8 @@ import pytest
 
 from ecg.core.analysis import INTERVAL_DEFINITIONS_TEXT
 from ecg.core.models import QTC_FORMULA_LABELS
-from ecg.ui.plot_controller import PlotController, summary_report_text
+from ecg.ui.plot_controller import PlotController
+from ecg.ui.report_view import report_text
 from ecg.ui.state import AnalysisState, DetectionState, SignalState
 
 
@@ -45,7 +46,7 @@ def _report(**kw) -> str:
                 window=(100.0, 160.0), signal_end_s=600.0, artifact_report=None,
                 qtc_formula="mitchell", when=datetime(2026, 1, 2, 3, 4))
     args.update(kw)
-    return summary_report_text(_results(), **args)
+    return report_text(_results(), **args)
 
 
 def _line(text: str, label: str) -> str:
@@ -54,9 +55,9 @@ def _line(text: str, label: str) -> str:
 
 def test_band_powers_are_ms2_and_only_lfn_hfn_are_nu():
     text = _report()
-    assert _line(text, "VLF power").endswith("1.500 ms²")
-    assert _line(text, "LF power").endswith("2.250 ms²")
-    assert _line(text, "HF power").endswith("3.500 ms²")
+    assert "1.500 ms²  [500 valid RR intervals]" in _line(text, "VLF power")
+    assert "2.250 ms²" in _line(text, "LF power")
+    assert "3.500 ms²" in _line(text, "HF power")
     assert "n.u." not in _line(text, "LF power") + _line(text, "HF power")
     assert "40.0 %" in _line(text, "LF (n.u.)")
     assert "60.0 %" in _line(text, "HF (n.u.)")
@@ -76,10 +77,10 @@ def test_report_is_english_with_units():
     assert re.search(r"[éèàùâêîôûç]", text) is None
     for french in ("symétrie", "Décélérations", "Signal brut", "sans filtres", "Fichier"):
         assert french not in text
-    assert _line(text, "Mean (60000/mean NN)").endswith("500.0 bpm")
-    assert _line(text, "SDNN").endswith("3.000 ms")
+    assert "500.0 bpm  [500 valid RR intervals]" in _line(text, "Mean (60000/mean NN)")
+    assert "3.000 ms" in _line(text, "SDNN")
     ivl_rows = [ln for ln in text.split("ECG INTERVALS", 1)[1].splitlines()[1:] if "±" in ln]
-    assert len(ivl_rows) == 4 and all(ln.endswith(" ms") for ln in ivl_rows)
+    assert len(ivl_rows) == 4 and all(" ms  [" in ln for ln in ivl_rows)
     assert "Decelerations" in text and "Accelerations" in text
 
 
@@ -112,7 +113,7 @@ def test_withheld_spectrum_says_why():
     fd = pd.DataFrame()
     fd.attrs["withheld_reason"] = "too few beats"
     r["hrv_freq"] = fd
-    text = summary_report_text(r, qtc_formula="mitchell")
+    text = report_text(r, qtc_formula="mitchell")
     assert "too few beats" in _line(text, "Withheld")
     assert "VLF power" not in text
 
@@ -151,7 +152,7 @@ def test_missing_values_are_a_bare_dash():
     r["hrv_time"] = None
     r["hrv_freq"] = pd.DataFrame({"HRV_VLF": [np.nan]}).assign(**{"HRV_LF": [np.nan]})
     r["hrv_freq"].attrs["method"] = "welch"
-    text = summary_report_text(r, qtc_formula="mitchell")
+    text = report_text(r, qtc_formula="mitchell")
     for label in ("MeanNN", "pNN6", "pNN20", "LF (n.u.)", "HF (n.u.)", "LF/HF",
                   "SampEn", "DFA α1"):
         line = _line(text, label)
@@ -198,7 +199,7 @@ def test_legacy_intervals_block_carries_its_own_note():
     # PROVENANCE; the ECG INTERVALS block itself now says so too.
     r = _results()
     r["intervals"] = r["intervals"].drop(columns=["QRS_onset_ms"])
-    text = summary_report_text(r, qtc_formula="mitchell", when=datetime(2026, 1, 2))
+    text = report_text(r, qtc_formula="mitchell", when=datetime(2026, 1, 2))
     block = text.split("ECG INTERVALS", 1)[1].split("═", 1)[0]
     assert "legacy definitions" in block
     assert "legacy" not in _report().split("ECG INTERVALS", 1)[1]

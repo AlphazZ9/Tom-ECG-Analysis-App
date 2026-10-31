@@ -8,7 +8,7 @@ Mixin of ECGApp (see ecg/ui/app.py).
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Callable, Optional, TYPE_CHECKING
 import customtkinter as ctk  # type: ignore[import-untyped]
 import tkinter as tk
 import numpy as np
@@ -283,9 +283,10 @@ class HelpersMixin:
         self._status_display_raw, self._status_display_color = text, color
         self._apply_status_display(text, color)
 
-    def _bind_hover_tip(self: ECGApp, widget, text: str, color: str = MUTED) -> None:
-        """Show *text* in the status bar on hover; restore the previous
-        status message on leave.
+    def _bind_hover_tip(self: ECGApp, widget, text: "str | Callable[[], str]",
+                        color: str = MUTED) -> None:
+        """Show *text* (or what it returns, for a hint that changes) in the
+        status bar on hover; restore the previous status message on leave.
 
         Thin wrapper around the existing hand-rolled <Enter>/<Leave> ->
         status-bar hover pattern (previously duplicated once, for the Free
@@ -296,8 +297,9 @@ class HelpersMixin:
         permanently erase whatever error/result message was showing.
         """
         def _enter(_e):
-            self._status_display_raw, self._status_display_color = text, color
-            self._apply_status_display(text, color)
+            shown = text() if callable(text) else text
+            self._status_display_raw, self._status_display_color = shown, color
+            self._apply_status_display(shown, color)
 
         def _leave(_e):
             self._status_display_raw = self._status_text
@@ -339,6 +341,8 @@ class HelpersMixin:
         handler on the toolbar row (see _refresh_status_text), and an
         unconditional .configure() on every callback -- even a no-op one --
         risks re-triggering <Configure> and looping."""
+        if self.lbl_status is None:      # before the tab row exists
+            return
         fitted = self._fit_status_text(text)
         if (self.lbl_status.cget("text") == fitted
                 and self.lbl_status.cget("text_color") == color):
@@ -391,16 +395,6 @@ class HelpersMixin:
                       widget_or_value, default, exc)
             return default
 
-    @staticmethod
-    def _safe_df_val(df: "pd.DataFrame | None", col: str, decimals: int = 3) -> str:
-        """Return a formatted scalar from a DataFrame cell, or '—' on any error."""
-        try:
-            if df is None or col not in df.columns:
-                return "—"
-            v = float(df[col].values[0])
-            return f"{v:.{decimals}f}" if np.isfinite(v) else "—"
-        except Exception:
-            return "—"
 
     @staticmethod
     def _df_to_tsv(df: "pd.DataFrame | None") -> str:

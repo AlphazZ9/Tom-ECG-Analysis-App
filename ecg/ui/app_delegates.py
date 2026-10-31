@@ -29,6 +29,7 @@ from ecg.ui.theme import (
     FONT_SIDEBAR_HDR, FONT_CARD_TITLE,
 )
 from ecg.ui.widgets import make_sparkline
+from ecg.ui.tab_keys import TAB_REPORT
 from ecg.ui.dialogs import (
     ArtifactReviewDialog, AnnotationManagerDialog, PacingPeriodManagerDialog,
 )
@@ -181,7 +182,15 @@ class DelegatesMixin:
             return
         fp = self.signal.filepath
         text = Path(fp).name if fp else "No file loaded"
-        self.lbl_topbar_file.configure(text=text)  # type: ignore[union-attr]
+        # Channel and rate are known once the signal is read; a channel can be
+        # named after the whole file: its last part says which one it is.
+        if fp and self.signal.channel is not None:
+            channel = str(self.signal.channel)
+            if len(channel) > 12:
+                channel = channel.rsplit("_", 1)[-1]
+            text += f" · {channel} · {self.signal.fs:g} Hz"
+        if self.lbl_topbar_file.cget("text") != text:  # type: ignore[union-attr]
+            self.lbl_topbar_file.configure(text=text)  # type: ignore[union-attr]
 
     def _on_det_method_change(self: ECGApp, choice: str) -> None:
         """Show/hide SG options frame based on selected detection method."""
@@ -568,6 +577,7 @@ class DelegatesMixin:
                        f"kept={report['n_kept']})")
 
             if removed > 0:
+                self.detection_ctrl.mark_peaks_edited()
                 # Peaks changed → previous HRV metrics are stale.  Discard them so
                 # the user cannot export results that don't match the corrected peaks.
                 self._results = None
@@ -575,11 +585,12 @@ class DelegatesMixin:
                 # Also blank the KPI tiles and cached result plots -- every other
                 # peak-editing path (detection_controller.py's on_detail_click /
                 # apply_edit_state / clear_manual_exclusions / apply_threshold_ui)
-                # already does this; without it the Statistics panel and Summary/
+                # already does this; without it the Statistics panel and
                 # Poincaré/PSD plots keep showing the pre-review numbers even
                 # though analysis.results was just cleared.
                 self._reset_kpis()
                 self._reset_result_plots()
+                self._reset_hrv_readouts()
                 self.analysis_ctrl.invalidate_autonomic()
                 stale_note = "  ⚠ Click Analyze to update HRV metrics."
                 self._set_status(art_str + stale_note, ORANGE)
@@ -626,11 +637,12 @@ class DelegatesMixin:
         if self.lbl_panel_ann_count is not None:
             n = len(self._annotations)
             self.lbl_panel_ann_count.configure(text=f"{n} annotations")  # type: ignore[union-attr]
-        # Called after every annotation add / edit / delete: the Autonomic
-        # plot draws them on every panel (no-op without a result); the
+        # Called after every annotation add / edit / delete: the Autonomic,
+        # Epochs and Sliding plots draw them on every panel (no-op without a result); the
         # Event-locked label filter lists their labels, and a result locked
         # to events that changed is dropped.
         self.analysis_ctrl.redraw_autonomic_plot()
+        self.analysis_ctrl.redraw_windowed_plots()
         self.event_ctrl.on_annotations_changed()
 
     def _open_pacing_periods(self: ECGApp) -> None:
@@ -834,7 +846,7 @@ class DelegatesMixin:
         on_complete: "Optional[Callable[[], None]]" = None,
         auto_epochs: bool = False,
     ) -> None:
-        """Render only the fast core plots (RR, Beat, Summary, Poincaré).
+        """Render only the fast core plots (RR, Beat, Poincaré, table views).
 
         Called immediately after core analysis.  Freq / non-linear / intervals
         are rendered separately when their per-tab buttons are clicked.
@@ -898,9 +910,9 @@ class DelegatesMixin:
         """
         self.plot_ctrl.plot_beat_template(r)
 
-    def _plot_summary(self: ECGApp, r: dict) -> None:
-        """Populate the Summary tab: KPI cards, all plots, and text report."""
-        self.plot_ctrl.plot_summary(r)
+    def _plot_table_views(self: ECGApp, r: dict) -> None:
+        """Refresh what reads the shared table: quality panel, Rhythm & HRV page."""
+        self.plot_ctrl.plot_table_views(r)
 
     # ── KPI bar update ────────────────────────────────────────
 
@@ -920,9 +932,17 @@ class DelegatesMixin:
         """
         self.plot_ctrl.reset_tab_status_labels()
 
+    def _reset_hrv_readouts(self: ECGApp) -> None:
+        """Clear what still shows the results once they are dropped."""
+        self.plot_ctrl.reset_hrv_readouts()
+
     def _reset_kpis(self: ECGApp) -> None:
         """Reset all KPI labels to dash when results are invalidated."""
         self.plot_ctrl.reset_kpis()
+
+    def _show_export(self: ECGApp) -> None:
+        """The header's Export…: the Report tab, where the choices and formats are."""
+        self.tabs.set(TAB_REPORT)
 
     def _update_kpis(self: ECGApp) -> None:
         self.plot_ctrl.update_kpis()
@@ -943,8 +963,8 @@ class DelegatesMixin:
 
     def _refresh_epoch_feasibility(self: ECGApp) -> None:
         """Warn ahead of time if the current Epoch (s) can't fit the
-        recording -- called when the Epochs sub-view is shown, see
-        _on_hrv_view_change."""
+        recording -- called when the Epochs mode is shown, see
+        _show_time_mode."""
         self.analysis_ctrl.refresh_epoch_feasibility()
 
     # ════════════════════════════════════════════════════════
@@ -1186,20 +1206,29 @@ class DelegatesMixin:
             if self._filepath else False
         )
         if editor._saved:
-            self._session_dirty = True     # the template is kept in the session
-            self._set_status(
-                "Wave template applied to this recording — re-run Interval "
-                "Delineation to apply changes.", GREEN)
+            self._on_template_edited()
+
+    def _on_template_edited(self: ECGApp) -> None:
+        """After the windows of this recording changed, in the dialog or on the tab."""
+        self._session_dirty = True     # the template is kept in the session
+        self._update_session_ui(
+            has_session=session_exists(self._filepath) if self._filepath else False)
+        # The mean beat shows the windows; step 3 turns out of date by itself.
+        if self._results is not None:
+            self._plot_beat_template(self._results)
+        self._set_status(
+            "Wave template applied to this recording — Measure intervals "
+            "again to apply changes.", GREEN)
 
     # ════════════════════════════════════════════════════════
     #  CLIPBOARD / TXT SAVE
     # ════════════════════════════════════════════════════════
 
-    def _copy_summary(self: ECGApp) -> None:
-        self.export_ctrl.copy_summary()
+    def _copy_report(self: ECGApp) -> None:
+        self.export_ctrl.copy_report()
 
-    def _save_summary_txt(self: ECGApp) -> None:
-        self.export_ctrl.save_summary_txt()
+    def _save_report_txt(self: ECGApp) -> None:
+        self.export_ctrl.save_report_txt()
 
     # ════════════════════════════════════════════════════════
     #  1. KEYBOARD SHORTCUTS
@@ -1258,7 +1287,7 @@ class DelegatesMixin:
             "Ctrl+Shift+E   Export RR intervals CSV\n"
             "Ctrl+M         Compare segments\n"
             "Ctrl+Z / Y     Undo / Redo peak edits\n"
-            "←  / →         Move the ECG view (Detection tab)\n"
+            "←  / →         Move the ECG view (Signal & Detection tab)\n"
             "F1             This help\n"
         )
         messagebox.showinfo("Keyboard shortcuts", shortcuts)
@@ -1273,10 +1302,6 @@ class DelegatesMixin:
     # ════════════════════════════════════════════════════════
     #  4. SIGNAL QUALITY BADGE (persistent header)
     # ════════════════════════════════════════════════════════
-
-    def _update_quality_badge(self: ECGApp) -> None:
-        """Update the persistent quality badge in the KPI bar."""
-        self.detection_ctrl.update_quality_badge()
 
     # ════════════════════════════════════════════════════════
     #  7. RECORDING NOTES (per-file, saved in SQLite)

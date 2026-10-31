@@ -54,7 +54,25 @@ et export.
   battements sont détectés, que le seul pourcentage par battements
   sous-estimerait).
 
-### Analyse VRC (7 vues liées)
+### Onglets
+
+Cinq onglets d'analyse et un rapport, organisés par question : **Signal & Detection**,
+**Rhythm & HRV**, **Time course** (Epochs, Sliding, Autonomic, Event-locked),
+**Morphology & Intervals** (étapes : battement moyen, repères, intervalles), **Events**
+et **Report** (provenance, état des modules, Include, exports et rapport texte). Un
+bandeau de contexte au-dessus de chaque onglet indique sur quoi reposent les
+valeurs ; chaque onglet porte un état (up to date, out of date, not computed) ;
+les écrans, le rapport texte, les valeurs clés du PDF et les tableaux **Metrics** d'Excel
+et de Prism lisent un seul tableau : valeur, unité, n de base et état (les autres feuilles
+et tables contiennent les séries sous-jacentes). Une session enregistrée sur un ancien
+onglet se rouvre à sa nouvelle place.
+
+Les entrées plus anciennes ci-dessous nomment les onglets de leur époque : *Summary*
+est devenu Report, les sous-vues *HRV* sont sur Rhythm & HRV et Time course, *Rolling*
+est devenu Sliding, *Beat Template* et *Intervals* sont Morphology & Intervals,
+*Abnormal Events* est Events.
+
+### Analyse VRC
 
 - **RR/FC** — tachogramme avec détection automatique des pics
   (accélération/décélération brusque), navigation au clic ; histogramme de
@@ -284,7 +302,7 @@ et export.
   ventriculaires) et ne rapportaient que les salves ≥ 3. Les battements
   isolés, les doublets et les salves ≥ 3 sont désormais tous rapportés,
   avec effectifs et taux par heure (par heure de la durée analysée, du
-  premier au dernier battement analysé) dans l'onglet Abnormal Events, sa
+  premier au dernier battement analysé) dans l'onglet Events, sa
   ligne d'état et sa frise, le texte « Copy for Excel », l'Excel (feuilles
   `Premature_Beats`, `Abnormal_Events` et lignes de la Cover), les
   rapports PDF et les notes Prism. Les battements que la correction
@@ -745,6 +763,9 @@ ecg-analysis            # après `pip install -e .`
 │   │   └── db.py             # registre SQLite des enregistrements + table
 │   │                         # de cohorte des événements
 │   └── ui/                # application de bureau CustomTkinter
+│       ├── app_*.py, tab_*.py # mixins d'ECGApp : panneaux et un module par onglet
+│       ├── context_strip.py, tabbar.py, freshness.py # bandeau, états des onglets
+│       ├── report_view.py     # onglet Report et rapport texte (pur, testé)
 │       ├── app.py             # fenêtre principale ECGApp (disposition Adaptive
 │       │                      # Workbench)
 │       ├── *_controller.py    # un contrôleur par responsabilité (SRP) :

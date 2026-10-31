@@ -253,7 +253,8 @@ def test_older_nonlinear_result_states_its_truncation():
 
 def test_series_modules_hold_their_state_and_n():
     res = SimpleNamespace(sd01=1.5, sd02=2.5, d0=3.5,
-                          params={"n_beats": 40, "n_windows_withheld": 2})
+                          params={"n_beats": 40, "n_windows_withheld": 2,
+                                  "n_pairs_total": 45})
     ev = [SimpleNamespace(kind="premature_beat"), SimpleNamespace(kind="premature_beat"),
           SimpleNamespace(kind="pause")]
     t = build_metric_table(
@@ -264,6 +265,10 @@ def test_series_modules_hold_their_state_and_n():
     assert t.row("epochs.status").basis_n == 2
     assert t.row("rolling.status").basis_n == 3
     assert t.row("autonomic.status").basis_n == 40
+    # The recording-level values rest on every valid pair, not on the windows.
+    for key in ("SD01_ms", "SD02_ms", "D0_ms"):
+        row = t.row(f"autonomic.{key}")
+        assert row.basis_n == 45 and row.basis_text == "45 successive valid RR pairs"
     assert t.value("autonomic.SD01_ms") == 1.5
     assert t.value("autonomic.D0_ms") == 3.5
     ev_row = t.row("event_locked.status")
