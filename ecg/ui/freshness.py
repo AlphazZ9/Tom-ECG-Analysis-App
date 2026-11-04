@@ -25,7 +25,9 @@ from typing import TYPE_CHECKING, Any, Iterable, Optional
 
 import numpy as np
 
-from ecg.core.analysis import hrv_freq_is_legacy, intervals_use_legacy_definitions
+from ecg.core.analysis import (
+    ensemble_beats_used, hrv_freq_is_legacy, intervals_use_legacy_definitions,
+)
 from ecg.core.metric_table import MODULES
 
 if TYPE_CHECKING:
@@ -295,6 +297,10 @@ class FreshnessService:
             cur = self.app.analysis.wave_template
             if isinstance(used, dict) and cur is not None and cur.to_dict() != used:
                 extra.append("wave template changed")
+            used_n = ensemble_beats_used(ivl)
+            now_n = getattr(self.app.analysis, "ensemble_beats", used_n)
+            if now_n != used_n:
+                extra.append(f"rolling median changed (measured with N = {used_n}, now {now_n})")
         return self._from_basis("intervals", computed, extra)
 
     def _status_epochs(self) -> ModuleFreshness:

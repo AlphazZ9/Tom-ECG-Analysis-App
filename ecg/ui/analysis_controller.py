@@ -29,9 +29,10 @@ from ecg.core.detection import (
     removed_beats_for_classification,
 )
 from ecg.core.analysis import (
-    POINCARE_MIN_PAIRS, align_interval_column_to_peaks, analyse_core,
+    ENSEMBLE_BEATS_DEFAULT, POINCARE_MIN_PAIRS, align_interval_column_to_peaks, analyse_core,
     analyse_hrv_freq, analyse_hrv_nonlinear, analyse_intervals,
-    compute_poincare_metrics, hrv_freq_withheld_reason, hrv_time_domain,
+    compute_poincare_metrics, ensemble_beats_used, hrv_freq_withheld_reason, hrv_time_domain,
+    normalize_ensemble_beats,
     mean_hr_bpm, poincare_sd1_sd2,
     recompute_qtc_column, rr_bounds_label, rr_exclusion_text,
     rr_interval_series, successive_valid_pairs,
@@ -540,6 +541,11 @@ class AnalysisController:
         # keeps only those inside the analysed span).
         removed_ect, removal_info = self.arrhythmia_removed_beats(fs)
         basis = {"peaks": np.asarray(rpeaks).copy(), "removed": removed_ect.copy()}
+        # Rows of a rolling median share most of their beats: one delineation
+        # error persists over many of them and would read as a sustained run
+        # (Footshocks: 3 false runs of 10-16 rows at PR ~60 where the single
+        # beats read 48). A run must outlast one whole ensemble.
+        min_av_beats = ensemble_beats_used((self.app.analysis.results or {}).get("intervals"))
 
         def _worker():
             def _prog(p, m):
@@ -552,6 +558,7 @@ class AnalysisController:
                 progress_cb=_prog,
                 pr_ms=pr_ms,
                 removed_beats=removed_ect if len(removed_ect) else None,
+                min_av_beats=min_av_beats,
             )
 
         def _done(events: "list[ArrhythmiaEvent]"):
@@ -617,11 +624,15 @@ class AnalysisController:
         sparse PR series would just fragment the runs."""
         pr_ms = None
         av_note = "AV-delay check skipped — measure intervals on the current window"
+        n_ens = ensemble_beats_used(ivl)
         if ivl is not None and not ivl.empty:
             pr_aligned = align_interval_column_to_peaks(ivl, rpeaks, fs, "PR_ms")
             if np.isfinite(pr_aligned).sum() >= 0.5 * len(rpeaks):
                 pr_ms = pr_aligned
                 av_note = "AV-delay check on"
+                if n_ens > 1:
+                    av_note += (f" (PR is a rolling median of {n_ens} beats: only a run of "
+                                f"at least {n_ens} rows counts, a shorter episode is missed)")
             elif (np.isfinite(align_interval_column_to_peaks(ivl, rpeaks, fs, "R_peak_s")).sum()
                   >= 0.5 * len(rpeaks)):
                 # Rows do match this window -- PR itself was mostly out of
@@ -1212,6 +1223,22 @@ class AnalysisController:
         UI rebuild recreates the combobox, and the exports must name the
         formula the values were actually computed with."""
         return normalize_qtc_formula(getattr(self.app.analysis, "qtc_formula", "mitchell"))
+
+    def ensemble_beats(self) -> int:
+        """N of the next Measure intervals: the control's value when readable
+        (Measure can be clicked with the entry still focused), stored in
+        ``analysis.ensemble_beats``; the last valid value otherwise."""
+        a = self.app.analysis
+        n = normalize_ensemble_beats(getattr(a, "ensemble_beats", ENSEMBLE_BEATS_DEFAULT),
+                                     ENSEMBLE_BEATS_DEFAULT)
+        ent = getattr(self.app, "ent_ensemble", None)
+        if ent is not None:
+            try:
+                n = normalize_ensemble_beats(ent.get(), n)
+            except Exception as exc:      # the widget is being rebuilt
+                log.debug("ensemble_beats: entry not readable: %s", exc)
+        a.ensemble_beats = n
+        return n
 
     def on_qtc_formula_change(self, _choice: str = "") -> None:
         """Re-compute QTc with the selected formula and refresh interval plots."""
@@ -2402,6 +2429,7 @@ class AnalysisController:
                                   if self.app.sw_permissive is not None else False)
         # Read on the main thread (Tk widget) before the worker starts.
         qtc_formula_for_worker = self.qtc_formula()
+        ensemble_for_worker = self.ensemble_beats()
         # The beat window is sized from the shortest VALID interval, under
         # the bounds the core results used (a widened Max RR for an
         # anaesthetised mouse leaves no interval valid under the defaults,
@@ -2418,7 +2446,8 @@ class AnalysisController:
                                      wave_template=wt_for_worker,
                                      permissive_bounds=permissive_for_worker,
                                      qtc_formula=qtc_formula_for_worker,
-                                     rr_min_ms=rr_lo, rr_max_ms=rr_hi)
+                                     rr_min_ms=rr_lo, rr_max_ms=rr_hi,
+                                     ensemble_beats=ensemble_for_worker)
 
         def _done(df: "pd.DataFrame") -> None:
             if self.app.analysis.results is None or getattr(self.app, "_generation", 0) != _gen:

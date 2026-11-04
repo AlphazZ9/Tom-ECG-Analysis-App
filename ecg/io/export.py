@@ -28,7 +28,8 @@ from ecg.core.detection import premature_summary_rows
 from ecg.core.analysis import (
     HR_RANGE_TEXT, LEGACY_SPECTRAL_TEXT, SPECTRAL_METHOD_TEXT,
     analysed_duration_s, analysis_provenance_rows, analysis_window_span,
-    hrv_freq_is_legacy, hrv_freq_withheld_reason, interval_disclosure_rows,
+    ensemble_short_text, hrv_freq_is_legacy, hrv_freq_withheld_reason,
+    interval_disclosure_rows,
     nonlinear_subset_text, qtc_formula_text, rr_exclusion_report,
     RR_ASYMMETRY_TEXT,
     rr_timeseries,
@@ -555,7 +556,7 @@ class ExcelExporter:
             # conventions as the text report's RR-asymmetry block).
             cover_rows.append(("HR asymmetry (HRV_PI, HRV_GI)", RR_ASYMMETRY_TEXT))
         if qtc_formula is not None:
-            cover_rows.append(("QTc formula", qtc_formula_text(qtc_formula)))
+            cover_rows.append(("QTc formula", qtc_formula_text(qtc_formula, results.get("intervals"))))
         # PR / QRS / QT landmarks and the beat-to-beat QT variability of the
         # ECG_Intervals sheet (single lead -- not classical QT dispersion).
         cover_rows.extend(ivl_rows)
@@ -1273,7 +1274,9 @@ class PrismExporter:
                     )
                     for k, v in ivl_cols.items()
                 })
-                _add("ECG Intervals per Beat", df, x_col=0, row_name=False)
+                # Rows of a rolling median are not one value per beat.
+                _add("ECG Intervals (rolling median)" if ensemble_short_text(ivl)
+                     else "ECG Intervals per Beat", df, x_col=0, row_name=False)
 
         # ── 6. ECG intervals timeline (XY) ──────────────────────────────
         # analyse_intervals times each beat by its R peak (R_peak_s); it has

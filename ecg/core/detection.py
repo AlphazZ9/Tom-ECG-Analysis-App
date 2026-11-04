@@ -3130,6 +3130,7 @@ def classify_arrhythmias(
     progress_cb:     Optional[Callable[[int, str], None]] = None,
     pr_ms:           "Optional[np.ndarray]" = None,
     removed_beats:   "Optional[Iterable[int]]" = None,
+    min_av_beats:    int   = 0,
 ) -> list[ArrhythmiaEvent]:
     """Rule-based arrhythmia classification for mouse ECG.
 
@@ -3195,6 +3196,9 @@ def classify_arrhythmias(
         AV-delay detection is silently skipped -- every other event kind
         is unaffected, matching this function's behaviour before pr_ms
         existed.
+    min_av_beats : shortest AV-delay run, on top of *min_brady_beats*. A PR from
+        a rolling median passes its N: neighbouring rows share most of their
+        beats, so one error would otherwise read as a sustained run.
     """
     def _prog(pct: int, msg: str) -> None:
         if progress_cb:
@@ -3376,7 +3380,7 @@ def classify_arrhythmias(
 
         def _emit_av(run_start: int, run_end: int) -> None:
             run_len = run_end - run_start
-            if run_len < min_brady_beats:
+            if run_len < max(min_brady_beats, min_av_beats):
                 return
             pr_seg = pr_arr[run_start:run_end]
             pr_seg = pr_seg[np.isfinite(pr_seg)]

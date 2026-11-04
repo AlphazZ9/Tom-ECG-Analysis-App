@@ -30,6 +30,7 @@ from ecg.core.filtering import downsample_xy_for_display
 from ecg.core.wave_template import WaveTemplate
 from ecg.core.analysis import (
     INTERVAL_DEFINITIONS_TEXT,
+    ensemble_beats_used, ensemble_short_text,
     intervals_use_legacy_definitions, qt_beat_variability, qtc_rr_column,
     compute_beat_correlation, hrv_freq_is_legacy, hrv_freq_withheld_reason,
     rr_bounds_label, LEGACY_SPECTRAL_TEXT,
@@ -153,7 +154,7 @@ def qtc_rr_fit(ivl: "pd.DataFrame") -> "Optional[dict]":
         log.debug("draw_intervals: QT-RR linregress failed: %s", exc)
         return None
     return {"rr": rr, "qtc": qtc, "slope": fit.slope, "intercept": fit.intercept,
-            "r": fit.rvalue}
+            "r": fit.rvalue, "smoothed": ensemble_beats_used(ivl) > 1}
 
 
 def draw_qtc_rr(axr: Any, fit: dict, annotate: bool = True) -> None:
@@ -171,7 +172,8 @@ def draw_qtc_rr(axr: Any, fit: dict, annotate: bool = True) -> None:
                  transform=axr.transAxes,
                  bbox=dict(boxstyle="round,pad=0.2",
                            fc=PLOT["axes"], ec="none", alpha=0.8))
-    axr.set_xlabel("Preceding RR (ms)", fontsize=8)
+    axr.set_xlabel("Ensemble mean preceding RR (ms)" if fit.get("smoothed")
+                   else "Preceding RR (ms)", fontsize=8)
     axr.set_ylabel("QTc (ms)", fontsize=8)
 
 
@@ -1954,6 +1956,7 @@ class PlotController:
             return
 
         legacy_ivl = intervals_use_legacy_definitions(ivl)
+        smoothed = ensemble_short_text(ivl)
         palette  = [BLUE_DARK, GREEN_DARK, PINK, ORANGE_DARK]
         col_data = [(col, ivl[col].dropna().values, color)
                     for col, color in zip(cols, palette)]
@@ -1990,8 +1993,11 @@ class PlotController:
                                      / max(fig.get_figheight(), 1.0)),
                           wspace=0.40)
             title_color = GREEN if pct_ivl >= 90 else ORANGE_DARK if pct_ivl >= 50 else RED
+            # A rolling median narrows every distribution below: say so on the figure.
             fig.suptitle(
-                f"{n_ok_ivl}/{n_total_ivl} beats measured ({pct_ivl:.0f}%)",
+                f"{n_ok_ivl}/{n_total_ivl} beats measured ({pct_ivl:.0f}%)"
+                + (f"  ·  {smoothed}: spread of smoothed values, not beat-to-beat"
+                   if smoothed else ""),
                 color=title_color, fontsize=9, y=0.985)
             # Which landmarks the numbers come from -- old sessions keep
             # their legacy (Q-nadir / from-R) values until re-run.
@@ -2043,7 +2049,9 @@ class PlotController:
                                   fc=PLOT["axes"], ec="none", alpha=0.8))
                 label = col.replace("_ms", "")
                 ax.set_title(label, color=color, fontsize=10, pad=4)
-                if col == "QT_ms" and len(finite) > 3:
+                if col == "QT_ms" and len(finite) > 3 and smoothed:
+                    ax.set_xlabel("spread not beat-to-beat", color=PLOT["muted"], fontsize=7)
+                elif col == "QT_ms" and len(finite) > 3:
                     # Beat-to-beat QT variability on this single lead. It
                     # used to be shown as "dispersion" (max - min QT), but
                     # classical QT dispersion is an inter-LEAD measure of
@@ -2105,8 +2113,11 @@ class PlotController:
             return
         slot.update(lambda fig: draw_qtc_rr(fig.add_subplot(111), fit, annotate=False))
         if lbl is not None:
+            # Neighbouring rows of a rolling median share most of their beats.
+            what = ("rolling rows, not independent beats" if fit.get("smoothed")
+                    else "beats")
             lbl.configure(text=f"slope {fit['slope']:+.3f} ms/ms  ·  r = {fit['r']:.2f}  ·  "
-                               f"{len(fit['rr'])} beats — report QT alongside QTc")
+                               f"{len(fit['rr'])} {what} — report QT alongside QTc")
 
     def plot_beat_template(self, r: dict) -> None:
         """Average beat template, ±1 SD band, and amplitude / morphology distributions.

@@ -880,12 +880,24 @@ def signal_crop_text(crop: "Optional[dict]") -> "Optional[str]":
             f"relative to the crop start ({t0:.1f} s in the file)")
 
 
-def qtc_formula_text(formula: "Optional[str]") -> str:
+def qtc_formula_text(formula: "Optional[str]",
+                     intervals: "Optional[pd.DataFrame]" = None) -> str:
     """'<formula label> with the preceding RR  (report uncorrected QT
     alongside)' -- the QTc label of every report and export, from the
-    formula actually used (a QTC_FORMULA_LABELS key or label)."""
+    formula actually used (a QTC_FORMULA_LABELS key or label). With a
+    rolling-median *intervals* frame the RR is that of its ensembles
+    (``qtc_rr_text``)."""
     label = QTC_FORMULA_LABELS[normalize_qtc_formula(formula or "mitchell")]
-    return f"{label} with the preceding RR  (report uncorrected QT alongside)"
+    return f"{label} with {qtc_rr_text(intervals)}  (report uncorrected QT alongside)"
+
+
+def qtc_rr_text(intervals: "Optional[pd.DataFrame]" = None) -> str:
+    """The RR each QTc of *intervals* is corrected with, as a phrase: 'the
+    preceding RR', or for a rolling-median frame the mean preceding RR of
+    the beats in each row's median."""
+    if ensemble_info(intervals) is not None:
+        return "the mean preceding RR of the beats in each row's median"
+    return "the preceding RR"
 
 
 def analysis_provenance_rows(
@@ -914,7 +926,7 @@ def analysis_provenance_rows(
     rows += rr_disclosure_rows(rr_exclusion_report(r))
     rows.append(("Artifact correction", artifact_correction_text(artifact_report, r)))
     if qtc_formula is not None:
-        rows.append(("QTc formula", qtc_formula_text(qtc_formula)))
+        rows.append(("QTc formula", qtc_formula_text(qtc_formula, r.get("intervals"))))
     rows += interval_disclosure_rows(r.get("intervals"))
     return rows
 
@@ -2057,6 +2069,11 @@ INTERVAL_DEFINITIONS: "tuple[tuple[str, str], ...]" = (
     ("QTc", "QT corrected with the preceding RR (previous R → this R)"),
 )
 INTERVAL_DEFINITIONS_TEXT: str = "; ".join(f"{k} = {v}" for k, v in INTERVAL_DEFINITIONS)
+# A rolling-median frame: its QT comes from the beats of each row's median.
+ENSEMBLE_INTERVAL_DEFINITIONS_TEXT: str = "; ".join(
+    f"{k} = {v}" for k, v in INTERVAL_DEFINITIONS[:-1]) + (
+    "; QTc = QT corrected with the mean preceding RR of the beats in the row's "
+    "median (RR_ensemble_ms; a row reporting its own beat: its preceding RR)")
 LEGACY_INTERVAL_DEFINITIONS_TEXT: str = (
     "legacy (saved by an older version): PR = P onset → Q nadir, "
     "QRS = Q nadir → S nadir, QT = R peak → T end, QTc re-paired with the "
@@ -2074,9 +2091,12 @@ QT_VARIABILITY_LABEL: str = (
 
 
 def interval_definitions_text(intervals: "Optional[pd.DataFrame]") -> str:
-    """The definitions line matching *intervals*: standard, legacy, or
-    legacy without a recoverable QTc (``recompute_qtc_column``)."""
+    """The definitions line matching *intervals*: standard, rolling median
+    (its QTc pairing), legacy, or legacy without a recoverable QTc
+    (``recompute_qtc_column``)."""
     if not intervals_use_legacy_definitions(intervals):
+        if ensemble_info(intervals) is not None:
+            return ENSEMBLE_INTERVAL_DEFINITIONS_TEXT
         return INTERVAL_DEFINITIONS_TEXT
     if "R_peak_s" in intervals.columns:   # type: ignore[union-attr]
         return LEGACY_INTERVAL_DEFINITIONS_TEXT
@@ -2090,6 +2110,255 @@ def intervals_use_legacy_definitions(intervals: "Optional[pd.DataFrame]") -> boo
     return (intervals is not None and not intervals.empty
             and "QT_ms" in intervals.columns
             and "QRS_onset_ms" not in intervals.columns)
+
+
+# ── Rolling-median delineation (analyse_intervals, ensemble_beats) ────────
+# On real anaesthetised-mouse recordings P sits at single-beat noise level, so
+# each row can be delineated on the median of N neighbouring beats instead.
+ENSEMBLE_BEATS_DEFAULT: int = 32    # what the app measures with
+ENSEMBLE_BEATS_MAX: int = 1000
+# A row's own beat is not described by its neighbours when its preceding RR
+# leaves this fraction of the local median RR (0.70 = the app's premature-beat
+# rule, classify_arrhythmias): a premature beat, or a beat after a pause.
+_ENSEMBLE_RR_LOW: float = 0.70
+_ENSEMBLE_RR_HIGH: float = 1.30
+_ENSEMBLE_RR_MEDIAN_BEATS: int = 33
+# An ensemble smaller than N // 4 is not one: the row reports its own beat.
+_ENSEMBLE_MIN_FRACTION: int = 4
+# T end on the median beat: the T wave is barely above the median's noise, so
+# its trailing-edge line can flip between two candidates from one row to the
+# next although the two medians share all but one beat. Each row takes the T
+# peak and T end of the row with the median T end among the rows within
+# N // _ENSEMBLE_T_ROWS_FRACTION of it (they share >= 3/4 of their beats).
+# On 248 at N = 32 this takes the rows whose QT differs by > 5 ms from the
+# next row's from 26 % to 3 %, and the rows switching NaN / measured from
+# 294 to 29 (N // 8: 4.7 %, 52).
+_ENSEMBLE_T_ROWS_FRACTION: int = 4
+# Artifact rule, on the residual to the local median beat outside the QRS
+# (+-_ARTIFACT_QRS_MS around R, where a slight misalignment dominates it).
+# On both real recordings its RMS tops out near 4 x its recording median and
+# its largest sample near 10 x (clean beats), while on 248 a noise burst of SD
+# 0.7 (10 % of R, 3 x the single-beat noise) gives > 5.5 x, and a narrow
+# full-scale spike > 30 x.
+_ARTIFACT_RESIDUAL_X: float = 5.0
+_ARTIFACT_SPIKE_X: float = 15.0
+_ARTIFACT_QRS_MS: float = 10.0
+_ARTIFACT_AMPLITUDE_FRAC: float = 0.40  # R sample vs the local median beat's
+_ARTIFACT_REF_BEATS: int = 32           # whatever N: N must not move the rule
+_ARTIFACT_REF_STEP: int = 8             # one reference beat per so many beats
+_ARTIFACT_LEVEL_BEATS: int = 65         # beats of the local residual level
+
+
+def normalize_ensemble_beats(value: object, default: int = 1) -> int:
+    """The N of ``analyse_intervals`` from any input: 0 and 1 both mean per
+    beat (returned as 1); unreadable values give *default*."""
+    try:
+        n = int(float(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return min(max(n, 1), ENSEMBLE_BEATS_MAX)
+
+
+def _nan_median_rows(block: "np.ndarray") -> "np.ndarray":
+    """Median of each column ignoring NaN: faster than np.nanmedian on the
+    small blocks delineation asks for tens of thousands of times."""
+    s = np.sort(block, axis=0)            # NaN sorts last
+    k = (~np.isnan(block)).sum(axis=0)
+    c = np.arange(block.shape[1])
+    lo, hi = np.maximum((k - 1) // 2, 0), np.maximum(k // 2, 0)
+    return 0.5 * (s[lo, c].astype(float) + s[hi, c].astype(float))
+
+
+def _timing_outliers(rpeaks: "np.ndarray", fs: float) -> "np.ndarray":
+    """For every peak of the SORTED *rpeaks*: is it premature, the beat ending
+    a long interval, or the beat right after a premature one? Against the
+    median RR around it, so a slow rate change is not an outlier."""
+    out = np.zeros(len(rpeaks), dtype=bool)
+    if len(rpeaks) < 3:
+        return out
+    rr = np.diff(rpeaks).astype(float) / fs * 1000.0
+    local = (pd.Series(rr).rolling(_ENSEMBLE_RR_MEDIAN_BEATS, center=True, min_periods=3)
+             .median().to_numpy())
+    short = rr < _ENSEMBLE_RR_LOW * local
+    out[1:] = short | (rr > _ENSEMBLE_RR_HIGH * local)
+    out[2:] |= short[:-1]
+    return out
+
+
+def _artifact_beats(beats: "np.ndarray", usable: "np.ndarray", centre: int,
+                    qrs_half: int = 0) -> "np.ndarray":
+    """Beats unlike their neighbours, from their residual to the local median
+    beat outside the QRS (``qrs_half`` samples either side of R): RMS above
+    ``_ARTIFACT_RESIDUAL_X`` times the residual level (a noise burst), or a
+    sample above ``_ARTIFACT_SPIKE_X`` times the level of the largest samples
+    (a narrow spike the RMS of the whole window does not see); or an R sample
+    more than ``_ARTIFACT_AMPLITUDE_FRAC`` away from that beat's. The level is
+    the local one (``_ARTIFACT_LEVEL_BEATS``) but never above the recording's:
+    a burst longer than that span must not raise its own bar. *beats* has one
+    R-aligned row per beat, NaN outside its window; only *usable* beats serve
+    as references. Two passes: the second measures against references free
+    of what the first found, so an artifact burst does not condemn the clean
+    beats around it."""
+    n = len(beats)
+    flagged = np.zeros(n, dtype=bool)
+    step, half = _ARTIFACT_REF_STEP, _ARTIFACT_REF_BEATS // 2
+    off = np.ones(beats.shape[1], dtype=bool)
+    off[max(0, centre - qrs_half):centre + qrs_half + 1] = False
+
+    def _level(v: "np.ndarray", keep: "np.ndarray") -> "np.ndarray":
+        local = pd.Series(np.where(keep, v, np.nan)).rolling(
+            _ARTIFACT_LEVEL_BEATS, center=True, min_periods=5).median().to_numpy()
+        overall = float(np.median(v[keep]))
+        return np.minimum(np.where(np.isfinite(local), local, overall), overall)
+
+    for _ in range(2):
+        keep = usable & ~flagged
+        if keep.sum() < 3:
+            break
+        whole = _nan_median_rows(beats[keep])
+        resid = np.full(n, np.nan)
+        spike = np.full(n, np.nan)
+        amp = np.zeros(n)
+        for i0 in range(0, n, step):
+            i1 = min(i0 + step, n)
+            c = (i0 + i1) // 2
+            lo, hi = max(0, c - half), min(n, c + half)
+            near = lo + np.flatnonzero(keep[lo:hi])
+            ref = _nan_median_rows(beats[near]) if len(near) >= 3 else whole
+            diff = (beats[i0:i1] - ref)[:, off]
+            ok = np.isfinite(diff)
+            d2 = np.where(ok, diff * diff, 0.0)
+            resid[i0:i1] = np.sqrt(d2.sum(axis=1) / np.maximum(ok.sum(axis=1), 1))
+            spike[i0:i1] = np.sqrt(d2.max(axis=1))
+            if abs(ref[centre]) > 0:
+                amp[i0:i1] = np.abs((beats[i0:i1, centre] - ref[centre]) / ref[centre])
+        flagged = ((resid > _ARTIFACT_RESIDUAL_X * _level(resid, keep))
+                   | (spike > _ARTIFACT_SPIKE_X * _level(spike, keep))
+                   | (amp > _ARTIFACT_AMPLITUDE_FRAC))
+    return flagged
+
+
+def _ensemble_t_consensus(t_peak: "np.ndarray", t_offset: "np.ndarray",
+                          r: "np.ndarray", in_ens: "np.ndarray", half: int,
+                          reach: float) -> "tuple[np.ndarray, np.ndarray]":
+    """T peak and T end (samples) of each ensemble row (*in_ens*) replaced by
+    those of the row with the median T end (ms from its own R) among the
+    ensemble rows within *half* rows and *reach* samples of it; NaN when most
+    of them have no T end. Each pair comes from one delineation, so the T
+    peak stays before its T end. Other rows are unchanged."""
+    tp, to = t_peak.copy(), t_offset.copy()
+    rel_p, rel_o = t_peak - r, t_offset - r
+    rows = np.flatnonzero(in_ens)
+    for i in rows:
+        lo, hi = np.searchsorted(rows, [i - half, i + half + 1])
+        near = rows[lo:hi]
+        near = near[np.abs(r[near] - r[i]) <= reach]
+        have = near[np.isfinite(rel_o[near])]
+        if 2 * len(have) < len(near):
+            tp[i] = to[i] = np.nan
+            continue
+        k = have[np.argsort(rel_o[have], kind="stable")[(len(have) - 1) // 2]]
+        tp[i], to[i] = r[i] + rel_p[k], r[i] + rel_o[k]
+    return tp, to
+
+
+def ensemble_info(intervals: "Optional[pd.DataFrame]") -> "Optional[dict]":
+    """``attrs["ensemble"]`` of a frame delineated on a rolling median, None for
+    a per-beat frame (N = 1, older than this option, or an N with no row in an
+    ensemble: too few beats for it, so every row is its own beat)."""
+    info = getattr(intervals, "attrs", {}).get("ensemble") if intervals is not None else None
+    if (isinstance(info, dict) and normalize_ensemble_beats(info.get("n")) > 1
+            and int(info.get("n_ensemble", 1)) > 0):
+        return info
+    return None
+
+
+def _ensemble_unused(intervals: "Optional[pd.DataFrame]") -> int:
+    """The N asked for when no row of *intervals* had enough neighbours for
+    it (``ensemble_info`` None, every row its own beat); 0 otherwise."""
+    info = getattr(intervals, "attrs", {}).get("ensemble") if intervals is not None else None
+    if (isinstance(info, dict) and normalize_ensemble_beats(info.get("n")) > 1
+            and int(info.get("n_ensemble", 1)) == 0):
+        return normalize_ensemble_beats(info.get("n"))
+    return 0
+
+
+def ensemble_beats_used(intervals: "Optional[pd.DataFrame]") -> int:
+    """The N *intervals* were measured with; 1 for a per-beat or older frame."""
+    info = ensemble_info(intervals)
+    return normalize_ensemble_beats(info.get("n")) if info else 1
+
+
+def ensemble_short_text(intervals: "Optional[pd.DataFrame]") -> str:
+    """'rolling median of 32 beats', '' for a per-beat frame."""
+    n = ensemble_beats_used(intervals)
+    return f"rolling median of {n} beats" if n > 1 else ""
+
+
+def ensemble_window_limit(n: int, window_s: "Optional[float]") -> str:
+    """The limit to state wherever N is shown."""
+    span = (f"this {window_s:.1f} s window" if window_s is not None and np.isfinite(window_s)
+            else f"this {n}-beat window")
+    return (f"a shock or stimulus response shorter than {span} is smoothed "
+            "(not a beat-to-beat result)")
+
+
+def ensemble_disclosure(intervals: "Optional[pd.DataFrame]") -> str:
+    """How the rows of *intervals* were delineated: the "Delineation" row of
+    the exports and reports. A frame without the record is per beat: it was
+    measured before the rolling median existed."""
+    info = ensemble_info(intervals)
+    if info is None:
+        unused = _ensemble_unused(intervals)
+        if unused:
+            return (f"per beat (each row is its own beat): a rolling median of {unused} "
+                    f"beats was asked for, but no row had the {max(2, unused // _ENSEMBLE_MIN_FRACTION)} "
+                    "neighbours it needs")
+        if isinstance(getattr(intervals, "attrs", {}).get("ensemble"), dict):
+            return "per beat (each row is its own beat, N = 1)"
+        return "per beat (each row is its own beat; measured before the rolling median existed)"
+    n = int(info["n"])
+    window = info.get("window_s")
+    span = f" (≈ {float(window):.1f} s)" if window is not None else ""
+    return (f"rolling median of {n} neighbouring beats centred on each row, aligned on R{span}; "
+            f"{int(info.get('n_artifact', 0))} artifact beat(s) excluded from every ensemble, "
+            f"their rows left empty; {int(info.get('n_timing', 0))} premature, post-premature "
+            f"or post-pause row(s) report their own single beat and join no ensemble; "
+            f"{int(info.get('n_few', 0))} row(s) with too few neighbours report their own beat; "
+            + (f"T peak and T end of each row are those of the row with the median T end "
+               f"among the {int(info['t_rows'])} rows around it (which share most of their "
+               "beats), so that the T end does not flip between two candidates of the "
+               "median beat from row to row; " if int(info.get("t_rows", 0)) > 1 else "")
+            + "QTc pairs each median QT with the mean preceding RR of the same ensemble "
+              "(RR_ensemble_ms), RR_ms stays the row's own; "
+            + ensemble_window_limit(n, window)
+            + f"; the AV-delay check reads this PR and, neighbouring rows sharing most of "
+              f"their beats, only reports a run of at least {n} rows, so a shorter episode "
+              "is missed")
+
+
+def ensemble_hint_text(n: int, median_rr_ms: "Optional[float]",
+                       intervals: "Optional[pd.DataFrame]" = None) -> str:
+    """What the N control of the Morphology & Intervals tab means at its current
+    value, with what the measure on screen excluded when it used that value."""
+    if n <= 1:
+        return ("Per beat: each row is its own beat (P is often at noise level on a "
+                "single beat). The spread is beat-to-beat.")
+    window = (n * float(median_rr_ms) / 1000.0
+              if median_rr_ms is not None and np.isfinite(median_rr_ms) else None)
+    span = f" (≈ {window:.1f} s)" if window is not None else ""
+    limit = ensemble_window_limit(n, window)
+    txt = (f"Each row is the median of {n} neighbouring beats{span}: {limit}. "
+           "IQR is the spread of the smoothed values across rows, not beat-to-beat.")
+    info = ensemble_info(intervals)
+    if info is not None and int(info["n"]) == n:
+        txt += (f" {int(info.get('n_artifact', 0))} artifact beat(s) excluded, "
+                f"{int(info.get('n_timing', 0))} premature / post-premature row(s) "
+                "report their own beat.")
+    elif _ensemble_unused(intervals) == n:
+        txt += (f" The measure on screen had too few beats for it (each row needs "
+                f"{max(2, n // _ENSEMBLE_MIN_FRACTION)} neighbours): every row is its own beat.")
+    return txt
 
 
 def qt_beat_variability(qt_ms: "np.ndarray") -> dict:
@@ -2131,11 +2400,20 @@ def interval_disclosure_rows(intervals: "Optional[pd.DataFrame]") -> "list[tuple
     Prism notes and the Summary report. Empty without QT data."""
     if intervals is None or intervals.empty or "QT_ms" not in intervals.columns:
         return []
-    rows = [("Interval definitions", interval_definitions_text(intervals))]
-    qt = pd.to_numeric(intervals["QT_ms"], errors="coerce").to_numpy(dtype=float)
-    rows.append(("QT variability",
-                 f"{qt_variability_text(qt_beat_variability(qt))} — "
-                 f"{QT_VARIABILITY_LABEL[0].lower()}{QT_VARIABILITY_LABEL[1:]}"))
+    rows = [("Interval definitions", interval_definitions_text(intervals)),
+            ("Delineation", ensemble_disclosure(intervals))]
+    n_ens = ensemble_beats_used(intervals)
+    if n_ens > 1:
+        # The spread of a rolling median says nothing beat to beat: withheld.
+        rows.append(("QT variability",
+                     f"not reported — each row is a rolling median of {n_ens} beats, so "
+                     "the spread of QT across rows is not beat-to-beat (measure with "
+                     "N = 1 for that)"))
+    else:
+        qt = pd.to_numeric(intervals["QT_ms"], errors="coerce").to_numpy(dtype=float)
+        rows.append(("QT variability",
+                     f"{qt_variability_text(qt_beat_variability(qt))} — "
+                     f"{QT_VARIABILITY_LABEL[0].lower()}{QT_VARIABILITY_LABEL[1:]}"))
     rows.append(("Wave template", wave_template_disclosure(intervals)))
     bw = beat_window_text(intervals.attrs.get("beat_window"))
     if bw:
@@ -2162,10 +2440,12 @@ def qtc_rr_column(intervals: "Optional[pd.DataFrame]") -> str:
     """Name of the RR column each ``QTc_ms`` was corrected with: ``RR_ms``
     (the preceding RR) for current frames, ``RR_prev_ms`` for a legacy
     frame re-paired by ``recompute_qtc_column`` (its ``RR_ms`` is the
-    FOLLOWING RR) -- what a QTc-vs-RR plot or a reader recomputing QTc
-    must use."""
+    FOLLOWING RR), ``RR_ensemble_ms`` for a rolling-median frame -- what a
+    QTc-vs-RR plot or a reader recomputing QTc must use."""
     if intervals is not None and "RR_prev_ms" in intervals.columns:
         return "RR_prev_ms"
+    if intervals is not None and "RR_ensemble_ms" in intervals.columns:
+        return "RR_ensemble_ms"
     return "RR_ms"
 
 
@@ -2182,7 +2462,8 @@ def recompute_qtc_column(intervals: "pd.DataFrame", formula: str) -> "pd.DataFra
     ``qtc_rr_column``; ``RR_ms`` itself is left as stored, so this stays
     idempotent); without ``R_peak_s`` the preceding RR cannot be recovered
     and its QTc (and ``RR_prev_ms``) is NaN rather than paired with the
-    following RR (``interval_definitions_text`` says so). Frames without
+    following RR (``interval_definitions_text`` says so). A rolling-median
+    frame keeps its pairing, ``RR_ensemble_ms``. Frames without
     both columns (e.g. the early-return ``{"RR_ms": ...}`` shape) come
     back unchanged.
     """
@@ -2195,7 +2476,8 @@ def recompute_qtc_column(intervals: "pd.DataFrame", formula: str) -> "pd.DataFra
     elif legacy:
         rr = np.full(len(intervals), np.nan)
     else:
-        rr = pd.to_numeric(intervals["RR_ms"], errors="coerce").to_numpy(dtype=float)
+        rr = pd.to_numeric(intervals[qtc_rr_column(intervals)],
+                           errors="coerce").to_numpy(dtype=float)
     out = intervals.copy()
     if legacy:
         out["RR_prev_ms"] = rr
@@ -2217,6 +2499,7 @@ def analyse_intervals(
     qtc_formula:       str  = "mitchell",
     rr_min_ms:         float = MouseECG.RR_MIN_MS,
     rr_max_ms:         float = MouseECG.RR_MAX_MS,
+    ensemble_beats:    int = 1,
 ) -> "pd.DataFrame":
     """Template-guided per-beat ECG interval delineation.  No NeuroKit2.
 
@@ -2244,6 +2527,23 @@ def analyse_intervals(
         interval is valid under the defaults). ``RR_ms`` -- hence QTc -- is
         NaN outside them; a neighbour closer than *rr_min_ms* does not size
         the beat window (``beat_window_sides``).
+    ensemble_beats : N. 0 or 1 delineates each beat on itself. Above 1 each row
+        is delineated on the sample-wise median of N neighbouring beats centred
+        on it and aligned on R (each neighbour within its own beat window), with
+        these rules:
+
+        - an artifact beat (``_artifact_beats``) joins no ensemble and its row is
+          left empty: neighbours say nothing about a beat that cannot be read;
+        - a premature beat, the beat after it and the beat ending a long
+          interval (``_timing_outliers``) join no ensemble and report their OWN
+          single-beat delineation: their morphology and timing are exactly what
+          the neighbours would hide, so they are never painted with it;
+        - a row left with fewer than N // 4 neighbours reports its own beat too;
+        - QTc pairs the median QT with the mean preceding RR of the beats in
+          the ensemble (``RR_ensemble_ms``), not the row's own RR (kept in
+          ``RR_ms``): that QT comes from those beats, each after its own
+          preceding RR, and pairing it with a single RR would turn that RR's
+          beat-to-beat fluctuation into a false QTc variation against RR.
 
     Returns
     -------
@@ -2256,6 +2556,10 @@ def analyse_intervals(
     ``INTERVAL_DEFINITIONS``. ``df.attrs["wave_template"]`` is the template
     used (``WaveTemplate.to_dict``) and ``df.attrs["beat_window"]`` the
     per-beat window sizes, both disclosed by ``interval_disclosure_rows``.
+    ``df.attrs["ensemble"]`` records N, the window in seconds and the rows
+    excluded or reporting themselves; above N = 1 the frame also has
+    ``RR_ensemble_ms`` and ``ensemble_n`` (beats in the row's median: 1 = its
+    own beat, 0 = left empty as an artifact). All other columns are unchanged.
     """
     if max_beats and max_beats > 0:
         log.debug("analyse_intervals: max_beats=%d is no longer used (all beats processed)",
@@ -2321,6 +2625,28 @@ def analyse_intervals(
     # peak closer than rr_min_ms is not one) tells the T search where that is.
     i_next  = np.searchsorted(rpeaks_all, valid_rp + int(np.ceil(gap_min)), side="left")
 
+    # ── Rolling median (ensemble_beats > 1): who may join whose ensemble ──
+    n_ens = normalize_ensemble_beats(ensemble_beats)
+    ens_on = n_ens > 1
+    if ens_on:
+        _prog(7, f"Screening beats for the rolling median of {n_ens}…")
+        # float32: long recordings at a high rate would not fit otherwise.
+        beats_m = np.full((n_valid, 2 * fixed_hw), np.nan, dtype=np.float32)
+        for i in range(n_valid):
+            r0, lo, hi = int(valid_rp[i]), int(pre_v[i]), int(post_v[i])
+            beats_m[i, fixed_hw - lo:fixed_hw + hi] = cleaned[r0 - lo:r0 + hi]
+        ens_own = _timing_outliers(rpeaks_all, fs)[pos_v]
+        ens_artifact = _artifact_beats(beats_m, ~ens_own, fixed_hw,
+                                       int(round(_ARTIFACT_QRS_MS / 1000.0 * fs))) & ~ens_own
+        ens_joins = ~ens_own & ~ens_artifact
+        ens_min = max(2, n_ens // _ENSEMBLE_MIN_FRACTION)
+        # Beat indices can hide a gap in time (a stretch without peaks).
+        rr_med = float(np.median(np.diff(rpeaks_all)))
+        ens_reach = n_ens * rr_med
+        ens_n = np.ones(n_valid, dtype=int)
+        ens_n[ens_artifact] = 0
+        ens_members: "list[Optional[np.ndarray]]" = [None] * n_valid
+
     tick = max(1, n_valid // 20)
     for i in range(n_valid):
         r0 = int(valid_rp[i])
@@ -2332,7 +2658,22 @@ def analyse_intervals(
             p_from = (t_peak[i - 1] - r0) / fs * 1000
         next_r = ((rpeaks_all[i_next[i]] - r0) / fs * 1000
                   if i_next[i] < len(rpeaks_all) else None)
-        det = detect_waves_on_beat(cleaned[r0 - lo:r0 + hi].astype(float), bt_ms,
+        beat = None
+        if ens_on:
+            if ens_artifact[i]:
+                continue
+            if ens_joins[i]:
+                j0, j1 = max(0, i - n_ens // 2), min(n_valid, i + n_ens - n_ens // 2)
+                members = j0 + np.flatnonzero(
+                    ens_joins[j0:j1] & (np.abs(valid_rp[j0:j1] - r0) <= ens_reach))
+                if len(members) >= ens_min:
+                    beat = _nan_median_rows(
+                        beats_m[members, fixed_hw - lo:fixed_hw + hi])
+                    ens_n[i] = len(members)
+                    ens_members[i] = members
+        if beat is None:
+            beat = cleaned[r0 - lo:r0 + hi].astype(float)
+        det = detect_waves_on_beat(beat, bt_ms,
                                    wave_template, p_search_from_ms=p_from,
                                    next_r_ms=next_r)
 
@@ -2352,6 +2693,17 @@ def analyse_intervals(
         if (i + 1) % tick == 0:
             _prog(10 + int(72 * (i + 1) / n_valid),
                   f"Detecting landmarks… {i + 1}/{n_valid}")
+
+    # T peak / T end of the ensemble rows: the row's within its neighbours.
+    t_rows = 0
+    if ens_on:
+        t_half = n_ens // _ENSEMBLE_T_ROWS_FRACTION
+        if t_half >= 1:
+            t_rows = 2 * t_half + 1
+            t_peak, t_offset = _ensemble_t_consensus(
+                t_peak, t_offset, valid_rp.astype(float),
+                np.array([m is not None for m in ens_members]), t_half,
+                t_half * rr_med * (1.0 + _ENSEMBLE_RR_HIGH))
 
     _prog(82, "Computing intervals…")
 
@@ -2395,8 +2747,17 @@ def analyse_intervals(
 
     # QTc pairs each QT with its PRECEDING (floored) RR — mirrored by
     # recompute_qtc_column. No absolute QTc clamp: QT and RR are
-    # bounds-checked just above (see compute_qtc).
-    qtc_clean = compute_qtc(qt_clean, np.clip(rr_clean, MouseECG.RR_MIN_MS, None),
+    # bounds-checked just above (see compute_qtc). A median QT comes from all
+    # the beats of its ensemble: it takes the mean of THEIR preceding RRs.
+    rr_qtc = rr_clean
+    if ens_on:
+        rr_qtc = rr_clean.copy()
+        for i, members in enumerate(ens_members):
+            if members is not None:
+                rr_m = rr_clean[members]
+                rr_m = rr_m[np.isfinite(rr_m)]
+                rr_qtc[i] = float(rr_m.mean()) if len(rr_m) else np.nan
+    qtc_clean = compute_qtc(qt_clean, np.clip(rr_qtc, MouseECG.RR_MIN_MS, None),
                             qtc_formula)
 
     # ── DataFrame ────────────────────────────────────────────────────────
@@ -2443,6 +2804,10 @@ def analyse_intervals(
     df.loc[df[["PR_ms", "QRS_ms", "QT_ms"]].isna().all(axis=1),
            ["QRS_onset_s", "QRS_onset_ms"]] = np.nan
 
+    if ens_on:
+        df["RR_ensemble_ms"] = rr_qtc
+        df["ensemble_n"] = ens_n
+
     n_complete = int((~df[["PR_ms","QRS_ms","QT_ms"]].isna().any(axis=1)).sum())
     log.info("analyse_intervals: %d beats, %d complete (%.0f%%)",
              n, n_complete, 100.0 * n_complete / max(n, 1))
@@ -2467,6 +2832,26 @@ def analyse_intervals(
         "min_pre_ms":   round(float(pre_v.min())  / fs * 1000, 1),
         "min_post_ms":  round(float(post_v.min()) / fs * 1000, 1),
     }
+
+    # How the rows were delineated (disclosed by interval_disclosure_rows).
+    if ens_on:
+        in_ens = ens_n[ens_n > 1]
+        df.attrs["ensemble"] = {
+            "n":          n_ens,
+            "statistic":  "median",
+            "window_s":   round(n_ens * rr_med / fs, 2),
+            "n_rows":     int(n),
+            "n_ensemble": int(len(in_ens)),
+            "n_artifact": int(ens_artifact.sum()),
+            "n_timing":   int(ens_own.sum()),
+            "n_few":      int(((ens_n == 1) & ens_joins).sum()),
+            "members_min":    int(in_ens.min()) if len(in_ens) else 0,
+            "members_median": float(np.median(in_ens)) if len(in_ens) else 0.0,
+            "qtc_rr":     "mean preceding RR of the ensemble",
+            "t_rows":     t_rows,
+        }
+    else:
+        df.attrs["ensemble"] = {"n": 1}
 
     _prog(100, f"Done — {n_complete}/{n} complete beats")
     return df

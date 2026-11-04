@@ -29,7 +29,7 @@ import pandas as pd
 from ecg.core.analysis import (
     HR_RANGE_PCTL, _NL_ENTROPY_PREFIXES, analysed_duration_s, hrv_freq_is_legacy,
     hrv_freq_withheld_reason, intervals_use_legacy_definitions, mean_hr_bpm,
-    noisy_time_pct, nonlinear_subset_text, qt_beat_variability,
+    ensemble_short_text, noisy_time_pct, nonlinear_subset_text, qt_beat_variability,
     rr_asymmetry_indices, rr_exclusion_report, rr_valid_mask,
     successive_valid_pairs, LEGACY_SPECTRAL_TEXT,
 )
@@ -378,6 +378,11 @@ def interval_rows(ivl: "Optional[pd.DataFrame]") -> "list[MetricRow]":
     rows = []
     n_ok, total = intervals_measured(ivl)
     both = f"{n_ok} of {total} beats measured on PR, QRS and QT together"
+    # A rolling median: the spread across rows is not across beats.
+    smoothed = ensemble_short_text(ivl)
+    across = "across rows" if smoothed else "across beats"
+    if smoothed:
+        both += f"; each row is a {smoothed}"
     legacy = "legacy definitions: re-run Intervals" if intervals_use_legacy_definitions(ivl) else ""
     if any(c in ivl.columns for c in _MEASURED_COLUMNS):
         rows.append(MetricRow("intervals.beats_measured", "intervals", "Intervals",
@@ -393,15 +398,15 @@ def interval_rows(ivl: "Optional[pd.DataFrame]") -> "list[MetricRow]":
                               float(d.median()) if n else float("nan"), "ms", n, total,
                               text, decimals=1, note=legacy))
         rows.append(MetricRow(f"intervals.{col}.sd", "intervals", "Intervals",
-                              f"{label} SD across beats",
+                              f"{label} SD {across}",
                               float(d.std()) if n else float("nan"), "ms", n, total,
                               text, tier=TIER_ALL, decimals=1))
         for name, q in (("q1", 25), ("q3", 75)):
             rows.append(MetricRow(f"intervals.{col}.{name}", "intervals", "Intervals",
-                                  f"{label} {name.upper()} across beats",
+                                  f"{label} {name.upper()} {across}",
                                   float(np.percentile(d, q)) if n else float("nan"), "ms", n, total,
                                   text, tier=TIER_ALL, decimals=1))
-    if "QT_ms" in ivl.columns:
+    if "QT_ms" in ivl.columns and not smoothed:
         q = qt_beat_variability(ivl["QT_ms"].to_numpy(dtype=float))
         rows.append(MetricRow("intervals.QT_iqr", "intervals", "Intervals",
                               "QT IQR (beat-to-beat)", q["iqr_ms"], "ms", q["n"], total,

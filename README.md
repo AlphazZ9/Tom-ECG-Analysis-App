@@ -200,6 +200,21 @@ and *Intervals* are Morphology & Intervals, *Abnormal Events* is Events.
   their QTc is re-paired with the preceding RR, or left empty — and stated
   as such — when the frame has no R-peak times) until Intervals is re-run.
   The AV-delay check of Abnormal events uses this PR.
+- **Rolling median of beats (N = 32 by default, adjustable).** At the noise of
+  anaesthetised-mouse recordings P sits at single-beat noise level, so each row
+  is delineated on the median of N neighbouring beats centred on it and aligned
+  on R; 0 or 1 reproduces per-beat values exactly. Artifact beats join no ensemble
+  and their rows stay empty (a noise burst or a narrow spike outside the QRS
+  counts); a smoothed row takes the T end of the median one among the N / 2 + 1
+  rows around it, so it does not flip between two candidates; a premature beat, the beat after it and a beat after a
+  pause report their own single beat. QTc pairs the median QT with the mean
+  preceding RR of the ensemble (`RR_ensemble_ms`). A shock or stimulus response
+  shorter than the window is smoothed. Under smoothing beat-to-beat QT variability
+  is withheld and an AV-delay run must last at least N rows. Reports state N, the
+  window in seconds and the exclusions; old sessions stay per beat. On the two
+  Experiment 13 recordings: PR measured 2 → 100 % (248) and 70 → 69 % (247), QT IQR
+  38–76 → 38–49 ms (248) and 38–50 → 39–41 ms (247); on 247 the missing PR is where
+  the P of the median beat itself falls below the detector's threshold.
 - **Wave template per recording.** The landmark search windows used for a
   recording are that recording's own template: the saved default template
   (or the built-in mouse defaults) until you change it in **Landmarks**

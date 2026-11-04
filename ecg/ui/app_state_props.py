@@ -130,6 +130,7 @@ class StateProps:
         self.ent_sg_window_ms:  "Optional[ctk.CTkEntry]"     = None
         self._sg_frame:         "Optional[ctk.CTkFrame]"     = None
         self.cb_qtc_formula:    "Optional[ctk.CTkComboBox]"  = None
+        self.ent_ensemble:      "Optional[ctk.CTkEntry]"     = None
         self.cb_freq_band:      "Optional[ctk.CTkComboBox]"  = None   # HRV band preset
         self.lbl_ml_status:     "Optional[ctk.CTkLabel]"     = None
         self.lbl_ml_inline_status: "Optional[ctk.CTkLabel]"  = None   # ML status mirrored next to the Method combobox

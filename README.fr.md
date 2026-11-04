@@ -167,6 +167,24 @@ est devenu Sliding, *Beat Template* et *Intervals* sont Morphology & Intervals,
   - **QRS** = début du QRS → fin du QRS (point J) ;
   - **QT** = début du QRS → fin de T ;
   - **QTc** = QT corrigé avec le RR **précédent** (R précédent → ce R).
+- **Médiane glissante de battements (N = 32 par défaut, réglable).** Au bruit des
+  enregistrements de souris anesthésiée, l'onde P est au niveau du bruit d'un seul
+  battement : chaque ligne est donc délinéée sur la médiane de N battements voisins
+  centrés sur elle et alignés sur R ; 0 ou 1 redonne exactement les valeurs par
+  battement. Les battements artefactés n'entrent dans aucun ensemble et leur ligne
+  reste vide (une bouffée de bruit ou un pic étroit hors du QRS comptent) ; une
+  ligne lissée prend la fin de T médiane des N / 2 + 1 lignes qui l'entourent, pour
+  qu'elle ne bascule pas entre deux candidats ; un battement prématuré, celui qui le suit et un battement après une
+  pause rapportent leur propre battement. Le QTc associe le QT médian au RR précédent
+  moyen de l'ensemble (`RR_ensemble_ms`). Une réponse à un choc ou un stimulus plus
+  courte que la fenêtre est lissée. Sous lissage, la variabilité du QT battement à
+  battement n'est pas rapportée et une séquence de retard AV doit durer au moins N
+  lignes. Les rapports indiquent N, la fenêtre en secondes et les exclusions ; les
+  anciennes sessions restent par battement. Sur les deux enregistrements de
+  l'expérience 13 : PR mesuré 2 → 100 % (248) et 70 → 69 % (247), IQR du QT
+  38–76 → 38–49 ms (248) et 38–50 → 39–41 ms (247) ; sur 247, le PR manquant
+  correspond aux passages où l'onde P du battement médian passe elle-même sous le
+  seuil du détecteur.
 
   Le début du QRS est le premier écart à la ligne de base du segment PR
   (début de l'onde Q, ou montée de R en l'absence de Q) ; le point J est le

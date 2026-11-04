@@ -551,6 +551,65 @@ intervals with the standard definitions:
 - **QT** = QRS onset → T end;
 - **QTc** = QT corrected with the **preceding** RR (previous R → this R).
 
+**Rolling median (beats), N = 32 by default.** On anaesthetised-mouse recordings
+the P wave sits at single-beat noise level (P 0.2–0.25 for a noise SD of 0.22 and
+an R of 7.3 on the Experiment 13 recordings), so a beat measured on itself mostly
+has no PR and a noisy QT. Each row is therefore delineated on the sample-wise
+median of N neighbouring beats centred on it and aligned on R; the N control next
+to the QTc formula sets it, **0 or 1 measures every beat on itself** (the values of
+earlier versions, exactly). N is saved with the session and stated in every report.
+
+- **What it costs.** The rows are smoothed over the window, shown next to the
+  control in seconds (N × the median RR). **A shock or stimulus response shorter
+  than this window is smoothed**: to read one, lower N, or measure with N = 1 where
+  the waves allow it. An episode shorter than about N / 2 beats disappears.
+- **Artifacts.** The residual of each beat to the local median beat is read outside
+  the QRS (± 10 ms around R). A beat whose residual RMS exceeds 5 × the residual
+  level, whose largest residual sample exceeds 15 × the level of those samples (a
+  narrow spike, e.g. on the P wave), or whose R sample is more than 40 % away from
+  the median beat's, joins no ensemble and its row is left empty: the neighbours say
+  nothing about a beat that cannot be read. The level is the local one but never
+  above the recording's, so a long noise burst does not raise its own bar (on 248, a
+  burst of noise SD 0.7, 10 % of R, is excluded whether it lasts 1 s or 10 s). The
+  count is reported. An artifact long enough to reach the neighbouring beats'
+  windows condemns them too.
+- **T end.** The T wave of the median beat is only a few times its noise, so its
+  trailing-edge line can land on either of two candidates from one row to the next
+  although the two medians share all but one beat. Each smoothed row therefore takes
+  the T peak and T end of the row with the median T end among the N / 2 + 1 rows
+  around it (which share at least 3/4 of their beats). On 248 this takes the
+  neighbouring rows whose QT differs by more than 5 ms from 26 % to 3 %. A row
+  reporting its own beat keeps its own T.
+- **Premature beats.** A beat whose preceding RR is under 70 % of the local median
+  RR, the beat after it, and a beat ending an interval over 130 % of it join no
+  ensemble and report **their own single-beat delineation**, never their
+  neighbours' morphology (so they may have no PR). Their rows have `ensemble_n` = 1.
+  A row left with fewer than N / 4 usable neighbours also reports itself. When no
+  row has them (N far above the beats measured), every row is its own beat and the
+  frame is labelled and reported per beat.
+- **QTc.** A median QT comes from all the beats of its ensemble, each after its own
+  preceding RR, so it is corrected with the **mean preceding RR of those beats**
+  (`RR_ensemble_ms`); `RR_ms` stays the row's own. Pairing it with the row's single
+  RR would turn that RR's beat-to-beat fluctuation into a false variation of QTc
+  against RR. Beats alone keep the plain definition above. On the two Experiment 13
+  recordings the choice moves the median QTc by less than 0.1 ms.
+- **What changes in meaning.** The IQR and the distribution plots show the spread of
+  smoothed values, narrower than the single-beat spread. **Beat-to-beat QT
+  variability is not reported** (measure with N = 1 for it). The QTc–RR panel is
+  plotted against the ensemble RR, and its points are not independent beats. The
+  **AV-delay check** of Events reads this PR, and only a run of at least N rows
+  counts: neighbouring rows share most of their beats, so one delineation error
+  would otherwise read as sustained (on the Footshocks recording, three false runs of
+  10–16 rows at PR ~60 ms where the single beats read 48).
+- **Old sessions** restore unchanged and labelled per beat; the N in the control
+  stays as it was (N applies to every recording of the run), so with N above 1 their
+  intervals show as out of date until you measure again. Changing N has the same
+  effect on any measure, as soon as it is typed.
+
+The `ensemble_n` column gives the beats behind each row (1 = its own beat, 0 = left
+empty as an artifact). The landmark columns of a smoothed row are read on its median
+beat, placed relative to its own R.
+
 QRS onset is the first departure from the PR-segment baseline (Q-wave onset,
 or the R upstroke when there is no Q); the J point is where the S wave returns
 to that baseline. The mouse J wave that follows is early repolarisation
@@ -626,8 +685,8 @@ it as the default; a default written that way ("auto-updated") is ignored in
 favour of the built-in defaults, and intervals computed by those versions show
 "Wave template: not recorded".
 
-Under the QT violin, **beat-to-beat IQR · range** is the spread of QT across
-the beats of this single lead. It is **not** classical QT dispersion (an
+Under the QT violin, with N = 1, **beat-to-beat IQR · range** is the spread of QT
+across the beats of this single lead. It is **not** classical QT dispersion (an
 inter-lead measure of one beat) — earlier versions called it "dispersion";
 report the IQR, as the range is dominated by delineation outliers. The
 text report, the Excel Cover sheet and the Prism notes carry the same
@@ -816,7 +875,9 @@ Prism project notes and the PDF footer:
   intervals around a removed beat, say so and ask for a re-run.
 - **QTc formula**: the formula actually used (Mitchell, Bazett or
   Fridericia), with the preceding RR.
-- **Interval definitions**, beat-to-beat **QT variability** and the
+- **Interval definitions**, **Delineation** (per beat or rolling median: N, window
+  in seconds, exclusions, QTc pairing, limits), beat-to-beat **QT variability**
+  (not reported under a rolling median) and the
   **Wave template** used.
 
 The **RR-asymmetry** block uses the successive valid ΔRR (never across an

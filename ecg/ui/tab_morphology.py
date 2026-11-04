@@ -13,7 +13,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 import customtkinter as ctk  # type: ignore[import-untyped]
-from ecg.core.analysis import INTERVAL_DEFINITIONS
+import numpy as np
+from ecg.core.analysis import (
+    ENSEMBLE_BEATS_DEFAULT, INTERVAL_DEFINITIONS, ensemble_hint_text, ensemble_short_text,
+)
 from ecg.core.metric_table import (
     INTERVAL_COLUMNS, MISSING, MetricTable, interval_rows, intervals_measured,
 )
@@ -95,7 +98,9 @@ def measured_headline(ivl: Any) -> "tuple[str, str]":
     n_ok, total = intervals_measured(ivl)
     pct = 100.0 * n_ok / total if total else 0.0
     tier = "good" if pct >= 90 else "partial" if pct >= 50 else "low"
-    return f"{n_ok}/{total} beats measured ({pct:.0f}%) on PR, QRS and QT", tier
+    smoothed = ensemble_short_text(ivl)
+    tail = f" · {smoothed}" if smoothed else ""
+    return f"{n_ok}/{total} beats measured ({pct:.0f}%) on PR, QRS and QT{tail}", tier
 
 
 def interval_lines(ivl: Any) -> "list[IntervalLine]":
@@ -300,6 +305,27 @@ class TabMorphologyMixin:
         self.cb_qtc_formula.set(QTC_FORMULA_LABELS[normalize_qtc_formula(
             getattr(getattr(self, "analysis", None), "qtc_formula", "mitchell"))])
         self.cb_qtc_formula.pack(side="left")
+        ctk.CTkLabel(bar, text="Rolling median (beats)", font=FONT_SMALL,
+                     text_color=MUTED).pack(side="left", padx=(SPACE_L, SPACE_S))
+        # As the formula: the value lives in app state, a rebuild keeps it.
+        ens_var = ctk.StringVar(master=bar, value=str(getattr(
+            getattr(self, "analysis", None), "ensemble_beats", ENSEMBLE_BEATS_DEFAULT)))
+        self.ent_ensemble = ctk.CTkEntry(bar, width=int(52 * THEME.font_scale), height=28,
+                                         font=FONT_LABEL, fg_color=BG, border_color=BORDER2,
+                                         text_color=TEXT, textvariable=ens_var)
+        self.ent_ensemble.pack(side="left")
+        self.ent_ensemble.bind("<Return>", self._on_ensemble_change)
+        self.ent_ensemble.bind("<FocusOut>", self._on_ensemble_change)
+        # A click on a button does not take the focus (no FocusOut), and
+        # Measure and the session save read the field: each edit counts.
+        ens_var.trace_add("write", self._on_ensemble_typed)
+        self._bind_hover_tip(
+            self.ent_ensemble,
+            "N: each row is delineated on the median of N neighbouring beats centred on "
+            "it, aligned on R, because P is often at noise level on a single beat. 0 or 1 "
+            "measures each beat on itself. Artifacts join no ensemble; premature beats and "
+            "the beat after them report themselves. A shock or stimulus response shorter "
+            "than the window is smoothed. Applied at the next Measure intervals.")
 
         bar2 = ctk.CTkFrame(col, fg_color="transparent")
         bar2.grid(row=1, column=0, sticky="ew", pady=(SPACE_S, 0))
@@ -326,7 +352,8 @@ class TabMorphologyMixin:
 
         # What every median below rests on, as large as they are.
         self.lbl_ivl_measured = ctk.CTkLabel(
-            col, text="", font=FONT_SECTION_HDR, text_color=MUTED, anchor="w")
+            col, text="", font=FONT_SECTION_HDR, text_color=MUTED, anchor="w", justify="left",
+            wraplength=int(420 * THEME.font_scale))
         self.lbl_ivl_measured.grid(row=2, column=0, sticky="ew", pady=(SPACE_S, 0))
         self.lbl_ivl_status = ctk.CTkLabel(
             col, text="  Click Analyze first", font=FONT_SMALL, text_color=MUTED,
@@ -337,9 +364,14 @@ class TabMorphologyMixin:
             wraplength=int(420 * THEME.font_scale))
         self.lbl_ivl_stale.grid(row=4, column=0, sticky="ew")
         self.lbl_ivl_stale.grid_remove()
+        self.lbl_ivl_ensemble = ctk.CTkLabel(
+            col, text="", font=FONT_HINT, text_color=MUTED, anchor="w", justify="left",
+            wraplength=int(420 * THEME.font_scale))
+        self.lbl_ivl_ensemble.grid(row=5, column=0, sticky="ew")
+        self._ensemble_hint_key: Any = None
 
         tbl = ctk.CTkFrame(col, fg_color=CARD, corner_radius=6, border_width=1, border_color=BORDER)
-        tbl.grid(row=5, column=0, sticky="ew", pady=(SPACE_S, 0))
+        tbl.grid(row=6, column=0, sticky="ew", pady=(SPACE_S, 0))
         tbl.grid_columnconfigure(0, weight=1)
         for c, px in ((1, 70), (2, 84), (3, 118)):
             tbl.grid_columnconfigure(c, minsize=int(px * THEME.font_scale))
@@ -370,15 +402,15 @@ class TabMorphologyMixin:
                                "the rate dependence",
                      font=FONT_HINT, text_color=MUTED, anchor="w", justify="left",
                      wraplength=int(420 * THEME.font_scale),
-                     ).grid(row=6, column=0, sticky="ew", pady=(SPACE_S, 0))
+                     ).grid(row=7, column=0, sticky="ew", pady=(SPACE_S, 0))
         holder = ctk.CTkFrame(col, fg_color=PANEL, corner_radius=0,
                               height=int(170 * THEME.font_scale))
-        holder.grid(row=7, column=0, sticky="ew")
+        holder.grid(row=8, column=0, sticky="ew")
         holder.pack_propagate(False)
         self._slots["qtc_rr"] = CanvasSlot(holder, 5, 1.7, toolbar=False,
                                            placeholder="Click Measure intervals to display")
         self.lbl_qtc_rr = ctk.CTkLabel(col, text="", font=FONT_HINT, text_color=MUTED, anchor="w")
-        self.lbl_qtc_rr.grid(row=8, column=0, sticky="ew")
+        self.lbl_qtc_rr.grid(row=9, column=0, sticky="ew")
 
     def _build_morph_distributions(self: ECGApp, page, row: int) -> None:
         """The violins and the amplitude / correlation histograms, closed until
@@ -442,6 +474,7 @@ class TabMorphologyMixin:
         if ivl is not self._ivl_shown:
             self._ivl_shown = ivl
             self._show_interval_table(ivl)
+        self._refresh_ensemble_hint(r, ivl)
         banner = stale_banner_text("Intervals", ivl_status,
                                    self.ui.module_computed_at.get("intervals"),
                                    self.ui.peaks_edited_at,
@@ -452,6 +485,33 @@ class TabMorphologyMixin:
                 self.lbl_ivl_stale.grid()
             else:
                 self.lbl_ivl_stale.grid_remove()
+
+    def _on_ensemble_change(self: ECGApp, _event: Any = None) -> None:
+        """Keep the N typed (or the last valid one), and say what it means."""
+        n = self.analysis_ctrl.ensemble_beats()
+        if self.ent_ensemble.get() != str(n):
+            self.ent_ensemble.delete(0, "end")
+            self.ent_ensemble.insert(0, str(n))
+        self._refresh_morphology()
+
+    def _on_ensemble_typed(self: ECGApp, *_args: Any) -> None:
+        """A valid N in the field is the N at once: state, hint and stale line
+        follow it as it is typed. The field itself is only rewritten on Return
+        or when it loses the focus (an empty field keeps the last valid N)."""
+        before = self.analysis.ensemble_beats
+        if self.analysis_ctrl.ensemble_beats() != before:
+            self._refresh_morphology()
+
+    def _refresh_ensemble_hint(self: ECGApp, r: dict, ivl: Any) -> None:
+        """The hint under the status line, when N or what it rests on changed."""
+        rr = r.get("rr_ms")
+        n = self.analysis.ensemble_beats
+        key = (n, id(rr), id(ivl))
+        if key == self._ensemble_hint_key:
+            return
+        self._ensemble_hint_key = key
+        median_rr = float(np.median(rr)) if rr is not None and len(rr) else None
+        self.lbl_ivl_ensemble.configure(text=ensemble_hint_text(n, median_rr, ivl))
 
     def _show_interval_table(self: ECGApp, ivl: Any) -> None:
         text, tier = measured_headline(ivl)

@@ -18,6 +18,7 @@ from tkinter import messagebox
 import numpy as np
 import pandas as pd
 
+from ecg.core.analysis import ENSEMBLE_BEATS_DEFAULT, normalize_ensemble_beats
 from ecg.core.models import FilterParams, QTC_FORMULA_LABELS, normalize_qtc_formula
 from ecg.core.analysis import (
     mean_hr_bpm, migrate_legacy_results, rebuild_beat_corr_times,
@@ -308,6 +309,8 @@ class SessionController:
                 state.get("current_tab", "Detection"),
                 state.get("current_tab", "Detection")),
             "qtc_formula":      normalize_qtc_formula(state.get("qtc_formula", "mitchell")),
+            # None in a session saved before the rolling median.
+            "ensemble_beats":   state.get("ensemble_beats"),
             # None when the session names no mode: the current one stays. An
             # older session may hold the two values this replaced.
             "time_course_mode": time_course_mode(state.get("time_course_mode"),
@@ -326,6 +329,21 @@ class SessionController:
             # The recording's own wave template (with its provenance).
             "wave_template":    wave_template_from_session(state),
         }
+
+    def _restore_ensemble_beats(self, saved: object) -> None:
+        """The N control after a restore: the session's N. A session older
+        than the option names none: the N in effect stays (N is app-wide, so
+        setting it to the old session's per-beat 1 measured every recording
+        loaded afterwards per beat); its per-beat intervals stay as they are,
+        labelled per beat, and out of date when that N is above 1."""
+        if saved is None:
+            return
+        n = normalize_ensemble_beats(saved, ENSEMBLE_BEATS_DEFAULT)
+        self.app.analysis.ensemble_beats = n
+        ent = getattr(self.app, "ent_ensemble", None)
+        if ent is not None:
+            ent.delete(0, "end")
+            ent.insert(0, str(n))
 
     def on_restore_session_done(self, bundle: dict, saved_at: str) -> None:
         """Write all restored state to self and to widgets — main thread only.
@@ -414,6 +432,7 @@ class SessionController:
         self.app.analysis.qtc_formula = formula
         if self.app.cb_qtc_formula is not None:
             self.app.cb_qtc_formula.set(QTC_FORMULA_LABELS[formula])
+        self._restore_ensemble_beats(bundle.get("ensemble_beats"))
         # Recompute the saved QTc from the saved QT/RR with the restored
         # formula: sessions saved before the QTc formulas were corrected hold
         # values from the old cube-root "Mitchell" (really Fridericia) or
@@ -706,6 +725,7 @@ class SessionController:
             "edit_mode":       self.app.detection.edit_mode,
             "current_tab":     self.safe_get_tab(),
             "qtc_formula":    normalize_qtc_formula(self.app._qtc_formula()),
+            "ensemble_beats": self.app.analysis_ctrl.ensemble_beats(),
             "analysis_t_start": self.app.analysis.t_start,
             "analysis_t_end":   self.app.analysis.t_end,
         }

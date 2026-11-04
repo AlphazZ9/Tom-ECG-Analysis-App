@@ -19,6 +19,7 @@ import numpy as np
 
 from ecg.core.analysis import (
     LEGACY_SPECTRAL_TEXT, analysis_provenance_rows, hrv_freq_is_legacy,
+    ensemble_short_text,
     hrv_freq_withheld_reason, intervals_use_legacy_definitions, nonlinear_subset_text,
 )
 from ecg.core.autonomic import KP_RAT_SHR, KS_RAT_SHR
@@ -340,7 +341,9 @@ def report_text(
 
     if ivl is not None and not ivl.empty and "QT_ms" in ivl.columns:
         # Definitions, QT variability and template are in PROVENANCE.
-        out += ["", title("ECG INTERVALS  (median ± SD across beats)", REPORT_INTERVALS)]
+        smoothed = ensemble_short_text(ivl)
+        out += ["", title("ECG INTERVALS  (median ± SD across rows)" if smoothed
+                          else "ECG INTERVALS  (median ± SD across beats)", REPORT_INTERVALS)]
         qtc_short = QTC_FORMULA_LABELS[normalize_qtc_formula(qtc_formula or "mitchell")]
         for col, label in [("PR_ms", "PR"), ("QRS_ms", "QRS"), ("QT_ms", "QT"),
                            ("QTc_ms", f"QTc ({qtc_short.split(' ')[0]})")]:
@@ -349,6 +352,9 @@ def report_text(
                 out.append(row(label, f"{med.value:.1f} ± "
                                       f"{t.value(f'intervals.{col}.sd'):.1f} ms  "
                                       f"[{med.basis_n}/{med.basis_total} beats]"))
+        if smoothed:
+            out += wrapped("Note", f"each row is a {smoothed}: the SD is the spread of "
+                                   "smoothed values, not beat-to-beat (see Delineation)")
         if intervals_use_legacy_definitions(ivl):
             # The values above are not the standard PR / QRS / QT: say so
             # here, not only in PROVENANCE.

@@ -22,6 +22,7 @@ from typing import Any, ClassVar, Optional
 import numpy as np
 import pandas as pd
 
+from ecg.core.analysis import ENSEMBLE_BEATS_DEFAULT
 from ecg.core.models import MouseECG
 from ecg.core.wave_template import WaveTemplate
 
@@ -209,6 +210,10 @@ class AnalysisState:
     # the exports and session save; set by the selector, Intervals and
     # session restore.
     qtc_formula: str = "mitchell"
+    # N of the rolling-median delineation (analyse_intervals, ensemble_beats):
+    # the Morphology & Intervals control's value, kept here for the same
+    # reason. 1 = per beat. What a frame was measured with is in its attrs.
+    ensemble_beats: int = ENSEMBLE_BEATS_DEFAULT
     # What each module's result was computed from (ecg.ui.freshness):
     # module -> {peaks, removed, window, rr}, captured at job start. Derived
     # again on a session restore, not saved. Empty = nothing computed yet.

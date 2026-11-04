@@ -10,18 +10,20 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from ecg.core.analysis import ENSEMBLE_BEATS_DEFAULT, ensemble_hint_text
 from ecg.core.metric_table import MISSING, MetricTable, interval_rows
 from ecg.ui.analysis_controller import AnalysisController
+from ecg.ui.export_controller import pdf_interval_footer, pdf_metric_rows
 from ecg.ui.freshness import (
-    NOT_COMPUTED, OUT_OF_DATE, UP_TO_DATE, ModuleFreshness,
+    NOT_COMPUTED, OUT_OF_DATE, UP_TO_DATE, FreshnessService, ModuleFreshness,
 )
 from ecg.ui.navigation_controller import NavigationController
 from ecg.ui.plot_controller import qtc_rr_fit
-from ecg.ui.session_controller import _TAB_KEY_MAP
+from ecg.ui.session_controller import SessionController, _TAB_KEY_MAP
 from ecg.ui.state import AnalysisState
 from ecg.ui.tab_keys import TAB_EVENTS, TAB_MODULES, TAB_MORPHOLOGY, TAB_ORDER
 from ecg.ui.tab_morphology import (
-    interval_lines, measured_headline, morphology_steps, step_tip,
+    TabMorphologyMixin, interval_lines, measured_headline, morphology_steps, step_tip,
 )
 
 
@@ -423,3 +425,135 @@ def test_measure_before_any_classification_changes_nothing():
     app = SimpleNamespace(analysis=AnalysisState())
     AnalysisController(app).note_intervals_measured(_ivl_for_peaks())
     assert app.analysis.arrhythmia_run is None
+
+
+# ── Rolling median: what the tab and the checks say ───────────────────────
+
+def _smoothed(frame=None, n=32):
+    df = frame if frame is not None else _frame()
+    df["R_peak_s"] = np.arange(len(df)) * 0.17 + 1.0
+    df.attrs["ensemble"] = {"n": n, "statistic": "median", "window_s": 5.44, "n_artifact": 2,
+                            "n_timing": 3, "n_few": 0, "n_rows": len(df)}
+    return df
+
+
+def test_headline_names_the_rolling_median_and_per_beat_stays_as_it_was():
+    assert measured_headline(_frame())[0] == "8/20 beats measured (40%) on PR, QRS and QT"
+    assert measured_headline(_smoothed())[0].endswith(" · rolling median of 32 beats")
+
+
+def test_hint_states_the_window_and_the_limit_where_n_is_shown():
+    hint = ensemble_hint_text(32, 170.0, _smoothed())
+    assert "median of 32" in hint and "5.4 s" in hint
+    assert "shock or stimulus response shorter" in hint
+    assert "2 artifact" in hint and "3 premature" in hint
+    # Another N than the frame's: nothing is claimed about what it excluded.
+    assert "artifact" not in ensemble_hint_text(16, 170.0, _smoothed())
+    assert ensemble_hint_text(1, 170.0).startswith("Per beat")
+
+
+def test_av_delay_note_says_it_reads_a_smoothed_pr():
+    peaks = (np.arange(20) * 340 + 2000).astype(int)
+    df = _frame(measured=20)
+    df["R_peak_s"] = peaks / 2000.0
+    assert AnalysisController.av_delay_input(df, peaks, 2000.0)[1] == "AV-delay check on"
+    df.attrs["ensemble"] = {"n": 32}
+    pr, note = AnalysisController.av_delay_input(df, peaks, 2000.0)
+    assert pr is not None
+    assert note.startswith("AV-delay check on") and "rolling median of 32" in note
+    assert "at least 32 rows" in note
+
+
+def test_qtc_rr_fit_says_its_points_are_rolling():
+    df = _smoothed(_frame(measured=20))
+    df["RR_ensemble_ms"] = df["RR_ms"]
+    assert qtc_rr_fit(df)["smoothed"] is True
+    assert qtc_rr_fit(_frame())["smoothed"] is False
+
+
+def test_changing_n_puts_the_intervals_out_of_date():
+    class _Ctrl:
+        @staticmethod
+        def hrv_breaks(_pk=None):
+            return None
+
+        @staticmethod
+        def hrv_rr_bounds(quiet=True):
+            return (60.0, 1000.0)
+
+    analysis_state = AnalysisState()
+    df = _smoothed(_frame(measured=20))
+    analysis_state.results = {"intervals": df}
+    app = SimpleNamespace(analysis=analysis_state, analysis_ctrl=_Ctrl(),
+                          detection=SimpleNamespace(rpeaks_ok=np.arange(10)))
+    fresh = FreshnessService(app)
+    fresh.stamp("intervals")
+    assert fresh.status("intervals").state == UP_TO_DATE
+    analysis_state.ensemble_beats = 16
+    status = fresh.status("intervals")
+    assert status.state == OUT_OF_DATE and "N = 32" in status.reasons[0]
+
+
+@pytest.mark.parametrize("saved, frame, want", [
+    (None, True, 8),      # older session with intervals: the N in effect stays
+    (None, False, 8),
+    (16, True, 16),
+    (0, True, 1),
+])
+def test_restore_sets_the_n_control(saved, frame, want):
+    class _Entry:
+        text = "8"
+        def delete(self, *_a): self.text = ""
+        def insert(self, _i, t): self.text = t
+
+    ent = _Entry()
+    analysis_state = AnalysisState()
+    analysis_state.ensemble_beats = 8
+    analysis_state.results = {"intervals": _frame()} if frame else {}
+    host = SimpleNamespace(app=SimpleNamespace(analysis=analysis_state, ent_ensemble=ent))
+    SessionController._restore_ensemble_beats(host, saved)
+    assert analysis_state.ensemble_beats == want and ent.text == str(want)
+
+
+def test_an_old_session_does_not_set_n_for_the_recordings_loaded_after_it():
+    # The old session's per-beat frame: labelled per beat, out of date at N = 32.
+    analysis_state = AnalysisState()
+    analysis_state.results = {"intervals": _frame()}
+    host = SimpleNamespace(app=SimpleNamespace(analysis=analysis_state, ent_ensemble=None))
+    SessionController._restore_ensemble_beats(host, None)
+    assert analysis_state.ensemble_beats == ENSEMBLE_BEATS_DEFAULT
+
+
+def test_pdf_footer_and_report_say_how_the_rows_were_delineated():
+    df = _smoothed(_frame(measured=20))
+    footer = pdf_interval_footer(df)
+    assert "Delineation: rolling median of 32" in footer and "QT IQR" not in footer
+    assert "QT IQR = beat-to-beat" in pdf_interval_footer(_frame())
+    assert not any("QT IQR" in r[0] for r in pdf_metric_rows({"intervals": df}))
+
+
+def test_a_typed_n_counts_without_return_or_leaving_the_field():
+    # A click on a CTk button does not take the focus: no FocusOut, and
+    # Measure and the session save read the field.
+    import tkinter as tk
+    import customtkinter as ctk
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"no display: {exc}")
+    root.withdraw()
+    try:
+        var = ctk.StringVar(master=root, value="32")
+        ent = ctk.CTkEntry(root, textvariable=var)
+        analysis_state, refreshed = AnalysisState(), []
+        host = SimpleNamespace(analysis=analysis_state, ent_ensemble=ent,
+                               _refresh_morphology=lambda: refreshed.append(True))
+        host.analysis_ctrl = AnalysisController(host)
+        var.trace_add("write", lambda *a: TabMorphologyMixin._on_ensemble_typed(host, *a))
+        ent.delete(0, "end")
+        assert analysis_state.ensemble_beats == 32 and not refreshed   # empty: last valid N
+        ent.insert(0, "8")
+        assert analysis_state.ensemble_beats == 8 and refreshed
+        assert ent.get() == "8"
+    finally:
+        root.destroy()

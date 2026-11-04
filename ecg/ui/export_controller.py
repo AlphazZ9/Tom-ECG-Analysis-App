@@ -27,8 +27,9 @@ from ecg.io.export import ExcelExporter, PrismExporter, autonomic_pdf_line
 from ecg.core.analysis import (
     analysis_window_rows, analysis_window_span, artifact_correction_text,
     signal_crop_text,
+    ensemble_disclosure, ensemble_short_text,
     hrv_freq_is_legacy, hrv_freq_withheld_reason, interval_definitions_text,
-    intervals_use_legacy_definitions, mean_hr_bpm,
+    intervals_use_legacy_definitions, mean_hr_bpm, qtc_rr_text,
     rr_exclusion_report, rr_timeseries,
     successive_valid_pairs, wave_template_disclosure, rr_quality_at,
 )
@@ -68,8 +69,11 @@ def pdf_interval_footer(ivl: "Optional[object]") -> str:
     row of the text report, Excel Cover sheet and Prism notes)."""
     if ivl is None or getattr(ivl, "empty", True) or "QT_ms" not in ivl.columns:  # type: ignore[attr-defined]
         return ""
+    # A rolling median has no QT IQR row: ensemble_disclosure says why.
     return ("Intervals: " + interval_definitions_text(ivl)  # type: ignore[arg-type]
-            + "   |   QT IQR = beat-to-beat, single lead (not QT dispersion)"
+            + "   |   Delineation: " + ensemble_disclosure(ivl)  # type: ignore[arg-type]
+            + ("" if ensemble_short_text(ivl)  # type: ignore[arg-type]
+               else "   |   QT IQR = beat-to-beat, single lead (not QT dispersion)")
             + "   |   Wave template: " + wave_template_disclosure(ivl))  # type: ignore[arg-type]
 
 
@@ -779,7 +783,7 @@ class ExportController:
         # in the middle to the room the date and the QTc formula leave (a
         # long path pushed the QTc text past the page edge).
         head_rest = (f"   |   Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}   |   "
-                     f"QTc: {qtc_label}, preceding RR")
+                     f"QTc: {qtc_label}, {qtc_rr_text(ivl).removeprefix('the ')}")
         head_room = ((0.96 - 0.06) * fig.get_figwidth()
                      - fig_text_width_in("File: " + head_rest, 8))
         fig.text(0.06, 0.918,
