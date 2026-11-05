@@ -1,4 +1,4 @@
-# Reprise du travail (point de sauvegarde du 05/11/2026)
+# Reprise du travail (point de sauvegarde du 05/11/2026, style de la maquette)
 
 Pour reprendre depuis un autre poste : `git switch feature/ml-r-peak-detector`, installer les dépendances,
 copier quelques `.mat` hors du dépôt (ils ne vont pas sur GitHub).
@@ -12,7 +12,10 @@ copier quelques `.mat` hors du dépôt (ils ne vont pas sur GitHub).
 - Disposition sans barres latérales : barre de détection en haut de Signal & Detection, fiche Recording
   (clic sur la pastille du fichier), fenêtre d'analyse dans le bandeau, menu ⋯, Report > More.
   Fonctionne dès 1280×720. Chiffres identiques à la disposition précédente.
-- Tests : 1 363 passent. Captures de la doc refaites (sauf les deux de Parameters).
+- Style aligné sur la maquette (couleurs, boutons blancs bordés / bleu pour l'action principale,
+  cartes blanches sur fond gris, typographie Segoe UI) : valeurs dans `ecg/ui/theme.py`
+  (`button_style`, `card_style`, `input_style`…). Chiffres identiques à avant.
+- Tests : 1 362 passent. Captures de la doc refaites (sauf les deux de Parameters).
 - Maquette : https://claude.ai/artifact/AqCuLQZVQAnpzGvWJmEyNJ (privée, même compte).
 
 Résultats à N = 32 (médianes) :
