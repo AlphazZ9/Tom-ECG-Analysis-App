@@ -181,10 +181,44 @@ est devenu Sliding, *Beat Template* et *Intervals* sont Morphology & Intervals,
   battement n'est pas rapportée et une séquence de retard AV doit durer au moins N
   lignes. Les rapports indiquent N, la fenêtre en secondes et les exclusions ; les
   anciennes sessions restent par battement. Sur les deux enregistrements de
-  l'expérience 13 : PR mesuré 2 → 100 % (248) et 70 → 69 % (247), IQR du QT
-  38–76 → 38–49 ms (248) et 38–50 → 39–41 ms (247) ; sur 247, le PR manquant
-  correspond aux passages où l'onde P du battement médian passe elle-même sous le
-  seuil du détecteur.
+  l'expérience 13 : PR mesuré 2 → 100 % (248) et 70 → 100 % (247), IQR du QT
+  38–76 → 38–49 ms (248) et 38–50 → 39–41 ms (247). **Valeurs modifiées (début
+  de P biphasique) :** sur 247, l'onde P crochetée cassait la droite du début de P
+  sur 31 % des lignes lissées (pas de PR) et la déplaçait sur beaucoup d'autres
+  (une fausse marche du PR de 45 à 48 ms vers 600 s) ; avec le passage montant,
+  le PR vaut 48,8 ms [48,6–49,0] sur 99,7 % des lignes (46,2 [44,9–48,2] sur 69 %
+  avant) ; 248 est inchangé (42,9 ms). **Valeurs modifiées (fin de T
+  biphasique) :** sur 248 (T +0,09 puis −0,06), chaque ligne choisissait sa fin
+  de T sur sa propre médiane, selon la phase la plus grande sur cette médiane :
+  467 lignes finissaient le T avec la phase négative (~45 ms), 997 avec la phase
+  positive (~34 ms) et 284 n'en avaient pas, par blocs de lignes (fausses marches
+  du QT de ~11 ms). Le QT vaut maintenant 49,9 ms [49,5–50,4] sur 99,8 % des
+  lignes (39,0 [38,1–48,9] sur 83,8 % avant), et sur 247 (+0,14 puis −0,09)
+  50,0 ms [49,6–50,3] sur 99,7 % (39,2 [38,6–40,3] sur 99,1 % avant) : le QT est
+  ~11 ms et le QTc ~8 ms plus long sur les deux, la phase négative comptant
+  désormais dans le T. Il ne reste aucun bloc de bascule sur l'un ou l'autre.
+  Sur des synthétiques de vérité connue à la forme de 248, la fin de T est
+  0,3 à 0,7 ms trop tardive au bruit de 248 et à 1,7× ce bruit (toutes les
+  lignes mesurées), 0,8 ms à 3,6× (45 % des lignes, les autres sans fin de T),
+  et une marche ou un épisode du QT de +12 ms est lu des deux côtés.
+  **Valeurs modifiées (onde initiale du QRS) :** le début du QRS avance de
+  3 à 4 ms sur chaque ligne lissée (248 : −4,1 → −8,3 ms, 247 : −6,2 →
+  −9,2 ms) : QRS 11,2 → 15,3 ms (248) et 12,2 → 15,3 ms (247), PR 42,9 →
+  38,8 et 48,8 → 45,8 ms, QT 49,9 → 54,0 et 50,0 → 53,0 ms, QTc 38,2 → 41,3
+  et 37,3 → 39,5 ms (Mitchell) ; aucune autre colonne ne change, et de même
+  à N = 8 (gigue d'une ligne à l'autre du début du QRS sur 247 : 0,05 ms à
+  N = 8, 0,03 à N = 32, comme avec le bord de Q). Sur des synthétiques de
+  vérité connue (P biphasique ou monophasique, y compris finissant 1 à 3 ms
+  avant l'onde, ondes de 1,4 à 18 % de R, bruit 1 à 3× celui de 248, N = 8
+  et 32), le début médian est à moins de 0,5 ms du premier échantillon de
+  l'onde et les 1er–99e centiles des lignes à moins de 2 ms ; sans onde
+  initiale (y compris avec une P finissant 1 à 3 ms avant la Q, ou une P
+  biphasique dont la phase négative contient la fenêtre PR) aucune ligne
+  ne change. Décidée sur la médiane propre à chaque ligne, une onde de 3 %
+  de R à 2–3× le bruit de 248 ne comptait que sur 25 à 80 % des lignes à
+  N = 32, et une fenêtre PR dans une P biphasique avançait de 12 à 18 ms
+  2,5 % des lignes d'un synthétique sans onde. Les valeurs par battement
+  (N = 0 ou 1) ne changent pas.
 
   Le début du QRS est le premier écart à la ligne de base du segment PR
   (début de l'onde Q, ou montée de R en l'absence de Q) ; le point J est le
@@ -193,12 +227,56 @@ est devenu Sliding, *Beat Template* et *Intervals* sont Morphology & Intervals,
   la ligne de base d'une droite ajustée (moindres carrés) sur la partie
   30–70 % de la déflexion (seuil : 5 % de l'amplitude de R ou 3× le bruit
   du segment PR pour l'onde R ; une onde Q ou S est retenue dès qu'elle
-  descend de plus de 2 % de R ou 3× le bruit sous la ligne de base). Le
-  début de P est l'intersection avec la ligne de base PR d'une droite du
+  descend de plus de 2 % de R ou 3× le bruit sous la ligne de base). Sur
+  une médiane glissante (N > 1), une petite **onde initiale du QRS** de
+  signe opposé dont l'onde Q (ou R) sort directement — culminant au plus
+  3 ms avant que Q ne revienne près de la ligne de base, et à plus de 1 %
+  de R et 5× le bruit au-dessus à la fois de la ligne de base PR et du
+  niveau d'où elle monte (le tracé 5 à 8 ms avant son pic), sur une moyenne
+  mobile de 1,5 ms — ouvre le QRS : le début est l'intersection avec ce
+  niveau de la droite passant par les instants où l'onde franchit 30, 50
+  et 70 % de sa hauteur, et non le bord de Q (sur 248, +18 % de R à −6 ms
+  avant une Q à −2,5 ; sur 247, +2 à 3 % à −7,5 avant une Q à −4,5 : le
+  bord de Q faisait commencer le QRS 3 à 4 ms trop tard). La présence de
+  cette onde, et l'avance de son début sur le bord de Q, sont décidées sur
+  la médiane des max(8 N, 256) battements autour de chaque ligne (la
+  majorité des médianes voisines de ce type), pas sur la médiane propre à
+  la ligne ; le début du QRS de la ligne est son propre début au bord de
+  Q / R décalé de cette avance. Une onde encore montante au début de ces
+  3 ms est la fin d'une P qui rejoint le QRS et n'est pas comptée, pas plus
+  qu'un segment PR simplement au-dessus d'une fenêtre PR tombée dans la
+  phase négative d'une P biphasique (il ne monte d'aucun niveau plus bas).
+  Les lignes mesurées sur leur propre battement, et N = 1, gardent le bord
+  de Q / R (l'onde de 247 est sous 5× le bruit d'un seul battement) : le
+  QRS y est ~3 à 4 ms plus court et le PR d'autant plus long que sur les
+  lignes lissées, et changer N déplace le PR d'autant par rapport au seuil
+  de 55 ms du retard AV. Une onde à environ un tiers du seuil près (sur un
+  synthétique, 1,4 % de R à 2–3× le bruit de 248) peut encore compter sur
+  certaines plages de 16 lignes ou plus et pas sur d'autres (début du QRS
+  ~3,5 ms plus tôt ou plus tard). Le début de P est l'intersection avec la ligne de base PR d'une droite du
   même type ajustée sur la montée de l'onde P, cherchée jusqu'à 30 ms avant
   le pic P (si une P posée sur le T précédent ne revient jamais à cette
   ligne de base, la droite est ajustée sur la partie de la montée au-dessus
-  de la jonction T–P, sans placer le début avant cette jonction). Le pic P
+  de la jonction T–P, sans placer le début avant cette jonction). Sur une
+  médiane glissante (N > 1), une onde P biphasique — d'abord un creux de
+  sens opposé, d'au moins 25 % du pic et au-dessus du seuil de détection
+  de P — commence là où le tracé repasse
+  au-dessus de la ligne de base PR après ce creux (la droite casse sur
+  l'épaulement d'une P crochetée, ou tombe ~4 ms trop tard sur le crochet),
+  pourvu que le pic P suive à moins de 8 ms (2 à 6 ms sur 247 et 248, quelle
+  que soit la taille de l'épaulement ; un creux plus éloigné est la fin du T
+  précédent, et une fin de T moins de ~4 ms avant une P à montée rapide peut
+  encore avancer le début d'autant). Les lignes mesurées sur leur propre
+  battement (extrasystoles, trop peu de membres) gardent la droite de la
+  montée. Le pied du creux serait le début auriculaire, plus précoce,
+  mais il n'est pas mesurable de façon fiable à N = 32 (sur 248 et 247, son
+  écart-type sur 30 s vaut 5 à 13× celui du passage montant) : le PR part
+  donc du passage montant. La règle dépend de la polarité : dans l'image
+  miroir (une première phase plus petite du signe du pic, puis une phase
+  plus grande de sens opposé), le pic P est cette première phase et le début
+  reste au pied de la déflexion, d'où un PR ~4,5 ms plus long que pour la
+  forme de 248 (synthétique) ; aucun des deux enregistrements de
+  l'expérience 13 n'a cette forme. Le pic P
   est cherché après le pic T du battement précédent et mesuré par rapport à
   la ligne de base PR (à 500 bpm, une ligne de base prise sur le T précédent
   donnait un PR ~60 ms au lieu de 42 et de faux événements de retard AV) ;
@@ -209,9 +287,34 @@ est devenu Sliding, *Beat Template* et *Intervals* sont Morphology & Intervals,
   pas dans le QRS. La fin de T est l'intersection avec la ligne de base PR
   d'une droite du même type ajustée sur la partie 70–30 % de la pente
   descendante de T ; chez la souris elle est progressive et ambiguë,
-  vérifiez son placement sur le battement moyen. Chaque battement est
-  délimité dans sa propre fenêtre : jusqu'à ±100 ms, au plus 70 % de son
-  RR précédent avant R et de son RR suivant après R (un voisin plus proche
+  vérifiez son placement sur le battement moyen. Sur une médiane glissante
+  (N > 1), une **onde T biphasique** (une phase de signe opposé juste avant ou
+  juste après la plus grande phase du T, d'au moins 30 % de celle-ci et 4× le
+  bruit d'un battement médian) finit là où sa **dernière** phase revient au
+  niveau PR, et son pic T est celui de sa première phase. Les phases du T sont
+  décidées sur la médiane des 8 N battements autour de chaque ligne (une
+  décision toutes les N / 2 lignes ; ~45 s à N = 32), et non sur la médiane
+  propre de la ligne. La fin de T de cette médiane est la droite passant par
+  les instants où la pente descendante de sa dernière phase (moyenne glissante
+  de 4 ms) repasse sous 70, 60 … 30 % de la phase, à son intersection avec le
+  niveau PR — la moyenne de chaque tronçon de 6 ms du segment PR pondérée par
+  sa planéité (le seul tronçon le plus plat, celui du début du QRS, sautait
+  entre deux niveaux sur un segment PR en pente, déplaçant la fin de T de
+  ~1,7 ms par blocs de lignes sur 247). La fin de T de chaque ligne est celle-ci
+  décalée du retard auquel la dernière phase de cette médiane s'ajuste le mieux
+  à la ligne au sens des moindres carrés (à 4 ms près du retard du T entier,
+  lui-même dans ±15 ms ; le retard du T entier quand la dernière phase seule
+  est sous 3× son bruit). Pas de fin de T sur une ligne dont le T ne se
+  distingue pas du bruit ou à laquelle la dernière phase manque nettement ; là
+  où la seconde phase vaut 15 à 30 % de la première, ou que les médianes
+  voisines ne s'accordent pas sur le nombre de phases (ambiguë) ; et là où
+  cette médiane mêle les battements d'avant et d'après une variation du QT (sa
+  pente est faite de deux pentes : ces lignes sont mesurées sur leur propre
+  médiane, souvent sans fin de T pendant quelques secondes). Une fin de T qui
+  se décale est lue en entier, un T qui s'élargit à ~3/4 de sa variation ; une
+  variation du QT plus brève que cette médiane (~45 s) est lue à ~3 ms près.
+  Chaque battement est délimité dans sa propre fenêtre : jusqu'à ±100 ms,
+  au plus 70 % de son RR précédent avant R et de son RR suivant après R (un voisin plus proche
   que le RR min est ignoré) ; les exports et le rapport Summary indiquent
   combien de battements ont eu une fenêtre raccourcie. Le QTc n'utilise le
   RR précédent que s'il est dans les bornes RR min / max de la VRC. Début
@@ -463,10 +566,13 @@ est devenu Sliding, *Beat Template* et *Intervals* sont Morphology & Intervals,
 
 ### Interface
 
-- Disposition Adaptive Workbench — barre d'outils, panneaux gauche/droit
-  repliables, et un espace de travail central avec une mini-carte de
-  défilement de position, permettant de récupérer de l'espace sur les petits
-  écrans.
+- Disposition pleine largeur sans barres latérales : un en-tête (pastille du
+  fichier qui ouvre la fiche Recording, Open avec les fichiers récents, Save,
+  Detect Peaks, Analyze, Export, annuler / rétablir, menu ⋯), un bandeau de
+  contexte où la fenêtre d'analyse se modifie, puis les onglets ; les réglages
+  de détection sont dans une barre de Signal & Detection, les filtres dans un
+  panneau flottant, les exports optionnels sous Report > More. Utilisable dès
+  1280 px de large (1650 auparavant).
 - Thèmes clair/sombre, propagés en direct dans toute l'interface, y compris
   chaque graphique matplotlib.
 
@@ -503,7 +609,7 @@ code publié le réfléchit pour le CSI, ce qu'exige la physiologie —
 l'application suit le code.
 
 La version de l'application gère les lacunes : les intervalles RR hors des
-bornes Min / Max RR de la barre latérale, ou qui enjambent un battement
+bornes Min / Max RR (barre de Signal & Detection), ou qui enjambent un battement
 supprimé par la correction d'artefacts, sont exclus ; les paires de
 Poincaré ne les enjambent jamais ; une fenêtre de moins de **Min pairs**
 paires adjacentes valides (10 par défaut) est masquée (vide, grisée) et
@@ -619,7 +725,8 @@ statistique de l'article aux indices calculés :
    tomber de part et d'autre de 0,05.
 4. **💾 Save to cohort registry** enregistre les valeurs avant / après /
    delta par événement dans le registre SQLite local avec le **Subject ID**
-   et le **Project name** de la barre latérale et la configuration
+   et le **Project** de la fiche Recording (clic sur la pastille du fichier
+   dans l'en-tête) et la configuration
    (méthode, fenêtre, ks, kp, pre / post) — une ligne par événement et par
    méthode / fenêtre. Avec le filtre *All*, les événements précédemment
    enregistrés pour cet enregistrement avec la même méthode et la même
@@ -781,11 +888,11 @@ ecg-analysis            # après `pip install -e .`
 │   │   └── db.py             # registre SQLite des enregistrements + table
 │   │                         # de cohorte des événements
 │   └── ui/                # application de bureau CustomTkinter
-│       ├── app_*.py, tab_*.py # mixins d'ECGApp : panneaux et un module par onglet
+│       ├── app_*.py, tab_*.py # mixins d'ECGApp : en-tête, barre de détection et un module par onglet
 │       ├── context_strip.py, tabbar.py, freshness.py # bandeau, états des onglets
 │       ├── report_view.py     # onglet Report et rapport texte (pur, testé)
-│       ├── app.py             # fenêtre principale ECGApp (disposition Adaptive
-│       │                      # Workbench)
+│       ├── app.py             # fenêtre principale ECGApp (en-tête, bandeau de
+│       │                      # contexte, onglets)
 │       ├── *_controller.py    # un contrôleur par responsabilité (SRP) :
 │       │                      # analyse, détection, signal, navigation,
 │       │                      # session, export, événements
@@ -797,7 +904,7 @@ ecg-analysis            # après `pip install -e .`
 │       ├── dialogs.py         # fenêtres secondaires (thème, revue d'artefacts,
 │       │                      # entraînement ML, paramètres d'analyse
 │       │                      # personnalisé...)
-│       ├── sidebar.py         # sections repliables, vérificateur d'intervalles
+│       ├── popover.py         # panneaux flottants : fiche Recording, Filters, ⋯, Report > More
 │       ├── widgets.py         # fabriques de widgets réutilisables (tuiles stats, jauge de qualité)
 │       ├── wave_editor.py     # mini-éditeur de template d'onde
 │       └── state.py           # dataclasses d'état côté UI

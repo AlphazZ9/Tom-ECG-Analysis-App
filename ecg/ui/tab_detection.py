@@ -13,10 +13,10 @@ from typing import TYPE_CHECKING, Any
 import customtkinter as ctk  # type: ignore[import-untyped]
 import tkinter as tk
 from ecg.ui.theme import (
-    PANEL, CARD, BORDER, BORDER2, TEXT, MUTED, PLOT, BLUE, ORANGE, BLUE_HOVER,
+    BG, PANEL, CARD, BORDER, BORDER2, TEXT, MUTED, LIGHT, PLOT, BLUE, ORANGE, BLUE_HOVER,
     GREEN, RED, PURPLE, PURPLE_DARK, SPACE_XS, SPACE_S, SPACE_M, SPACE_L,
     FONT_LABEL, FONT_SMALL, FONT_MONO, FONT_SIDEBAR_HDR, FONT_HINT, FONT_CARD_TITLE,
-    FONT_KPI_HERO, FONT_KPI_LABEL,
+    FONT_KPI_HERO, FONT_KPI_LABEL, FONT_SUBSECTION,
 )
 from ecg.core.detection import detect_rr_artifacts
 from ecg.core.models import MouseECG
@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
 
 QUALITY_PANEL_W = 290
+# Below this the quality plots' ticks and labels overlap.
+QUALITY_PLOT_MIN_H = 70
 
 
 log = logging.getLogger("ecg")
@@ -46,10 +48,14 @@ class TabDetectionMixin:
         t = self.tabs.tab(TAB_DETECTION)
 
         # Layout (top → bottom, all pack):
+        #   detection bar (method, threshold, Min / Max RR, chips) -- see
+        #                 app_detection_bar.py; on this tab only
         #   nav bar     (fill=x, no expand) — time navigation controls
         #   thin separator
         #   detail toolbar (fill=x, no expand)
         #   detail plot + RR strip, signal-quality panel on their right
+
+        self._build_detection_bar(t)
 
         # ── Navigation bar ────────────────────────────────────────────────
         # Instrument-style layout: 3 grouped chips inside the flat PANEL bar
@@ -235,25 +241,9 @@ class TabDetectionMixin:
             "Free Placement: right-click adds a peak at the exact clicked position — "
             "no snapping, no proximity guard, works even on top of existing peaks.")
 
-        # ── Annotations chip ───────────────────────────────────────────────
-        ann_chip = self._toolbar_chip(hdr)
-        ann_chip.pack(side="left", padx=(0, SPACE_M))
-        self.btn_annotations = ctk.CTkButton(
-            ann_chip, text="Annotations", width=110, height=28, font=FONT_SMALL,
-            fg_color=PURPLE_DARK, hover_color=PURPLE, text_color="white",
-            corner_radius=8,
-            command=self._open_annotations,
-        )
-        self.btn_annotations.pack(side="left", padx=(SPACE_S, SPACE_XS))  # type: ignore[union-attr]
-        self.lbl_ann_count = ctk.CTkLabel(
-            ann_chip, text="", font=FONT_HINT, text_color=MUTED, anchor="w")
-        self.lbl_ann_count.pack(side="left", padx=(0, SPACE_S))  # type: ignore[union-attr]
+        # Annotations and pacing periods: chips of the detection bar above.
 
         # ── RR/HR/Quality strip toggle ───────────────────────────────────────
-        # "Pacing Periods" chip removed here (redundant with the ANNOTATIONS
-        # panel section's "Manage Pacing Periods…" button, the sole remaining
-        # entry point) -- this slot now hosts the show/hide toggle for the
-        # RR/HR/Quality sub-plot strip below the detail plot.
         rrhr_chip = self._toolbar_chip(hdr)
         rrhr_chip.pack(side="left")
         _rrhr_on = self.ui.rrhr_strip_visible
@@ -323,6 +313,9 @@ class TabDetectionMixin:
         if not self.ui.rrhr_strip_visible:
             self.subplot_frame.grid_remove()
         self._slots["detail_rrhr"] = CanvasSlot(self.subplot_frame, 12, 2.8, toolbar=False)
+        # SG options (Filters popover) and the ML section (quality panel)
+        # follow the Method combobox's default; both exist only now.
+        self._on_det_method_change(self.cb_det_method.get())
 
     def _build_quality_panel(self: ECGApp, parent) -> None:
         """Quality belongs next to the signal it judges. Values come from
@@ -365,28 +358,168 @@ class TabDetectionMixin:
             self._quality_vals[key] = val
         self._bind_hover_tip(
             self._quality_vals["sq_agree"],
-            "Beats confirmed by at least one other detector, after Check Agreement "
-            "(right panel, Detection section)")
+            "Beats confirmed by at least one other detector, after Check detector "
+            "agreement (below)")
 
         # Bottom first: the two plots share what is left.
-        self.btn_review_quality = ctk.CTkButton(
-            panel, text="Review artifacts", command=self._open_artifact_review,
-            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED, font=FONT_SMALL,
-            height=28, corner_radius=6, state="disabled")
-        self.btn_review_quality.pack(side="bottom", fill="x", padx=SPACE_M, pady=SPACE_S)
+        self._build_quality_actions(panel)
 
         plots = ctk.CTkFrame(panel, fg_color="transparent")
         plots.pack(side="top", fill="both", expand=True, padx=SPACE_S)
         plots.grid_columnconfigure(0, weight=1)
+        self._quality_plots = plots
         for row, (key, title) in enumerate((("quality_time", "Template correlation over time"),
                                             ("quality_hist", "Template correlation histogram"))):
-            ctk.CTkLabel(plots, text=title, font=FONT_KPI_LABEL, text_color=MUTED, anchor="w",
-                         height=14).grid(row=2 * row, column=0, sticky="ew", padx=SPACE_XS)
+            head = ctk.CTkLabel(plots, text=title, font=FONT_KPI_LABEL, text_color=MUTED,
+                                anchor="w", height=14)
+            head.grid(row=2 * row, column=0, sticky="ew", padx=SPACE_XS)
             plots.grid_rowconfigure(2 * row + 1, weight=1)
             box = tk.Frame(plots, bg=PLOT["bg"], bd=0, highlightthickness=0, height=60)
             box.grid(row=2 * row + 1, column=0, sticky="nsew", pady=(0, SPACE_XS))
             box.pack_propagate(False)
             self._slots[key] = CanvasSlot(box, 2.6, 1.0, toolbar=False)
+            if row == 0:
+                self._quality_time_rows = (head, box)
+        # The histogram gives its room to the ML section (_show_ml_section) and,
+        # on a short window, to the curve over time (_fit_quality_plots).
+        self._quality_hist_rows = (head, box)
+        self._quality_hist_wanted = True
+        plots.bind("<Configure>", lambda _e: self._fit_quality_plots(), add="+")
+
+    def _build_quality_actions(self: ECGApp, panel) -> None:
+        """What acts on the peaks' quality, under the plots: artifact review,
+        auto-correction, detector agreement, and the ML detector's training
+        (shown with Method = ML Detector, see _show_ml_section)."""
+        wrap = QUALITY_PANEL_W - 2 * SPACE_M
+        actions = ctk.CTkFrame(panel, fg_color="transparent")
+        actions.pack(side="bottom", fill="x", padx=SPACE_M, pady=(0, SPACE_S))
+        self._quality_actions = actions
+        # Review and agreement share one row: every row here is taken from the
+        # correlation plot above on a 768-px screen.
+        buttons = ctk.CTkFrame(actions, fg_color="transparent")
+        buttons.pack(fill="x", pady=(SPACE_XS, 0))
+        buttons.grid_columnconfigure((0, 1), weight=1, uniform="qa")
+        # One review button (the sidebar's ARTIFACTS one and this panel's were
+        # two entry points to the same dialog): btn_review_art is the name the
+        # controllers enable and swap to "Detecting…".
+        # Built with an explicit muted fg_color (see _set_btn_enabled) rather
+        # than relying on CTkButton's default disabled treatment, which only
+        # dims the text and left this looking clickable while disabled.
+        self.btn_review_art = ctk.CTkButton(
+            buttons, text="Review artifacts", command=self._open_artifact_review,
+            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED, font=FONT_SMALL,
+            height=28, corner_radius=6, state="disabled")
+        self.btn_review_art.grid(row=0, column=0, sticky="ew", padx=(0, SPACE_XS))
+        self.btn_review_quality = self.btn_review_art
+        self._bind_hover_tip(self.btn_review_art,
+                             "Detect + review every artifact. Click Detect Peaks first.")
+        self.sw_artifact = self._switch(actions, "Auto-correct artifacts on Analyze",
+                                        dict(padx=0), default_on=False)
+        self._bind_hover_tip(self.sw_artifact, "OFF by default — use Review for full control")
+        self.btn_check_agreement = ctk.CTkButton(
+            buttons, text="Check agreement",
+            command=self._check_method_agreement,
+            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
+            font=FONT_SMALL, height=28, corner_radius=6, state="disabled")
+        self.btn_check_agreement.grid(row=0, column=1, sticky="ew")
+        self._bind_hover_tip(
+            self.btn_check_agreement,
+            "Check detector agreement: cross-check accepted beats against other "
+            "detection methods")
+        self.lbl_agreement_status = ctk.CTkLabel(
+            actions, text="  Not run yet", font=FONT_KPI_LABEL, text_color=LIGHT,
+            anchor="w", wraplength=wrap, justify="left", height=16)
+        self.lbl_agreement_status.pack(fill="x")
+
+        # ── ML detector: status, verified flag, save, train ──────
+        ml = ctk.CTkFrame(panel, fg_color=BG, corner_radius=6)
+        self._ml_frame = ml
+        # Title and verified flag share a row: every row here is taken from
+        # the correlation plot above on a 768-px screen.
+        head = ctk.CTkFrame(ml, fg_color="transparent")
+        head.pack(fill="x", padx=SPACE_S, pady=(SPACE_XS, 0))
+        ctk.CTkLabel(head, text="ML DETECTOR", font=FONT_SUBSECTION, text_color=MUTED,
+                     anchor="w").pack(side="left")
+        self.sw_verified_training = self._switch(
+            head, "✓ Verified for training", dict(padx=0), default_on=False,
+            command=self._on_verified_training_toggle)
+        self.sw_verified_training.pack_configure(side="right", anchor="e", pady=0)
+        self.lbl_ml_status = ctk.CTkLabel(
+            ml, text="No trained model yet", font=FONT_KPI_LABEL,
+            text_color=MUTED, anchor="w", wraplength=wrap - SPACE_M, justify="left", height=16)
+        self.lbl_ml_status.pack(fill="x", padx=SPACE_S, pady=(0, SPACE_XS))
+        self._bind_hover_tip(
+            self.sw_verified_training,
+            "Marks this recording's corrected R-peaks as clean training data. "
+            "Takes effect on Save Session.")
+        row = ctk.CTkFrame(ml, fg_color="transparent")
+        row.pack(fill="x", padx=SPACE_S, pady=(0, SPACE_S))
+        row.grid_columnconfigure((0, 1), weight=1, uniform="ml")
+        self.btn_save_for_training = ctk.CTkButton(
+            row, text="📥  Save for training", command=self._save_for_training_only,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+            font=FONT_SMALL, height=28, corner_radius=6)
+        self.btn_save_for_training.grid(row=0, column=0, sticky="ew", padx=(0, SPACE_XS))
+        self._bind_hover_tip(
+            self.btn_save_for_training,
+            "Caches this recording's peaks as training data right away, without "
+            "writing a .ecgsession file or export stats.")
+        self.btn_train_ml = ctk.CTkButton(
+            row, text="🤖  Train model…", command=self._open_ml_training_dialog,
+            fg_color=PURPLE, hover_color=PURPLE_DARK, text_color="white",
+            font=FONT_SMALL, height=28, corner_radius=6)
+        self.btn_train_ml.grid(row=0, column=1, sticky="ew")
+        self._bind_hover_tip(self.btn_train_ml, "Train / retrain the ML R-peak detector")
+        self.after(0, self.refresh_ml_status)
+
+    def _show_ml_section(self: ECGApp, shown: bool) -> None:
+        """The ML section, below the actions, while Method = ML Detector; the
+        correlation histogram is hidden meanwhile, so the curve over time
+        keeps a readable height on a 768-px screen."""
+        ml = getattr(self, "_ml_frame", None)
+        if ml is None:
+            return
+        if shown and not ml.winfo_manager():
+            # side="bottom" stacks from the bottom up: before=actions puts it
+            # under them.
+            ml.pack(side="bottom", fill="x", padx=SPACE_M, pady=(0, SPACE_S),
+                    before=self._quality_actions)
+        elif not shown and ml.winfo_manager():
+            ml.pack_forget()
+        self._quality_hist_wanted = not shown
+        self._fit_quality_plots()
+
+    def _fit_quality_plots(self: ECGApp) -> None:
+        """Show the histogram only when both plots get a readable height
+        (QUALITY_PLOT_MIN_H each); otherwise the curve over time takes it all."""
+        plots = getattr(self, "_quality_plots", None)
+        if plots is None:
+            return
+        h = plots.winfo_height()
+        row_h = QUALITY_PLOT_MIN_H + 14 + SPACE_XS      # title + plot
+        known = h > 1
+        # A curve squeezed below that height is unreadable: its title says why
+        # it is missing rather than drawing a sliver.
+        curve = not known or h >= row_h
+        hist = self._quality_hist_wanted and (not known or h >= 2 * row_h)
+        head, box = self._quality_time_rows
+        if curve != bool(box.winfo_manager()):
+            if curve:
+                box.grid()
+                head.configure(text="Template correlation over time")
+            else:
+                box.grid_remove()
+                head.configure(text="Template correlation over time: "
+                                    "taller window needed")
+            plots.grid_rowconfigure(1, weight=1 if curve else 0)
+        head, box = self._quality_hist_rows
+        if hist != bool(box.winfo_manager()):
+            for w in self._quality_hist_rows:
+                if hist:
+                    w.grid()
+                else:
+                    w.grid_remove()
+            plots.grid_rowconfigure(3, weight=1 if hist else 0)
 
     def _artifact_candidate_count(self: ECGApp, rp) -> int:
         """How many candidates Review would list on these peaks: the same call as
@@ -442,9 +575,12 @@ class TabDetectionMixin:
             vals["sq_agree"].configure(text=agree)
 
         n_cand = self._artifact_candidate_count(rp)
-        label = (f"Review {n_cand} artifact candidate{'s' if n_cand > 1 else ''}"
+        # Half the panel's width: "Review 12 artifacts" still fits.
+        label = (f"Review {n_cand} artifact{'s' if n_cand > 1 else ''}"
                  if n_cand else "Review artifacts")
         btn = self.btn_review_quality
+        if getattr(self, "_async_busy", False):
+            return      # the button may be showing a job's "Detecting…"
         if btn.cget("text") != label:
             btn.configure(text=label)
         enabled = rp is not None and len(rp) > 4

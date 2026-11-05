@@ -60,7 +60,7 @@ class ParamsDialogMixin:
             row.columnconfigure(1, weight=1)
             ctk.CTkLabel(row, text=label, font=FONT_SMALL, text_color=MUTED,
                          anchor="w", width=160).grid(row=0, column=0, sticky="w")
-            # Mirror value from existing sidebar widget
+            # Mirror value from the main window's widget
             src: Optional[ctk.CTkEntry] = getattr(self, widget_attr, None)
             default = src.get() if src is not None else ""
             ent = ctk.CTkEntry(row, font=FONT_LABEL, height=28, fg_color=BG,
@@ -98,8 +98,8 @@ class ParamsDialogMixin:
         dlg_filtering = _row_switch(f2, "Filtering", "sw_filtering")
         dlg_notch     = _row_switch(f2, "Notch 50 Hz", "sw_notch")
         dlg_invert    = _row_switch(f2, "Invert signal polarity", "sw_invert_signal")
-        # Labelled Low/High to match the sidebar's FILTERS section -- see
-        # the comment there on why (matches filtering.py's bandpass(lo, hi)
+        # Labelled Low/High to match the Filters popover -- see the comment
+        # there on why (matches filtering.py's bandpass(lo, hi)
         # naming, avoids HP/LP filter-type jargon at a glance).
         dlg_hp = _row_entry(f2, "Low cutoff (Hz)",  "ent_lp")
         dlg_lp = _row_entry(f2, "High cutoff (Hz)", "ent_hp")
@@ -128,10 +128,10 @@ class ParamsDialogMixin:
         # threshold slider especially, since this dialog's copy didn't even
         # re-run detection until Apply & Close, so it could show a value the
         # detector had never actually used. They now have exactly one home:
-        # the sidebar's DETECTION section. Only the SG+Derivative sub-params,
-        # which have no live sidebar control of their own, stay here.
+        # the Signal & Detection bar. The SG+Derivative sub-params are
+        # mirrored here too (their own home: the Filters popover).
         f3 = _sec("🔍  Detection (SG options)", RED)
-        ctk.CTkLabel(f3, text="Min R-R, Method and Threshold: sidebar DETECTION section.",
+        ctk.CTkLabel(f3, text="Min / Max RR, Method and Threshold: the detection bar of Signal & Detection.",
                      font=FONT_KPI_LABEL, text_color=LIGHT,
                      anchor="w", wraplength=480, justify="left").pack(**px, pady=(SPACE_S, 0), fill="x")
         dlg_sg_target_fs = _row_entry(f3, "SG target fs (Hz)", "ent_sg_target_fs")
@@ -164,7 +164,7 @@ class ParamsDialogMixin:
         btn_row.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_M))
 
         def _apply():
-            """Write all dialog values back to the sidebar widgets."""
+            """Write all dialog values back to the main window's widgets."""
             _write = lambda attr, val: (
                 getattr(self, attr).delete(0, "end") or
                 getattr(self, attr).insert(0, val)

@@ -227,20 +227,13 @@ class UIState:
     show_raw: bool = True                       # raw/filtered toggle
     rrhr_strip_visible: bool = True              # RR/HR/Quality sub-plot strip toggle
     show_spike_markers: bool = True              # RR/HR tachogram spike-marker toggle
-    left_panel_collapsed: bool = False           # left sidebar hide/show toggle
-    # Right panel hide/show toggle. Closed at first: the tabs and the Report hold the
-    # numbers and exports; Stats ⟨ opens it (quick statistics, more exports, ML saving).
-    right_panel_collapsed: bool = True
+    # (No sidebar / right-panel collapse flags: both panels are gone. A UI
+    # snapshot taken before still holds them; restore_ui_state ignores them.)
     # Filter preview (before/after overlay) -- computed on-demand for the
     # currently visible detail window only, never touches filtered signal or
     # any detection state.
     filter_preview_on: bool = False
     thr_debounce_id: "str | None" = None        # slider debounce handle
-    resize_debounce_id: "str | None" = None     # window-resize debounce handle -- was
-                                                 # sharing thr_debounce_id, so a resize
-                                                 # mid-drag or a slider tick mid-resize
-                                                 # silently cancelled the OTHER feature's
-                                                 # pending job instead of both being honored
     hover_motion_cid: Optional[int] = None       # mpl event connection id
     hover_after_id: "str | None" = None          # motion debounce handle
     ov_drag_after_id: "str | None" = None        # minimap drag-to-scrub debounce handle

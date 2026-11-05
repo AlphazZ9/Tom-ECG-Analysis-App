@@ -2169,14 +2169,7 @@ class AnalysisController:
         # Update session/template info labels
         self.app._update_session_ui(
             has_session=bool(self.app.signal.filepath and session_exists(self.app.signal.filepath)))
-        # Auto-expand EXPORTS the first time analysis produces something to
-        # export -- it's collapsed by default and otherwise has no cue
-        # pointing to it, so exporting was effectively undiscoverable.
-        if not getattr(self.app, "_exports_auto_opened", False):
-            self.app._exports_auto_opened = True
-            sec_exports = getattr(self.app, "sec_exports", None)
-            if sec_exports is not None:
-                sec_exports.open()
+        # Exports: the Report tab (and the header's Export…), always in view.
 
     def run_freq(self, then: "Any" = None) -> None:
         """Compute frequency-domain HRV in background, then render.

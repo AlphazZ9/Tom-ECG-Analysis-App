@@ -16,6 +16,7 @@ import customtkinter as ctk  # type: ignore[import-untyped]
 
 from ecg.core.metric_table import REPORT_MODULES
 from ecg.ui.freshness import NOT_COMPUTED
+from ecg.ui.popover import Popover, menu_button
 from ecg.ui.tab_keys import TAB_REPORT
 from ecg.ui.tabbar import STATE_GLYPHS, state_color
 from ecg.ui.theme import (
@@ -143,6 +144,22 @@ class TabReportMixin:
             ctk.CTkButton(bar, text=text, command=command, fg_color=BORDER, hover_color=BORDER2,
                           text_color=TEXT, font=FONT_BTN_SEC, height=34, width=96,
                           corner_radius=6).pack(side="left", padx=(0, SPACE_S))
+        # The optional exports (the right panel's EXPORTS held them): one
+        # click further, the three above being the ones a report needs.
+        self.btn_report_more = ctk.CTkButton(
+            bar, text="More ▾", command=self._toggle_report_more, fg_color=CARD,
+            hover_color=BORDER, text_color=TEXT, border_width=1, border_color=BORDER2,
+            font=FONT_BTN_SEC, height=34, width=80, corner_radius=6)
+        self.btn_report_more.pack(side="left")
+        self._bind_hover_tip(self.btn_report_more,
+                             "RR intervals CSV, figures (PNG), everything (ZIP), events PDF")
+        self.report_more = Popover(self, title="More exports")
+        for text, command in (
+                ("📄  RR intervals CSV  (Ctrl+Shift+E)", self._export_rr_csv),
+                ("🖼  Figures (PNG)", self._export_figures),
+                ("📦  Everything (ZIP: Excel + figures)", self._export_zip),
+                ("🔬  Events PDF", self._export_arrhythmia_pdf)):
+            menu_button(self.report_more.body, text, self._menu_command(self.report_more, command))
         self.lbl_report_left_out = ctk.CTkLabel(card, text="", font=FONT_SMALL, text_color=ORANGE,
                                                 anchor="w", justify="left", height=0)
         self.lbl_report_left_out.pack(fill="x", padx=SPACE_M)
@@ -163,6 +180,9 @@ class TabReportMixin:
                 lbl.configure(wraplength=wrap)
 
     # ── Handlers ─────────────────────────────────────────────
+
+    def _toggle_report_more(self: ECGApp) -> None:
+        self.report_more.toggle(self.btn_report_more)
 
     def _on_report_include(self: ECGApp, key: str) -> None:
         """A tick is kept with the state it was given in (see include_choices)."""

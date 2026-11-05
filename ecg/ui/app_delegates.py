@@ -154,7 +154,7 @@ class DelegatesMixin:
         self.detection_ctrl.update_signal_quality(accepted)
 
     def _on_project_name_change(self: ECGApp, event=None) -> None:
-        """Mirror the sidebar 'Project name' entry into the top bar.
+        """Mirror the Recording sheet's 'Project' entry into the header.
 
         Deliberately independent of update_kpis() (which only repaints once
         analysis results exist) -- typing a project name should show up in
@@ -165,7 +165,8 @@ class DelegatesMixin:
         if self.ent_project_name is None or self.lbl_topbar_project is None:
             return
         name = self.ent_project_name.get().strip()  # type: ignore[union-attr]
-        self.lbl_topbar_project.configure(text=name if name else "—")  # type: ignore[union-attr]
+        # Nothing when unset: the file chip beside it then stands alone.
+        self.lbl_topbar_project.configure(text=name)  # type: ignore[union-attr]
 
     def _update_topbar_filename(self: ECGApp) -> None:
         """Mirror the currently-loaded file's name into the top bar.
@@ -189,6 +190,11 @@ class DelegatesMixin:
             if len(channel) > 12:
                 channel = channel.rsplit("_", 1)[-1]
             text += f" · {channel} · {self.signal.fs:g} Hz"
+        # And the animal, set in the Recording sheet this chip opens.
+        ent = getattr(self, "ent_subject", None)
+        subject = ent.get().strip() if ent is not None else ""
+        if fp and subject:
+            text += f" · {subject}"
         if self.lbl_topbar_file.cget("text") != text:  # type: ignore[union-attr]
             self.lbl_topbar_file.configure(text=text)  # type: ignore[union-attr]
 
@@ -235,10 +241,9 @@ class DelegatesMixin:
                     f"({summary['n_samples']} samples).")
             color = MUTED
         self.lbl_ml_status.configure(text=text, text_color=color)  # type: ignore[union-attr]
-        # Mirrors the same text next to the Method combobox when ML Detector
-        # is selected (see detection_controller.on_det_method_change) --
-        # the right-panel section above starts collapsed, so this is the
-        # only copy visible until the user opens it.
+        # A second copy beside the Method combobox, when a layout has one
+        # (none now: lbl_ml_status sits in the quality panel's ML section,
+        # shown with Method = ML Detector).
         inline = getattr(self, "lbl_ml_inline_status", None)
         if inline is not None:
             inline.configure(text=text, text_color=color)
@@ -279,6 +284,8 @@ class DelegatesMixin:
             clean_label = self._CLEAN_METHOD_LABELS.get(clean_val, clean_val.title())
             lines.append(f"•  {clean_label} cleaning")
         self.lbl_filter_summary.configure(text="\n".join(lines))
+        # The detection bar's Filters chip says the same in one line.
+        self._refresh_filters_chip()
 
     # ── Raw / Filtered toggle ─────────────────────────────────
 
@@ -627,16 +634,8 @@ class DelegatesMixin:
         AnnotationManagerDialog(self)
 
     def _update_ann_count(self: ECGApp) -> None:
-        """Refresh the annotation count badge in the toolbar and the
-        right panel's ANNOTATIONS section summary."""
-        if self.lbl_ann_count is not None:
-            n = len(self._annotations)
-            self.lbl_ann_count.configure(  # type: ignore[union-attr]
-                text=f"{n}" if n else "",
-                text_color=ORANGE if n else MUTED)
-        if self.lbl_panel_ann_count is not None:
-            n = len(self._annotations)
-            self.lbl_panel_ann_count.configure(text=f"{n} annotations")  # type: ignore[union-attr]
+        """Refresh the count on the detection bar's Annotations chip."""
+        self._refresh_annotation_chips()
         # Called after every annotation add / edit / delete: the Autonomic,
         # Epochs and Sliding plots draw them on every panel (no-op without a result); the
         # Event-locked label filter lists their labels, and a result locked
@@ -650,12 +649,9 @@ class DelegatesMixin:
         PacingPeriodManagerDialog(self)
 
     def _update_pacing_count(self: ECGApp) -> None:
-        """Refresh the pacing-period count in the ANNOTATIONS panel section's
-        summary (the toolbar's redundant "Pacing Periods" chip was removed --
-        this dialog is now reached solely from that panel section)."""
-        if self.lbl_panel_pacing_count is not None:
-            n = len(self._pacing_periods)
-            self.lbl_panel_pacing_count.configure(text=f"{n} pacing periods")  # type: ignore[union-attr]
+        """Refresh the count on the detection bar's Pacing chip (the one
+        entry point to the pacing-period manager)."""
+        self._refresh_annotation_chips()
 
     def _toggle_rrhr_strip(self: ECGApp) -> None:
         """Show/hide the RR/HR/Quality sub-plot strip below the detail plot.
@@ -693,38 +689,6 @@ class DelegatesMixin:
                 fg_color=BORDER, hover_color=BORDER2, text_color=MUTED, border_width=0)
         if self.analysis.results is not None:
             self.plot_ctrl.plot_rr(self.analysis.results)
-
-    def _toggle_left_panel(self: ECGApp) -> None:
-        """Hide/show the left sidebar entirely (simple hide/show, not a rail).
-
-        Collapsing un-packs the panel so the center workspace immediately
-        reclaims its width. Restoring it MUST pass before=self.main --
-        self.sidebar/self.right_panel are deliberately packed before
-        self.main in _build() so main's expand=True doesn't claim the full
-        cavity first; a bare .pack() after .pack_forget() re-appends the
-        slave to the END of the master's pack order (i.e. after main, which
-        has already claimed all the space), silently producing a permanent
-        zero-width panel. before=self.main reinserts it at the correct
-        position regardless of call order.
-        """
-        self.ui.left_panel_collapsed = not self.ui.left_panel_collapsed
-        if self.ui.left_panel_collapsed:
-            self.sidebar.pack_forget()
-            self.btn_toggle_left_panel.configure(text="⟩ Sidebar")
-        else:
-            self.sidebar.pack(side="left", fill="y", before=self.main)
-            self.btn_toggle_left_panel.configure(text="⟨ Sidebar")
-
-    def _toggle_right_panel(self: ECGApp) -> None:
-        """Hide/show the right panel entirely -- see _toggle_left_panel()'s
-        docstring for why before=self.main is required on restore."""
-        self.ui.right_panel_collapsed = not self.ui.right_panel_collapsed
-        if self.ui.right_panel_collapsed:
-            self.right_panel.pack_forget()
-            self.btn_toggle_right_panel.configure(text="Stats ⟨")
-        else:
-            self.right_panel.pack(side="right", fill="y", before=self.main)
-            self.btn_toggle_right_panel.configure(text="Stats ⟩")
 
     def _run_intervals(self: ECGApp) -> None:
         """Compute interval delineation (PR/QRS/QT/QTc) for every beat."""
@@ -1288,6 +1252,7 @@ class DelegatesMixin:
             "Ctrl+M         Compare segments\n"
             "Ctrl+Z / Y     Undo / Redo peak edits\n"
             "←  / →         Move the ECG view (Signal & Detection tab)\n"
+            "Esc            Close an open menu or popover\n"
             "F1             This help\n"
         )
         messagebox.showinfo("Keyboard shortcuts", shortcuts)

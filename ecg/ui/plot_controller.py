@@ -2640,34 +2640,39 @@ class PlotController:
             window=self._report_window(), signal_end_s=self._signal_end_s(),
             asymmetry=None)
 
+        # Tiles are optional: only those a view registered in _kpi are
+        # written (the right panel's STATISTICS, which held them all, is
+        # gone -- Rhythm & HRV, the quality panel and Report read the table).
+        kpi = self.app._kpi
+
+        def put(key: str, text: str) -> None:
+            widget = kpi.get(key)
+            if widget is not None:
+                widget.configure(text=text)
+
         # Value text is bare (no unit suffix) -- units are baked into the
-        # stat-panel tiles once at construction (make_stat_tile's unit=),
-        # so the value stays the visually-prominent element per the redesign
-        # brief ("valeurs numériques mises en évidence, unités discrètes").
-        self.app._kpi["hr_mean"].configure(text=t.raw_text("hr.mean", 0))
-        self.app._kpi["hr_range"].configure(
-            text=f"{t.raw_text('hr.min', 0)}–{t.raw_text('hr.max', 0)}")
-        self.app._kpi["rr_mean"].configure(text=t.raw_text("rr.mean", 0))
-        self.app._kpi["n_beats"].configure(text=str(t.value("hr.n_valid", "—")))
-        self.app._kpi["sdnn"].configure(text=t.raw_text("hrv_time.HRV_SDNN", 1))
-        self.app._kpi["rmssd"].configure(text=t.raw_text("hrv_time.HRV_RMSSD", 1))
-        self.app._kpi["pnn6"].configure(text=t.raw_text("hrv_time.HRV_pNN6", 1))
+        # tiles once at construction (make_stat_tile's unit=).
+        put("hr_mean", t.raw_text("hr.mean", 0))
+        put("hr_range", f"{t.raw_text('hr.min', 0)}–{t.raw_text('hr.max', 0)}")
+        put("rr_mean", t.raw_text("rr.mean", 0))
+        put("n_beats", str(t.value("hr.n_valid", "—")))
+        put("sdnn", t.raw_text("hrv_time.HRV_SDNN", 1))
+        put("rmssd", t.raw_text("hrv_time.HRV_RMSSD", 1))
+        put("pnn6", t.raw_text("hrv_time.HRV_pNN6", 1))
         # Analysed duration (window end − start) -- not rdf's last Time_s,
         # the absolute time of the last beat.
-        self.app._kpi["dur"].configure(text=t.raw_text("core.duration_s", 0))
+        put("dur", t.raw_text("core.duration_s", 0))
 
-        # Top-bar compact mirrors of the 3 values shown there (§1 of the
-        # Phase 1 plan) -- same source numbers as the tiles above, just a
-        # second, smaller display in the full-width top bar.
+        # Compact mirrors of a few tiles -- same source numbers.
         for key, widget in self.app._topbar_vals.items():
-            src = self.app._kpi.get(key)
+            src = kpi.get(key)
             if src is not None:
                 widget.configure(text=src.cget("text"))
 
         # ── Signal Quality tiles ────────────────────────────────────────────
         # Same texts as plot_quality_panel()'s Signal Quality panel.
         score = self.app.detection.sig_quality
-        self.app._kpi["sq_score"].configure(text=f"{score}" if score is not None else "—")
+        put("sq_score", f"{score}" if score is not None else "—")
         # sq_noisy_time: duration-weighted counterpart to sq_badbeats: rodent ECG is prone
         # to EMG contamination from near-constant movement/grooming, so a
         # beat-count percentage alone can understate how much of the actual
@@ -2675,4 +2680,4 @@ class PlotController:
         # few beats detected at all). Each RR interval's duration goes to
         # the quality of the scored beat it starts at (noisy_time_pct).
         for key, text in quality_tile_texts(t).items():
-            self.app._kpi[key].configure(text=text)
+            put(key, text)

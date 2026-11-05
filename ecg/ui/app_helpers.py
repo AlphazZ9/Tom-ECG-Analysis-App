@@ -36,7 +36,7 @@ class HelpersMixin:
     """ECGApp widget factories, status bar, copy menus and table-to-text helpers."""
 
     # ════════════════════════════════════════════════════════
-    #  SIDEBAR WIDGET HELPERS
+    #  FORM WIDGET HELPERS
     # ════════════════════════════════════════════════════════
 
 
@@ -89,7 +89,7 @@ class HelpersMixin:
 
     def _btn(self: ECGApp, parent, text: str, command, pad: dict,
              variant: str = "secondary", h: int = 28, bold: bool = False) -> ctk.CTkButton:
-        """Build a sidebar-style secondary/action button in one of 5 named
+        """Build a secondary/action button in one of 5 named
         variants (primary/success/warning/danger/secondary), matching the
         rationalised colour system in theme.py (COLOR_* semantic tokens).
 
@@ -313,7 +313,7 @@ class HelpersMixin:
         """Truncate *text* with an ellipsis so it fits on one line of
         lbl_status, never wrapping.  See lbl_status's construction in
         _build_toolbar() for why: a wrapped 2-3 line status message used
-        to spill over and hide the Parameters/Theme/"Stats ⟩" buttons.
+        to spill over and hide the header's buttons.
         """
         try:
             avail = self.lbl_status.winfo_width()

@@ -8,7 +8,6 @@ filters, RR bounds / exclusions, artifact correction, QTc formula,
 interval definitions and wave template.
 """
 import re
-from collections import defaultdict
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -137,7 +136,7 @@ def test_duration_tile_shows_analysed_duration():
         analysis=AnalysisState(results=r, analysed_window=(100.0, 160.0)),
         detection=DetectionState(),
         signal=SignalState(time=np.linspace(0.0, 600.0, 1201)),
-        _kpi=defaultdict(_Label), _topbar_vals={}, quality_gauge=None)
+        _kpi={"dur": _Label()}, _topbar_vals={}, quality_gauge=None)
     PlotController(app).update_kpis()   # type: ignore[arg-type]
     assert app._kpi["dur"].text == "60"
 
@@ -188,7 +187,7 @@ def test_pnn6_tile_key_is_pnn6():
         analysis=AnalysisState(results=r, analysed_window=(100.0, 160.0)),
         detection=DetectionState(),
         signal=SignalState(time=np.linspace(0.0, 600.0, 1201)),
-        _kpi=defaultdict(_Label), _topbar_vals={}, quality_gauge=None)
+        _kpi={"pnn6": _Label()}, _topbar_vals={}, quality_gauge=None)
     PlotController(app).update_kpis()   # type: ignore[arg-type]
     assert app._kpi["pnn6"].text == "10.0"
     assert "pnn50" not in app._kpi

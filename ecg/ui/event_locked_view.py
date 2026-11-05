@@ -169,7 +169,7 @@ SINGLE_CONTRAST_NOTE = (
 DEFAULT_SUBJECT_NOTE = (
     "{n} event(s) of {r} recordings share the default-looking Subject ID "
     "{ids}: if these are different animals, the per-subject mean pools "
-    "them as one — set each animal's Subject ID in the sidebar and save "
+    "them as one — set each animal's Subject ID in the Recording sheet and save "
     "its events again.")
 
 # Fewest rank steps (W+ change) a Z(k) stretch must move by for its knee to
@@ -780,7 +780,7 @@ _REGISTRY_PARAM_KEYS = (
 
 
 def is_default_subject(subject: Any) -> bool:
-    """True for the sidebar's untouched Subject ID ("subject_01") and the
+    """True for the Recording sheet's untouched Subject ID ("subject_01") and the
     like ("Subject 2", "subject") -- a placeholder rather than an animal."""
     return bool(_DEFAULT_SUBJECT_RE.match(str(subject or "").strip()))
 
@@ -803,7 +803,7 @@ def subject_warning(subject: str, filepath: str, project: str,
     parts = []
     if is_default_subject(subj):
         parts.append(f"Subject ID “{subj}” looks like the app's default: if it was not "
-                     "set for this animal, set it in the sidebar and save again")
+                     "set for this animal, set it in the Recording sheet and save again")
     if others:
         from pathlib import Path
         names = ", ".join(Path(f).name for f in others[:3]) + (" …" if len(others) > 3 else "")

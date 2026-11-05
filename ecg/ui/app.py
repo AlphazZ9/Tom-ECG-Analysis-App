@@ -51,9 +51,9 @@ from ecg.ui.theme import (
 from ecg.ui.dialogs import ThemeDialog
 
 from ecg.ui.app_state_props import StateProps
-from ecg.ui.app_sidebar import SidebarMixin
 from ecg.ui.app_toolbar import ToolbarMixin
-from ecg.ui.app_right_panel import RightPanelMixin
+from ecg.ui.app_header_menus import HeaderMenusMixin
+from ecg.ui.app_detection_bar import DetectionBarMixin
 from ecg.ui.app_async import AsyncMixin
 from ecg.ui.app_helpers import HelpersMixin
 from ecg.ui.app_delegates import DelegatesMixin
@@ -74,9 +74,9 @@ log = logging.getLogger("ecg")
 
 class ECGApp(
     StateProps,
-    SidebarMixin,
     ToolbarMixin,
-    RightPanelMixin,
+    HeaderMenusMixin,
+    DetectionBarMixin,
     AsyncMixin,
     HelpersMixin,
     DelegatesMixin,
@@ -96,15 +96,10 @@ class ECGApp(
         super().__init__()
         self.title("ECG Analysis")
         self.geometry("1920x1080")
-        # Toolbar width floor: below ~1600px the right-hand button cluster
-        # (quality gauge/badge, Parameters, Theme, dark/light, "Stats ⟩"
-        # panel toggle -- packed in _build_toolbar()) runs out of cavity and
-        # Tk's pack manager unmaps whichever of them no longer fits, silently
-        # dropping them instead of shrinking/overlapping. Measured: at the
-        # old 1200 floor, Parameters AND the right-panel toggle were both
-        # completely unmapped (not just crowded); everything needs ~1600px
-        # to render at full size. 1650 keeps a small safety margin.
-        self.minsize(1650, 750)
+        # Width floor: the header's commands (packed first, see
+        # _build_toolbar) need ~1100 px and the Signal & Detection bar about
+        # as much; with no sidebar the tabs get the whole width.
+        self.minsize(1280, 720)
         # Open in fullscreen/maximized state
         self.after(100, lambda: self.state("zoomed"))  # Windows fullscreen
         self.configure(fg_color=PANEL)
@@ -127,37 +122,6 @@ class ECGApp(
 
     # ─── Startup helpers ──────────────────────────────────────
 
-    def _on_window_resize(self, event) -> None:
-        """Adjust sidebar width proportionally when the window is resized.
-
-        Debounced to 80 ms so rapid drag-resize events don't flood the layout
-        engine with redundant configure calls.
-        """
-        if event.widget is not self:
-            return
-        # Own debounce handle -- this used to reuse _thr_debounce_id, the
-        # same field the threshold-slider drag debounce (detection_
-        # controller.py) owns, so a resize landing mid-drag (or vice versa)
-        # would silently cancel the OTHER feature's pending job instead of
-        # both being honored.
-        if self._resize_debounce_id is not None:
-            try:
-                self.after_cancel(self._resize_debounce_id)
-            except Exception:
-                pass
-        new_w = max(220, min(340, int(event.width * 0.20)))
-        self._resize_debounce_id = self.after(
-            80, lambda w=new_w: self._apply_resize(w)
-        )
-
-    def _apply_resize(self, new_w: int) -> None:
-        """Apply the debounced sidebar width update."""
-        self._resize_debounce_id = None
-        try:
-            self.sidebar.configure(width=new_w)
-        except Exception as e:
-            log.debug("sidebar.configure width failed: %s", e)
-
     def _load_icon(self) -> None:
         if not APP_ICON_PATH:
             return
@@ -177,64 +141,38 @@ class ECGApp(
 
     def _build(self) -> None:
         self.update_idletasks()
-        # Packed on self, side="top", BEFORE the sidebar -- this is what makes
-        # it span the full window width rather than being confined to main's
-        # width the way the old KPI bar was (sidebar's own side="left" would
-        # otherwise claim the left edge first).
+        # Packed on self, side="top": the header spans the full window width.
         self._build_toolbar()
-        w = self.winfo_width() or 1480
-        _sidebar_w = max(220, min(340, int(w * 0.20)))
-        self.sidebar = ctk.CTkFrame(self, width=_sidebar_w, fg_color=PANEL, corner_radius=0)
-        self.sidebar.pack(side="left", fill="y")
-        self.sidebar.pack_propagate(False)
-        self.bind("<Configure>", self._on_window_resize)
+        # Before the tabs: they read the Recording sheet's entries
+        # (ent_subject...) while being built. Popovers are lifted when shown.
+        self._build_header_menus()
         # Keyboard navigation shortcuts (active when focus is on the main
         # window -- guarded against firing while the focus is actually in a
         # text entry, where Left/Right must move the text cursor instead).
         self.bind("<Left>",  lambda e: None if self._typing_in_entry() else self._kb_navigate(-1))
         self.bind("<Right>", lambda e: None if self._typing_in_entry() else self._kb_navigate(+1))
-        self._build_sidebar()
-        # Apply the default state immediately so FILTER SETTINGS widgets are
-        # greyed out at startup (Filtering is OFF by default).
-        self.after(50, self._on_filtering_toggle)
 
-        # Packed side="right" BEFORE main, for the same reason the sidebar is
-        # packed before main -- main's expand=True must not claim the space
-        # first.
-        self._build_right_panel()
-
-        # Stored as self.main (not a local var) so _toggle_left_panel()/
-        # _toggle_right_panel() can re-pack a collapsed panel with
-        # before=self.main -- see those methods for why that's required.
-        # fg_color=PANEL (not BG) so the workspace reads as the same grey as
-        # the sidebar/right_panel it sits between, instead of a subtly
-        # different shade that shows as a seam down both edges.
+        # No sidebar and no right panel: the context strip and the tabs take
+        # the whole width. What they held lives in the header (file chip ->
+        # Recording sheet, ▾ recent files, ⋯ menu), the context strip
+        # (analysis window), the Signal & Detection bar and quality panel, and
+        # Report > More.
         self.main = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
-        self.main.pack(side="left", fill="both", expand=True)
+        self.main.pack(side="top", fill="both", expand=True)
         self._build_context_strip(self.main)
         self._build_tabs(self.main)
+        # Apply the default state immediately so the Filters popover's
+        # FILTER SETTINGS are greyed out at startup (Filtering is OFF by default).
+        self.after(50, self._on_filtering_toggle)
         # Global keyboard shortcuts -- guarded the same way as Left/Right
         # above: Ctrl+Z is the near-universal native-undo instinct, so
-        # without this guard typing in a sidebar field (Project name,
-        # Subject ID, Channel) and hitting Ctrl+Z out of habit silently
-        # undoes a peak edit instead of the text.
+        # without this guard typing in a field (Project name, Subject ID,
+        # Channel) and hitting Ctrl+Z out of habit silently undoes a peak
+        # edit instead of the text.
         self.bind("<Control-z>", lambda e: None if self._typing_in_entry() else self._undo_edit(e))
         self.bind("<Control-Z>", lambda e: None if self._typing_in_entry() else self._undo_edit(e))
         self.bind("<Control-y>", lambda e: None if self._typing_in_entry() else self._redo_edit(e))
         self.bind("<Control-Y>", lambda e: None if self._typing_in_entry() else self._redo_edit(e))
-
-        # Apply persisted collapse state (defaults False -- both expanded,
-        # matching how the toggle buttons were just constructed). Route
-        # through the toggle methods themselves rather than duplicating
-        # their pack_forget()/button-text logic here -- each toggle flips
-        # the UIState bool from its current (just-initialized "expanded")
-        # value, so only fire it when the persisted value says "collapsed".
-        if self.ui.left_panel_collapsed:
-            self.ui.left_panel_collapsed = False
-            self._toggle_left_panel()
-        if self.ui.right_panel_collapsed:
-            self.ui.right_panel_collapsed = False
-            self._toggle_right_panel()
 
     # ─── Tabs ─────────────────────────────────────────────────
 
@@ -366,10 +304,9 @@ class ECGApp(
         # the correlation badge was never repainted after a theme toggle
         # before, so it silently went blank on every _rebuild_ui(). Cheap
         # fix while already touching this exact code path.
-        # Same class of gap: the Detection-tab toolbar badges and the right
-        # panel's ANNOTATIONS summary both need a refresh after a full
-        # rebuild -- both widgets are guaranteed valid here since _build()
-        # (called above) has already fully rebuilt every tab and panel.
+        # Same class of gap: the detection bar's Annotations / Pacing chips
+        # need a refresh after a full rebuild -- valid here since _build()
+        # (called above) has already fully rebuilt every tab and popover.
         self._update_ann_count()
         self._update_pacing_count()
         self._refresh_shell()

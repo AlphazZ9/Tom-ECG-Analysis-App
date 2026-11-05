@@ -1233,7 +1233,7 @@ class MLTrainingDialog(ctk.CTkToplevel):
                      text_color=TEXT, anchor="w").pack(fill="x", padx=20, pady=(20, 4))
         ctk.CTkLabel(
             self, text="Trains a classifier from recordings marked "
-                       "“Verified for training” (sidebar switch, "
+                       "“Verified for training” (Signal quality panel, Method = ML Detector, "
                        "saved with the session). Verify a few recordings "
                        "with clean, corrected R-peaks, then train.",
             font=FONT_SMALL, text_color=MUTED, anchor="w", justify="left",
@@ -1937,7 +1937,7 @@ class CalibrationDialog(ctk.CTkToplevel):
                 f"  No valid event-locked row in the cohort registry{filt}.\n\n"
                 "  For each recording: Time course > Autonomic > ⟳ Compute, then Event-locked > "
                 "⟳ Compute event-locked, then 💾 Save to cohort registry (with the "
-                "Subject ID and Project name set in the sidebar).")
+                "Subject ID and Project set in the Recording sheet: click the file name in the header).")
         else:
             self._set_text(calibration_text(cal))
         ks, kp, text, enabled = apply_plan(cal)

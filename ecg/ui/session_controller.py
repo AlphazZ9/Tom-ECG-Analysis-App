@@ -326,6 +326,11 @@ class SessionController:
             "autonomic_params": state.get("autonomic_params"),
             # Same for the Event-locked panel (label filter, pre / post, z).
             "event_locked_params": state.get("event_locked_params"),
+            # Subject ID, SG window, raw / filtered view (absent in older sessions).
+            "recording_fields": state.get("recording_fields"),
+            # Which filter_params keys the session holds: only those are
+            # written back to widgets the restore did not always set.
+            "filter_keys":      sorted(state.get("filter_params", {}) or {}),
             # The recording's own wave template (with its provenance).
             "wave_template":    wave_template_from_session(state),
         }
@@ -540,6 +545,8 @@ class SessionController:
                 self.app._on_filtering_toggle()
             except Exception as _exc:
                 log.debug("restore on_filtering_toggle failed: %s", _exc, exc_info=True)
+            self.restore_detection_widgets(fp, bundle.get("filter_keys") or ())
+        self.apply_recording_fields(bundle.get("recording_fields"))
 
         self.app._run_detection(thr)
         # Re-detection rebuilt the peaks from the full candidate set, which
@@ -782,7 +789,91 @@ class SessionController:
         ectl = getattr(self.app, "event_ctrl", None)
         if ectl is not None:
             state["event_locked_params"] = ectl.widget_params()
+        state["recording_fields"] = self.recording_fields()
         return state
+
+    # FilterParams.to_dict's detection_method key -> the Method combobox label.
+    _METHOD_LABELS = {"auto": "Auto (NeuroKit2)", "sg_derivative": "SG + Derivative (10 kHz)",
+                      "wavelet": "Wavelet (CWT)", "envelope_max": "Envelope Max",
+                      "ml": "ML Detector"}
+
+    def restore_detection_widgets(self, fp: FilterParams, saved_keys) -> None:
+        """The FilterParams widgets the restore above does not write: method,
+        SG target fs, auto-correction, channel, rate and crop, as saved (the
+        signal itself is re-prepared from prepare_params either way). Only the
+        keys the session holds: an older one leaves the others as they are."""
+        keys = set(saved_keys)
+        dm = FilterParams(detection_method=fp.detection_method).to_dict()["detection_method"]
+        cb = getattr(self.app, "cb_det_method", None)
+        if "detection_method" in keys and cb is not None:
+            label = self._METHOD_LABELS[dm]
+            cb.set(label)
+            self.app._on_det_method_change(label)
+        for key, attr, val in (("sg_target_fs", "ent_sg_target_fs", str(fp.sg_target_fs)),
+                               ("channel", "ent_channel", fp.channel),
+                               ("fs", "ent_fs", str(fp.fs)),
+                               ("t_start", "ent_t_start", f"{fp.t_start:g}"),
+                               ("t_end", "ent_t_end", f"{fp.t_end:g}")):
+            w = getattr(self.app, attr, None)
+            if key not in keys or w is None:
+                continue
+            try:
+                w.delete(0, "end")
+                w.insert(0, val)
+            except Exception as exc:
+                log.debug("restore %s failed: %s", attr, exc, exc_info=True)
+        sw = getattr(self.app, "sw_artifact", None)
+        if "artifact_correction" in keys and sw is not None:
+            sw.select() if fp.artifact_correction else sw.deselect()
+
+    # Settings of the Recording sheet / Filters popover that FilterParams
+    # does not hold (it holds the ones the signal and the peaks depend on).
+    # Absent from sessions saved before: the widgets then keep their values.
+    _RECORDING_ENTRIES = (("subject", "ent_subject"), ("sg_window_ms", "ent_sg_window_ms"))
+
+    def recording_fields(self) -> dict:
+        out: dict = {}
+        for key, attr in self._RECORDING_ENTRIES:
+            w = getattr(self.app, attr, None)
+            if w is not None:
+                out[key] = w.get()
+        sw = getattr(self.app, "sw_show_raw", None)
+        if sw is not None:
+            out["show_raw"] = bool(sw.get())
+        ent = getattr(self.app, "ent_project_name", None)
+        if ent is not None:
+            out["project_name"] = ent.get()
+        return out
+
+    def apply_recording_fields(self, fields: object) -> None:
+        """Write recording_fields() back; anything missing or unreadable keeps
+        the widget's current value."""
+        if not isinstance(fields, dict):
+            return
+        for key, attr in self._RECORDING_ENTRIES:
+            w = getattr(self.app, attr, None)
+            val = fields.get(key)
+            if w is None or not isinstance(val, str):
+                continue
+            try:
+                w.delete(0, "end")
+                w.insert(0, val)
+            except Exception as exc:
+                log.debug("restore %s failed: %s", attr, exc, exc_info=True)
+        sw = getattr(self.app, "sw_show_raw", None)
+        if sw is not None and isinstance(fields.get("show_raw"), bool):
+            sw.select() if fields["show_raw"] else sw.deselect()
+            self.app.ui.show_raw = fields["show_raw"]
+        # The project spans many recordings: the session's fills an empty
+        # entry, never replaces the one being worked under.
+        ent = getattr(self.app, "ent_project_name", None)
+        project = fields.get("project_name")
+        if ent is not None and isinstance(project, str) and project and not ent.get().strip():
+            try:
+                ent.insert(0, project)
+                self.app._on_project_name_change()
+            except Exception as exc:
+                log.debug("restore project name failed: %s", exc, exc_info=True)
 
     def save_for_training_only(self) -> None:
         """Cache this recording's corrected R-peaks as ML training data only.
@@ -1041,20 +1132,27 @@ class SessionController:
                 self.app.lbl_template_info.configure(  # type: ignore[union-attr]
                     text=pending_template_info_text(), text_color=MUTED)
 
+    # Widgets a UI rebuild (theme toggle) snapshots and restores, wherever
+    # they live: Recording sheet, detection bar, Filters popover, context
+    # strip (analysis window), quality panel, tabs.
+    _SNAPSHOT_ENTRIES = (
+        "ent_project_name", "ent_channel", "ent_subject", "ent_fs", "ent_t_start",
+        "ent_t_end", "ent_lp", "ent_hp", "ent_minrr", "ent_maxrr",
+        "ent_epoch", "ent_overlap", "ent_roll_win", "ent_roll_step",
+        "ent_thr", "ent_window", "ent_analysis_t0", "ent_analysis_t1",
+        "ent_sg_target_fs", "ent_sg_window_ms", "ent_entropy_cap")
+    _SNAPSHOT_SWITCHES = ("sw_show_raw", "sw_filtering", "sw_notch", "sw_invert_signal",
+                          "sw_artifact", "sw_epoch")
+
     def snapshot_ui_state(self) -> dict:
         """Capture all editable widget values before a UI rebuild."""
         s: dict = {}
-        for attr in ("ent_project_name", "ent_channel", "ent_subject", "ent_fs", "ent_t_start",
-                     "ent_t_end", "ent_lp", "ent_hp", "ent_minrr", "ent_maxrr",
-                     "ent_epoch", "ent_overlap", "ent_roll_win", "ent_roll_step",
-                     "ent_thr", "ent_window",
-                     "ent_sg_target_fs", "ent_sg_window_ms", "ent_entropy_cap"):
+        for attr in self._SNAPSHOT_ENTRIES:
             try:
                 s[attr] = getattr(self.app, attr).get()
             except Exception:
                 s[attr] = ""
-        for attr in ("sw_show_raw", "sw_filtering", "sw_notch",
-                     "sw_artifact", "sw_epoch"):
+        for attr in self._SNAPSHOT_SWITCHES:
             try:
                 s[attr] = bool(getattr(self.app, attr).get())
             except Exception:
@@ -1083,8 +1181,6 @@ class SessionController:
         s["edit_mode"] = self.app.detection.edit_mode
         s["nav_pos"]   = self.app.ui.nav_pos
         s["rrhr_strip_visible"] = self.app.ui.rrhr_strip_visible
-        s["left_panel_collapsed"]  = self.app.ui.left_panel_collapsed
-        s["right_panel_collapsed"] = self.app.ui.right_panel_collapsed
         s["show_spike_markers"] = self.app.ui.show_spike_markers
         # Autonomic parameters as typed (even before a Compute) -- read
         # tolerantly, an unreadable entry keeps the stored value.
@@ -1102,11 +1198,7 @@ class SessionController:
 
     def restore_ui_state(self, s: dict) -> None:
         """Restore widget values captured before a UI rebuild."""
-        for attr in ("ent_project_name", "ent_channel", "ent_subject", "ent_fs", "ent_t_start",
-                     "ent_t_end", "ent_lp", "ent_hp", "ent_minrr", "ent_maxrr",
-                     "ent_epoch", "ent_overlap", "ent_roll_win", "ent_roll_step",
-                     "ent_thr", "ent_window",
-                     "ent_sg_target_fs", "ent_sg_window_ms", "ent_entropy_cap"):
+        for attr in self._SNAPSHOT_ENTRIES:
             val = s.get(attr)
             if val is None:
                 continue
@@ -1115,7 +1207,8 @@ class SessionController:
                 if w is None:
                     continue
                 w.delete(0, "end")
-                w.insert(0, str(val))
+                if str(val):    # an insert, even of "", hides the placeholder
+                    w.insert(0, str(val))
             except Exception as _exc:
                 log.debug("_restore_ui_state entry %s: %s", attr, _exc)
         # ent_project_name's restored text doesn't auto-propagate to its top-
@@ -1129,22 +1222,17 @@ class SessionController:
                 cb = (getattr(self.app, attr, None) or {}).get(metric)
                 if cb is not None:
                     cb.select() if on else cb.deselect()
-        sw_map = {
-            "sw_show_raw": "sw_show_raw",
-            "sw_filtering": "sw_filtering",
-            "sw_notch": "sw_notch",
-            "sw_artifact": "sw_artifact",
-            "sw_epoch": "sw_epoch",
-        }
-        for key, attr in sw_map.items():
+        for attr in self._SNAPSHOT_SWITCHES:
+            if attr not in s:
+                continue        # a snapshot older than the switch
             try:
                 w = getattr(self.app, attr)
-                if s.get(key):
+                if s.get(attr):
                     w.select()
                 else:
                     w.deselect()
             except Exception as _exc:
-                log.debug("restore switch '%s' failed: %s", key, _exc, exc_info=True)
+                log.debug("restore switch '%s' failed: %s", attr, _exc, exc_info=True)
 
         try:
             self.app.sl_thr.set(float(s.get("sl_thr", 0.5)))  # type: ignore[union-attr]
@@ -1176,12 +1264,8 @@ class SessionController:
         saved_rrhr_visible = bool(s.get("rrhr_strip_visible", True))
         if saved_rrhr_visible != self.app.ui.rrhr_strip_visible:
             self.app._toggle_rrhr_strip()
-        saved_left_collapsed = bool(s.get("left_panel_collapsed", False))
-        if saved_left_collapsed != self.app.ui.left_panel_collapsed:
-            self.app._toggle_left_panel()
-        saved_right_collapsed = bool(s.get("right_panel_collapsed", False))
-        if saved_right_collapsed != self.app.ui.right_panel_collapsed:
-            self.app._toggle_right_panel()
+        # "left_panel_collapsed" / "right_panel_collapsed" of a snapshot taken
+        # with the sidebars: nothing to restore, both panels are gone.
         saved_show_spikes = bool(s.get("show_spike_markers", True))
         if saved_show_spikes != self.app.ui.show_spike_markers:
             self.app._toggle_spike_markers()

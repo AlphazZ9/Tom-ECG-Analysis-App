@@ -152,11 +152,50 @@ and *Intervals* are Morphology & Intervals, *Abnormal Events* is Events.
   through the 30–70 % part of the deflection meets the baseline
   (threshold: 5 % of the R amplitude or 3× the PR-segment noise for the R
   wave; a Q or S wave counts once it dips more than 2 % of R or 3× the
-  noise below the baseline). P onset is where the same kind of line
+  noise below the baseline). On a rolling median (N > 1), a small
+  **initial QRS wave** of the other sign that the Q (or R) runs straight
+  out of — peaking at most 3 ms before the Q is back near the baseline,
+  and more than 1 % of R and 5× the noise above both the PR baseline and
+  the level it rises from (the trace 5–8 ms before its peak), on a 1.5 ms
+  moving average — starts the QRS: the onset is where the line through the
+  times that wave rises through 30, 50 and 70 % of its height meets that
+  level, not the Q edge (on 248, +18 % of R at −6 ms before a Q at −2.5;
+  on 247, +2–3 % at −7.5 before a Q at −4.5: the Q edge started the QRS
+  3–4 ms late). Whether there is such a wave, and how far its onset leads
+  the Q edge, is decided on the median of the max(8 N, 256) beats around
+  each row (the majority of the neighbouring such medians), not on the
+  row's own median; the row's QRS onset is its own Q / R edge onset moved
+  by that lead. A wave still rising at the start of that 3 ms span is the
+  end of a P running into the QRS and is not counted, and neither is a PR
+  segment that merely sits above a PR window landed in the negative phase
+  of a biphasic P (it rises from no lower level). Rows measured on their
+  own beat, and N = 1, keep the Q / R edge (the 247 wave is under 5× a
+  single beat's noise): there QRS is ~3–4 ms shorter and PR as much longer
+  than on the smoothed rows, and switching N moves PR that much relative
+  to the 55 ms AV-delay cutoff. A wave within about a third of the
+  threshold (on a synthetic, 1.4 % of R at 2–3× the 248 noise) can still
+  count on some stretches of 16 or more rows and not on others (QRS onset
+  ~3.5 ms apart). P onset is where the same kind of line
   through the P-wave upstroke meets the PR baseline, searched up to 30 ms
   before the P peak (when a P riding on the previous T never returns to
   that baseline, the line through the part of the upstroke above the T–P
-  junction is used, not earlier than that junction). The P peak itself is
+  junction is used, not earlier than that junction). On a rolling median
+  (N > 1), a biphasic P — a trough the other way first, at least 25 % of
+  the peak and above the P detection threshold — starts where the trace
+  comes back up through the PR baseline after that trough (the line breaks
+  on the shoulder of a notched P, or lands on the notch ~4 ms late), as long
+  as the P peak follows within 8 ms (2–6 ms on 247 and 248, whatever the size
+  of the shoulder; a trough farther away is the previous T's tail, and a T
+  tail ending less than ~4 ms before a fast-rising P can still move the onset
+  that much earlier). Rows measured on their own beat (premature beats, too
+  few ensemble members) keep the upstroke line. The foot of that trough
+  would be the earlier atrial onset, but it is not reliably measurable at
+  N = 32 (on 248 and 247 its SD within 30 s is 5–13× the up-crossing's), so
+  PR starts at the up-crossing. The rule depends on polarity: in the mirror
+  image (a smaller first phase of the peak's own sign, then a larger phase
+  the other way) the P peak is that first phase and the onset stays at the
+  foot of the deflection, so PR reads ~4.5 ms longer than for the 248 shape
+  (synthetic); neither Experiment 13 recording has that shape. The P peak itself is
   searched after the previous beat's T peak and measured against the PR
   baseline (at mouse heart rates the beat window reaches back onto the
   previous T wave: a baseline taken there read PR ~60 ms instead of 42 at
@@ -169,7 +208,30 @@ and *Intervals* are Morphology & Intervals, *Abnormal Events* is Events.
   so it is counted in QT, not in QRS. T end is where the same kind of line
   through the 70–30 % part of the T-wave trailing edge meets the PR
   baseline; the mouse T-wave end is gradual and ambiguous, so check its
-  placement on the mean beat. Each beat is delineated in its own window:
+  placement on the mean beat. On a rolling median (N > 1), a **biphasic T**
+  (a run of the other sign right before or after the largest T phase, at
+  least 30 % of it and 4× the noise of a median beat) ends where its
+  **last** phase comes back to the PR level, and its T peak is the peak of
+  its first phase. Which phases the T has is decided on the median of the
+  8 N beats around each row (a decision every N / 2 rows; ~45 s at N = 32),
+  not on the row's own median. That median's T end is the line through the
+  times its last phase's trailing edge (4 ms moving average) falls through
+  70, 60 … 30 % of the phase, meeting the PR level — the mean of every 6 ms
+  stretch of the PR segment weighted by its flatness (the one flattest
+  stretch that QRS onset uses jumped between two levels on a sloping PR
+  segment, moving the T end by ~1.7 ms in blocks of rows on 247). Each row's
+  T end is that one moved by the lag at which that median's last phase fits
+  the row best in least squares (within 4 ms of the lag of its whole T,
+  itself within ±15 ms; the whole T's lag when the last phase alone is under
+  3× its noise). No T end on a row whose T is not told from noise or that
+  clearly lacks the last phase; where the second phase is 15–30 % of the
+  first, or the medians around disagree on how many phases there are
+  (ambiguous); and where that median blends the beats before and after a QT
+  change (its edge is two edges: those rows are measured on their own
+  median, often with no T end for a few seconds). A T end that shifts is
+  read in full, a T that widens at ~3/4 of its change; a QT change lasting
+  less than that median (~45 s) is read with up to ~3 ms error. Each beat
+  is delineated in its own window:
   up to ±100 ms, at most 70 % of its preceding RR before R and of its
   following RR after R (a neighbour closer than Min RR is ignored); the
   exports and the Summary report state how many beats had a shortened
@@ -212,9 +274,40 @@ and *Intervals* are Morphology & Intervals, *Abnormal Events* is Events.
   shorter than the window is smoothed. Under smoothing beat-to-beat QT variability
   is withheld and an AV-delay run must last at least N rows. Reports state N, the
   window in seconds and the exclusions; old sessions stay per beat. On the two
-  Experiment 13 recordings: PR measured 2 → 100 % (248) and 70 → 69 % (247), QT IQR
-  38–76 → 38–49 ms (248) and 38–50 → 39–41 ms (247); on 247 the missing PR is where
-  the P of the median beat itself falls below the detector's threshold.
+  Experiment 13 recordings: PR measured 2 → 100 % (248) and 70 → 100 % (247), QT IQR
+  38–76 → 38–49 ms (248) and 38–50 → 39–41 ms (247). **Changed numbers (biphasic
+  P onset):** on 247 the notched P broke the P-onset line on 31 % of the smoothed
+  rows (no PR) and moved it on many others (a false PR step from 45 to 48 ms
+  around 600 s); with the up-crossing PR is 48.8 ms [48.6–49.0] on 99.7 % of the
+  rows (46.2 [44.9–48.2] on 69 % before); 248 is unchanged (42.9 ms). **Changed
+  numbers (biphasic T end):** on 248 (T +0.09 then −0.06) each row chose its T end
+  on its own median, by which phase was the larger on that median: 467 rows ended
+  the T with the negative phase (~45 ms), 997 with the positive one (~34 ms) and
+  284 had none, in blocks of rows (fake QT steps of ~11 ms). QT is now 49.9 ms
+  [49.5–50.4] on 99.8 % of the rows (39.0 [38.1–48.9] on 83.8 % before) and 247
+  (+0.14 then −0.09) 50.0 ms [49.6–50.3] on 99.7 % (39.2 [38.6–40.3] on 99.1 %
+  before): QT is ~11 ms and QTc ~8 ms longer on both, the negative phase now
+  counting as part of the T. No blocks of switching remain on either. On
+  synthetics of known truth with the 248 shape the T end is 0.3–0.7 ms late at
+  the noise of 248 and of 1.7× it (every row measured), 0.8 ms at 3.6× (45 % of
+  the rows, the others without T end), and a +12 ms QT step or episode is read
+  on both sides. **Changed numbers (initial QRS wave):** QRS onset moves
+  3–4 ms earlier on every smoothed row (248: −4.1 → −8.3 ms, 247: −6.2 →
+  −9.2 ms), so QRS is 11.2 → 15.3 ms (248) and 12.2 → 15.3 ms (247), PR
+  42.9 → 38.8 and 48.8 → 45.8 ms, QT 49.9 → 54.0 and 50.0 → 53.0 ms, QTc
+  38.2 → 41.3 and 37.3 → 39.5 ms (Mitchell); no other column changes, and
+  the same at N = 8 (row-to-row jitter of QRS onset on 247: 0.05 ms at
+  N = 8, 0.03 at N = 32, as with the Q edge). On synthetics of known truth
+  (biphasic or monophasic P, also one ending 1–3 ms before the wave, waves
+  of 1.4–18 % of R, noise 1–3× that of 248, N = 8 and 32) the median onset
+  is within 0.5 ms of the wave's first sample and the 1st–99th percentile
+  of the rows within 2 ms; without an initial wave (also with a P ending
+  1–3 ms before the Q, or a biphasic P whose negative phase holds the PR
+  window) no row changes. Decided on each row's own median instead, a
+  3 %-of-R wave at 2–3× the 248 noise counted on 25–80 % of the N = 32
+  rows, and a PR window in a biphasic P moved 2.5 % of the rows of a
+  synthetic without a wave 12–18 ms early. Per-beat values (N = 0 or 1) do
+  not change.
 - **Wave template per recording.** The landmark search windows used for a
   recording are that recording's own template: the saved default template
   (or the built-in mouse defaults) until you change it in **Landmarks**
@@ -408,9 +501,12 @@ and *Intervals* are Morphology & Intervals, *Abnormal Events* is Events.
 
 ### Interface
 
-- Adaptive Workbench layout — toolbar, collapsible left/right panels, and a
-  center workspace with a position-scrubber minimap, so the working area can
-  be reclaimed on smaller screens.
+- Full-width layout without sidebars: a header (file chip opening the
+  Recording sheet, Open with recent files, Save, Detect Peaks, Analyze,
+  Export, undo / redo, ⋯ menu), a context strip where the analysis window is
+  edited, and the tabs below; detection settings sit in a bar on Signal &
+  Detection, filters in a popover, optional exports under Report > More. Works
+  from 1280 px wide (it needed 1650 before).
 - Light/dark theming, propagated live across the whole UI including every
   matplotlib plot.
 
@@ -445,9 +541,9 @@ The paper's printed equations put the mirrored D on CPI; the published code
 mirrors it for CSI, which is what the physiology requires — the app follows
 the code.
 
-The app's version is gap-aware: RR intervals outside the sidebar Min / Max
-RR bounds, or spanning a beat removed by artifact correction, are
-excluded; Poincaré pairs never straddle them; a window with fewer than
+The app's version is gap-aware: RR intervals outside the Min / Max RR
+bounds (Signal & Detection bar), or spanning a beat removed by artifact
+correction, are excluded; Poincaré pairs never straddle them; a window with fewer than
 **Min pairs** valid adjacent pairs (10 by default) is withheld (blank,
 shaded grey) and no series is bridged across a gap. That floor is the
 app's addition — the reference code computes every window; **Min pairs = 2**
@@ -550,8 +646,8 @@ statistical protocol to the computed indices:
    samples) and p(z), the normal p of that z (MATLAB `signrank`'s
    approximate p) — the two can fall on either side of 0.05.
 4. **💾 Save to cohort registry** stores the per-event pre / post / delta
-   values in the local SQLite registry with the sidebar **Subject ID** and
-   **Project name** and the configuration (method, window, ks, kp, pre /
+   values in the local SQLite registry with the **Subject ID** and
+   **Project** of the Recording sheet and the configuration (method, window, ks, kp, pre /
    post) — one row per event and method / window. With the *All* filter,
    the recording's earlier events of the same method and window are
    replaced. **Set each animal's Subject ID before saving**: the save
@@ -705,8 +801,8 @@ ecg-analysis            # after `pip install -e .`
 │   │   └── db.py             # SQLite recording registry + event-locked
 │   │                         # cohort table
 │   └── ui/                # CustomTkinter desktop application
-│       ├── app.py             # ECGApp main window (Adaptive Workbench layout)
-│       ├── app_*.py, tab_*.py # ECGApp mixins: panels and one module per tab
+│       ├── app.py             # ECGApp main window (full-width layout, no sidebars)
+│       ├── app_*.py, tab_*.py # ECGApp mixins: header, detection bar and one module per tab
 │       ├── context_strip.py, tabbar.py, freshness.py # strip, tab states
 │       ├── report_view.py     # Report tab and text report helpers (pure, tested)
 │       ├── *_controller.py    # one controller per responsibility (SRP):
@@ -719,7 +815,7 @@ ecg-analysis            # after `pip install -e .`
 │       ├── plots.py           # matplotlib ↔ Tk canvas bridge
 │       ├── dialogs.py         # secondary windows (theme, artifact review,
 │       │                      # ML training, ks / kp calibration...)
-│       ├── sidebar.py         # collapsible sections, interval verifier
+│       ├── popover.py         # floating panels: Recording sheet, Filters, ⋯, Report > More
 │       ├── widgets.py         # reusable widget factories (stat tiles, quality gauge)
 │       ├── wave_editor.py     # wave-template mini editor
 │       └── state.py           # UI-facing state dataclasses

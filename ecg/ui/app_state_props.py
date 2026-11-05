@@ -65,11 +65,12 @@ class StateProps:
 
         # Widget registries (populated in _build)
         self._slots:       dict[str, CanvasSlot]   = {}
+        # Stat tiles filled by update_kpis(). The right panel's STATISTICS
+        # that held them is gone (the same values are on Rhythm & HRV, the
+        # quality panel and Report): empty unless a view registers tiles.
         self._kpi:         dict[str, ctk.CTkLabel] = {}
-        # Compact top-bar mirrors of a few _kpi values (hr_mean/n_beats/dur) --
-        # a SEPARATE dict since these are distinct widgets living in the top
-        # bar, updated alongside (not instead of) the stat-panel tiles by the
-        # same update_kpis() call.
+        # Compact top-bar mirrors of a few _kpi values (hr_mean/n_beats/dur),
+        # same update_kpis() call; empty in the current header.
         self._topbar_vals: dict[str, ctk.CTkLabel] = {}
 
         # ── Forward declarations for widgets created in _build ────────────────
@@ -113,15 +114,12 @@ class StateProps:
         self.sl_thr:            "Optional[ctk.CTkSlider]"  = None
         self.ent_thr:           "Optional[ctk.CTkEntry]"   = None
         self.sw_permissive:     "Optional[ctk.CTkSwitch]"  = None
-        self.btn_annotations:   "Optional[ctk.CTkButton]"  = None
-        self.lbl_ann_count:     "Optional[ctk.CTkLabel]"   = None
+        self.btn_annotations:   "Optional[ctk.CTkButton]"  = None   # detection bar chips
+        self.btn_pacing:        "Optional[ctk.CTkButton]"  = None
+        self.btn_filters_chip:  "Optional[ctk.CTkButton]"  = None
         self.btn_toggle_rrhr:   "Optional[ctk.CTkButton]"  = None
         self.btn_toggle_spikes: "Optional[ctk.CTkButton]"  = None
         self.btn_review_spikes: "Optional[ctk.CTkButton]"  = None
-        self.btn_toggle_left_panel:  "Optional[ctk.CTkButton]" = None
-        self.btn_toggle_right_panel: "Optional[ctk.CTkButton]" = None
-        self.lbl_panel_ann_count:    "Optional[ctk.CTkLabel]" = None
-        self.lbl_panel_pacing_count: "Optional[ctk.CTkLabel]" = None
         self.btn_copy_rr:       "Optional[ctk.CTkButton]"  = None
         self.btn_copy_ivl:      "Optional[ctk.CTkButton]"  = None
         self.btn_copy_epochs:   "Optional[ctk.CTkButton]"  = None
@@ -542,13 +540,6 @@ class StateProps:
     @_thr_debounce_id.setter
     def _thr_debounce_id(self: ECGApp, value: "str | None") -> None:
         self.ui.thr_debounce_id = value
-
-    @property
-    def _resize_debounce_id(self: ECGApp) -> "str | None":
-        return self.ui.resize_debounce_id
-    @_resize_debounce_id.setter
-    def _resize_debounce_id(self: ECGApp, value: "str | None") -> None:
-        self.ui.resize_debounce_id = value
 
     @property
     def _hover_motion_cid(self: ECGApp) -> "Optional[int]":

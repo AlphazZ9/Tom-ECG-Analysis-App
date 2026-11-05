@@ -19,11 +19,16 @@ import tkinter as tk
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterable, Optional
 
+import customtkinter as ctk  # type: ignore[import-untyped]
+
 from ecg.core.analysis import QTC_FORMULA_LABELS, normalize_qtc_formula
 from ecg.core.metric_table import MISSING, MetricTable, build_metric_table
 from ecg.ui.freshness import COMPUTING, NOT_COMPUTED, OUT_OF_DATE, UP_TO_DATE, combine_states
 from ecg.ui.tab_keys import TAB_DETECTION, TAB_MODULES, TAB_REPORT
-from ecg.ui.theme import THEME, BG, BORDER, TEXT, MUTED, BLUE, ORANGE, SPACE_S, SPACE_M
+from ecg.ui.theme import (
+    THEME, BG, CARD, BORDER, BORDER2, TEXT, MUTED, BLUE, ORANGE, PURPLE, PURPLE_DARK,
+    SPACE_XS, SPACE_S, SPACE_M, FONT_SMALL,
+)
 
 # pyright: reportGeneralTypeIssues=false
 if TYPE_CHECKING:
@@ -145,6 +150,33 @@ def context_fields(results: "Optional[dict]", table: "Optional[MetricTable]",
     ]
 
 
+def pending_window_field(results: "Optional[dict]", analysed: Any, applied: Any,
+                         signal_end_s: "Optional[float]") -> "Optional[StripField]":
+    """With core results, a window applied since they were computed: the
+    window entries already show it, so the strip says what the numbers on
+    screen still rest on. None otherwise."""
+    if results is None:
+        return None
+    done, new = window_text(analysed, signal_end_s), window_text(applied, signal_end_s)
+    if done == new:
+        return None
+    return StripField("window_pending", f"Results on {done}: Analyze to use {new}", TONE_WARN)
+
+
+def unapplied_window_field(typed: "tuple[str, str]", applied: Any) -> "Optional[StripField]":
+    """Window entries that do not say the applied window (typed, not yet
+    applied): the entries stand where the strip states the window, so the
+    strip says the next Analyze would not use them. None when they agree."""
+    try:
+        t0, t1 = (float(v.strip()) if v.strip() else 0.0 for v in typed)
+    except ValueError:
+        t0 = t1 = float("nan")
+    a0, a1 = applied if applied is not None else (0.0, 0.0)
+    if abs(t0 - float(a0 or 0.0)) < 1e-9 and abs(t1 - float(a1 or 0.0)) < 1e-9:
+        return None
+    return StripField("window_unapplied", "Window typed, not applied: Enter or Apply", TONE_WARN)
+
+
 def tab_states(states: "dict[str, str]", has_peaks: bool,
                running: "Iterable[str]" = ()) -> "dict[str, str]":
     """Tab -> state. Signal & Detection judges the peaks themselves: they are
@@ -163,7 +195,8 @@ def tab_states(states: "dict[str, str]", has_peaks: bool,
 
 class ContextStrip(tk.Frame):
     """Fields left to right, wrapping onto further rows when they do not fit;
-    the times docked right."""
+    the times docked right. A field can be shown by an editor instead of its
+    text (set_editor): the analysis window is edited in place."""
 
     def __init__(self, parent) -> None:
         super().__init__(parent, bg=BG, bd=0, highlightthickness=0)
@@ -174,7 +207,22 @@ class ContextStrip(tk.Frame):
         self._flow.pack(side="left", fill="x", expand=True, padx=(SPACE_M, 0), pady=2)
         self._flow.bind("<Configure>", lambda _e: self._reflow())
         self._labels: "dict[str, tk.Label]" = {}
+        self._editors: "dict[str, tk.Misc]" = {}
         self._fields: "list[StripField]" = []
+
+    @property
+    def flow(self) -> tk.Frame:
+        """The parent of the fields, and of an editor given to set_editor."""
+        return self._flow
+
+    def set_editor(self, key: str, widget) -> None:
+        """*widget* (a child of .flow) stands where field *key* would; the
+        field's text still counts in text()."""
+        self._editors[key] = widget
+        widget.bind("<Configure>", lambda _e: self.after_idle(self._reflow), add="+")
+
+    def _item(self, key: str):
+        return self._editors.get(key) or self._labels[key]
 
     @staticmethod
     def _color(tone: str) -> str:
@@ -183,7 +231,13 @@ class ContextStrip(tk.Frame):
     def show(self, fields: "list[StripField]", times: str) -> None:
         if fields != self._fields:
             self._fields = list(fields)
+            shown = {f.key for f in fields}
+            for key, lbl in self._labels.items():
+                if key not in shown:
+                    lbl.place_forget()      # a field that comes and goes
             for f in fields:
+                if f.key in self._editors:
+                    continue
                 lbl = self._labels.get(f.key)
                 if lbl is None:
                     lbl = self._labels[f.key] = tk.Label(self._flow, bg=BG, bd=0)
@@ -204,10 +258,10 @@ class ContextStrip(tk.Frame):
         if width <= 1:
             return
         # At least one label's own height: the Theme dialog scales the font.
-        row_h = max([_ROW_H] + [self._labels[f.key].winfo_reqheight() for f in self._fields])
+        row_h = max([_ROW_H] + [self._item(f.key).winfo_reqheight() for f in self._fields])
         x = y = 0
         for f in self._fields:
-            lbl = self._labels[f.key]
+            lbl = self._item(f.key)
             w = lbl.winfo_reqwidth()
             if x and x + w > width:
                 x, y = 0, y + row_h
@@ -224,8 +278,82 @@ class ContextStripMixin:
 
     def _build_context_strip(self: ECGApp, parent) -> None:
         self._status_lines_saved = {}
+        self._t1_placeholder = None
         self.context_strip = ContextStrip(parent)
         self.context_strip.pack(side="top", fill="x")
+        self._build_window_editor(self.context_strip)
+
+    def _build_window_editor(self: ECGApp, strip: ContextStrip) -> None:
+        """The analysis window, edited where it is stated: From / To (empty =
+        signal start / end), Apply, Full. Same entries and handlers as the
+        sidebar's Analysis window had (ent_analysis_t0/t1, Apply / Full)."""
+        ed = tk.Frame(strip.flow, bg=BG, bd=0, highlightthickness=0)
+        tk.Label(ed, text="Window", bg=BG, fg=TEXT, font=_font()).pack(side="left",
+                                                                     padx=(0, SPACE_S))
+        entry = dict(width=58, height=24, font=FONT_SMALL, fg_color=CARD, border_color=BORDER2,
+                     text_color=TEXT, corner_radius=4)
+        self.ent_analysis_t0 = ctk.CTkEntry(ed, placeholder_text="0", **entry)
+        self.ent_analysis_t0.pack(side="left")
+        tk.Label(ed, text="–", bg=BG, fg=TEXT, font=_font()).pack(side="left", padx=SPACE_XS)
+        self.ent_analysis_t1 = ctk.CTkEntry(ed, placeholder_text="end", **entry)
+        self.ent_analysis_t1.pack(side="left")
+        tk.Label(ed, text="s", bg=BG, fg=TEXT, font=_font()).pack(side="left", padx=(SPACE_XS, SPACE_S))
+        for ent in (self.ent_analysis_t0, self.ent_analysis_t1):
+            ent.bind("<Return>", lambda _e: self._apply_analysis_window())
+            self._bind_hover_tip(ent, "Analysis window (s): empty = signal start / end. "
+                                      "Enter or Apply, then Analyze.")
+        button = dict(height=24, font=FONT_SMALL, corner_radius=4)
+        ctk.CTkButton(ed, text="Apply", width=52, fg_color=PURPLE, hover_color=PURPLE_DARK,
+                      text_color="white", command=self._apply_analysis_window,
+                      **button).pack(side="left", padx=(0, SPACE_XS))
+        btn_full = ctk.CTkButton(ed, text="Full", width=44, fg_color=CARD, hover_color=BORDER,
+                                 text_color=TEXT, border_width=1, border_color=BORDER2,
+                                 command=self._reset_analysis_window, **button)
+        btn_full.pack(side="left")
+        self._bind_hover_tip(btn_full, "Analysis window = the whole signal")
+        strip.set_editor("window", ed)
+        # The feedback the sidebar printed under these entries is the strip's
+        # own fields now (window, peaks, RR excluded, pending window).
+        self.lbl_analysis_window = None
+
+    def _show_window_in_entries(self: ECGApp) -> None:
+        """The entries say the applied window (empty = signal start / end).
+        Called where the window is reset to the full signal (new file, Detect
+        Peaks): entries left as typed would state a window nothing rests on."""
+        for ent, value in ((getattr(self, "ent_analysis_t0", None), self.analysis.t_start),
+                           (getattr(self, "ent_analysis_t1", None), self.analysis.t_end)):
+            if ent is None:
+                continue
+            ent.delete(0, "end")
+            if value and value > 0:
+                ent.insert(0, _number(value))
+            else:
+                # CTk shows a placeholder again only on focus-out: an emptied
+                # To entry would hide the signal end it stands for. Never
+                # while typing in it (the placeholder would be typed into).
+                show = getattr(ent, "_activate_placeholder", None)
+                try:
+                    focus = str(self.focus_get() or "")
+                except Exception:     # a dialog's focus can be a destroyed widget
+                    focus = ""
+                if show is not None and not (focus and focus.startswith(str(ent))):
+                    show()
+
+    def _refresh_window_placeholder(self: ECGApp, signal_end_s: "Optional[float]") -> None:
+        """An empty To entry shows the signal end it stands for (greyed).
+        Never while typing in it: CTk would write the placeholder into it."""
+        ent = getattr(self, "ent_analysis_t1", None)
+        text = _number(signal_end_s) if signal_end_s else "end"
+        if ent is None or text == self._t1_placeholder:
+            return
+        try:
+            focus = self.focus_get()
+        except Exception:     # a dialog's focus can be a destroyed widget
+            focus = None
+        if focus is not None and str(focus).startswith(str(ent)):
+            return
+        ent.configure(placeholder_text=text)
+        self._t1_placeholder = text
 
     def _bind_tab_state_hints(self: ECGApp) -> None:
         """Hovering a tab says its state and why, in the status bar; what that
@@ -334,11 +462,21 @@ class ContextStripMixin:
         table, art = self._context_table()
         peaks = self._windowed_peaks()
         ctrl = self.plot_ctrl
+        end = ctrl._signal_end_s()
+        analysed = ctrl._report_window() if a.results is not None else (a.t_start, a.t_end)
         fields = context_fields(
             a.results, table, art, has_signal=sig.filtered is not None or sig.raw is not None,
             n_peaks=len(peaks) if peaks is not None else None,
-            window=ctrl._report_window() if a.results is not None else (a.t_start, a.t_end),
-            signal_end_s=ctrl._signal_end_s(),
+            window=analysed, signal_end_s=end,
             current_rr=self.analysis_ctrl.hrv_rr_bounds(quiet=True),
             qtc_formula=self._qtc_formula())
+        pending = pending_window_field(a.results, analysed, (a.t_start, a.t_end), end)
+        if pending is not None:
+            fields.insert([f.key for f in fields].index("window") + 1, pending)
+        t0e, t1e = getattr(self, "ent_analysis_t0", None), getattr(self, "ent_analysis_t1", None)
+        if t0e is not None and t1e is not None and (sig.filtered is not None or sig.raw is not None):
+            typed = unapplied_window_field((t0e.get(), t1e.get()), (a.t_start, a.t_end))
+            if typed is not None:
+                fields.insert([f.key for f in fields].index("window") + 1, typed)
         self.context_strip.show(fields, times_text(self.ui.computed_at, self.ui.peaks_edited_at))
+        self._refresh_window_placeholder(end)

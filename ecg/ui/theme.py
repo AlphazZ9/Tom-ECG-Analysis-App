@@ -600,7 +600,7 @@ _SYNC_FONT_NAMES = (
 # again (that exact bug -- a stale pre-package-move name list -- is why
 # this function was a no-op for a while before the reorg too).
 _SYNC_MODULES = (
-    "ecg.ui.app", "ecg.ui.sidebar", "ecg.ui.plots", "ecg.ui.dialogs",
+    "ecg.ui.app", "ecg.ui.popover", "ecg.ui.plots", "ecg.ui.dialogs",
     "ecg.io.export", "ecg.core.models", "ecg.core.detection",
     "ecg.io.loaders", "ecg.core.analysis", "ecg.ui.wave_editor",
     # Controller modules extracted from app.py -- each imports its own
@@ -616,8 +616,8 @@ _SYNC_MODULES = (
     # module above: it imports colour/font names at module scope.
     "ecg.ui.widgets",
     # The mixin modules ecg.ui.app was split into -- same requirement.
-    "ecg.ui.app_state_props", "ecg.ui.app_sidebar", "ecg.ui.app_toolbar",
-    "ecg.ui.app_right_panel", "ecg.ui.app_async", "ecg.ui.app_helpers",
+    "ecg.ui.app_state_props", "ecg.ui.app_header_menus", "ecg.ui.app_toolbar",
+    "ecg.ui.app_detection_bar", "ecg.ui.app_async", "ecg.ui.app_helpers",
     "ecg.ui.app_delegates", "ecg.ui.params_dialog", "ecg.ui.compare_segments",
     "ecg.ui.tab_detection", "ecg.ui.tab_hrv", "ecg.ui.tab_time_course", "ecg.ui.tab_events",
     "ecg.ui.tab_morphology", "ecg.ui.tab_report",

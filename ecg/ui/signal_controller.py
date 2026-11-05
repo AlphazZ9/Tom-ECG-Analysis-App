@@ -537,6 +537,7 @@ class SignalController:
 
         self.app.analysis.t_start = 0.0
         self.app.analysis.t_end   = 0.0
+        self.app._show_window_in_entries()
         if self.app.lbl_analysis_window is not None:
             self.app.lbl_analysis_window.configure(  # type: ignore[union-attr]
                 text=f"Raw signal loaded  ·  {dur:.1f} s  ·  not yet analysed",
@@ -649,16 +650,16 @@ class SignalController:
         }
 
     def _auto_open_signal_section(self) -> None:
-        """Expand the sidebar's SIGNAL section the first time fs auto-detect
-        fails -- it's collapsed by default, so the "fs not found" warning
-        (and the fix: set it manually right there) was otherwise invisible.
+        """Open the Recording sheet the first time fs auto-detect fails --
+        it is closed by default, so the "fs not found" warning (and the fix:
+        set it manually right there) was otherwise invisible.
         """
         if getattr(self.app, "_signal_section_auto_opened", False):
             return
         self.app._signal_section_auto_opened = True
-        sec_signal = getattr(self.app, "sec_signal", None)
-        if sec_signal is not None:
-            sec_signal.open()
+        open_sheet = getattr(self.app, "_open_recording_sheet", None)
+        if open_sheet is not None:
+            open_sheet()
 
     def apply_detected_fs(self, fs: float) -> None:
         """Update the fs entry and source label on the main thread."""
@@ -798,18 +799,13 @@ class SignalController:
             self.app.lbl_npeaks.configure(text=f"Peaks detected: {n}", text_color=color)  # type: ignore[union-attr]
         if self.app.btn_review_art is not None:
             self.app._set_review_artifacts_enabled(n > 4)
+        # Same rule as after a threshold change (run_detection): the check
+        # needs peaks only. Detect Peaks used to leave it disabled until then.
+        if self.app.btn_check_agreement is not None:
+            self.app._set_check_agreement_enabled(n > 4)
         self.app._update_signal_quality(self.app.detection.rpeaks_ok)  # type: ignore[union-attr]
-
-        # Auto-open ARTIFACTS the first time Detect Peaks produces enough
-        # peaks to review -- it was collapsed by default two clicks deep
-        # (scroll, then expand), so artifact review was easy to skip
-        # entirely even though it directly edits the beats behind every
-        # HRV number.
-        if n > 4 and not getattr(self.app, "_artifacts_auto_opened", False):
-            self.app._artifacts_auto_opened = True
-            sec_artifacts = getattr(self.app, "sec_artifacts", None)
-            if sec_artifacts is not None:
-                sec_artifacts.open()
+        # Artifact review sits in the always-visible Signal quality panel,
+        # beside the peaks it edits: nothing to open.
 
         dur = bundle["dur_s"]
         detector_warning = bundle.get("detector_warning")
@@ -846,6 +842,7 @@ class SignalController:
         # Reset analysis window on new signal load and update feedback label
         self.app.analysis.t_start = 0.0
         self.app.analysis.t_end   = 0.0
+        self.app._show_window_in_entries()
         if self.app.lbl_analysis_window is not None:
             self.app.lbl_analysis_window.configure(  # type: ignore[union-attr]
                 text=f"Full signal  ·  {n} peaks  ·  {dur:.1f} s",
@@ -952,10 +949,7 @@ class SignalController:
         """Reset analysis window to full signal."""
         self.app.analysis.t_start = 0.0
         self.app.analysis.t_end   = 0.0
-        if self.app.ent_analysis_t0 is not None:
-            self.app.ent_analysis_t0.delete(0, "end")  # type: ignore[union-attr]
-        if self.app.ent_analysis_t1 is not None:
-            self.app.ent_analysis_t1.delete(0, "end")  # type: ignore[union-attr]
+        self.app._show_window_in_entries()
         if self.app.lbl_analysis_window is not None:
             # Recompute peak count for full signal
             if self.app.detection.rpeaks_ok is not None:
@@ -1118,6 +1112,7 @@ class SignalController:
         self.app.ui.peaks_edited_at = None
         self.app.analysis.t_start      = 0.0
         self.app.analysis.t_end        = 0.0
+        self.app._show_window_in_entries()
         if self.app.ui.hover_after_id is not None:
             try:
                 self.app.after_cancel(self.app.ui.hover_after_id)

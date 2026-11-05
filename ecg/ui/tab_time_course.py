@@ -386,7 +386,7 @@ class TabTimeCourseMixin:
         self.btn_auto_compute.pack(side="left")
         self._bind_hover_tip(
             self.btn_auto_compute,
-            "Compute CSI / CPI on the analysis window's peaks, with the sidebar "
+            "Compute CSI / CPI on the analysis window's peaks, with the detection bar's "
             "Min / Max RR bounds: intervals outside them or spanning a removed "
             "beat are excluded, never bridged. Runs in the background.")
         self._calibrate_button(run).pack(side="left", padx=(SPACE_S, 0))

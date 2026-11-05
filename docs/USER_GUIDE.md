@@ -5,10 +5,10 @@ does and how to move through a typical analysis. For the full feature
 list, installation, and project architecture, see the main
 [README](../README.md).*
 
-All screenshots in this guide were captured against a synthetic demo
-recording (90 s, ~500 bpm baseline with a deliberately inserted
-bradycardia/pause episode and a short irregular run), generated purely to
-have something realistic to show — not real experimental data. Your own
+The screenshots in this guide were captured on a real recording,
+*248 - Baseline 5 min* (300 s, ~350 bpm, 1749 beats), with one synthetic
+"Stimulus" annotation at 150 s added to show the event-locked views; the
+Parameters dialog screenshots come from a synthetic demo recording. Your own
 recordings will look different; the workflow is identical.
 
 ## Contents
@@ -52,11 +52,28 @@ peaks, RR bounds, exclusions, artifact correction, QTc formula). Each tab head
 carries one state: ● up to date, ◆ out of date, ○ not computed; hover it for the
 reason.
 
+The analysis window is edited in place in the context strip (**Window**
+[from] – [to] s, **Apply**, **Full**), on every tab. Opening a file or clicking
+**Detect Peaks** sets the window back to the whole signal, and the entries are
+emptied to say so (empty = signal start / end; the To entry shows the signal
+end greyed). Values typed but not yet applied are flagged in the strip
+("Window typed, not applied: Enter or Apply"); once applied, until **Analyze all**
+runs, the strip says which window the results on screen were computed on.
+
 The window opens on the **Signal & Detection** tab with no file loaded. The
-toolbar along the top (**Open**, **Save**, **Detect Peaks**, **Analyze**,
-undo/redo, the signal-quality badge, and the theme toggle) stays visible
+header along the top (the file chip, **Open** with its **▾** recent files,
+**Save Session**, **Detect Peaks**, **Analyze all**, **Export…**, undo / redo
+and the **⋯** menu with Parameters, Theme, light / dark mode, keyboard
+shortcuts (F1), reset to mouse defaults and clear session cache) stays visible
 no matter which tab you're on — everything downstream of loading a file
 starts from there.
+
+There is no sidebar: every tab gets the full width. Click the **file chip**
+(file · channel · rate · subject) to open the **Recording sheet**: channel
+(with the list of the file's channels), sampling rate and where it came
+from, Subject ID, Project, crop start / end, notes and the session status.
+Esc or a click outside closes it, like every menu and popover. The **▾**
+beside **Open** lists the recent files, then "All recent recordings…".
 
 ---
 
@@ -64,9 +81,11 @@ starts from there.
 
 Click **Open** and pick a MATLAB `.mat` file — legacy v5/v6 or v7.3/HDF5
 (Spike2 exports), both are handled automatically, including channel and
-sampling-rate detection. The left sidebar's **Signal** section shows the
-detected channel name and sampling rate (editable if auto-detection
-guesses wrong), and the **Filters** section controls whether detection
+sampling-rate detection. The **Recording sheet** (click the file chip in
+the header) shows the detected channel name and sampling rate (editable if
+auto-detection guesses wrong; it opens by itself when the rate is not found
+in the file), and the **Filters** chip of the Signal & Detection bar
+controls whether detection
 runs on the raw signal or a bandpass/notch/cleaned version — see
 [Reading the Detection view](#reading-the-detection-view) for what that
 choice does to the display.
@@ -81,13 +100,16 @@ is filtered, detected, or analyzed until you click **Detect Peaks**.
 <img src="screenshots/01_detection_overview.png" width="800" alt="Signal &amp; Detection tab overview">
 
 Click **Detect Peaks** to run the selected detection method (**Method**
-dropdown in the left sidebar — Auto/NeuroKit2, Savitzky-Golay + derivative,
+dropdown in the detection bar at the top of Signal & Detection —
+Auto/NeuroKit2, Savitzky-Golay + derivative,
 continuous wavelet transform, envelope-max, or your own trained ML
 detector) over the whole recording. The detail plot shows the signal for
 the current time window, with accepted peaks marked in green and the
 active amplitude threshold as a dashed red line — drag the **Threshold**
-slider in the sidebar (or type an exact value) to tighten or loosen
-detection without re-running the whole pipeline.
+slider of the same bar (or type an exact value) to tighten or loosen
+detection without re-running the whole pipeline. **Min / Max RR** sit beside
+it; **?** at the end of the bar explains the methods and shows the
+threshold's current normalised amplitude.
 
 <img src="screenshots/02_detection_zoom_normal.png" width="800" alt="Signal &amp; Detection tab zoomed on a normal-rhythm window">
 
@@ -98,12 +120,19 @@ missed or a false one is added, **Edit Peaks** switches into manual
 edit mode — click near a peak to remove it, or in empty space (with
 **Free Placement** on) to add one — with full undo/redo.
 
-The right-hand **Statistics** panel shows heart rate, RR intervals, HRV
-(SDNN/RMSSD/pNN6), and a signal-quality score built from how closely
-each beat matches the recording's own beat template. Excluding, adding,
+The **Signal quality** panel on the right of the plot gives the
+signal-quality score, built from how closely each beat matches the
+recording's own beat template; heart rate, RR and HRV (SDNN / RMSSD / pNN6)
+are on **Rhythm & HRV** and **Report**. Under the quality plots,
+**Review artifacts** and **Check agreement** share one row, then
+**Auto-correct artifacts on Analyze**; with Method = ML Detector, the ML
+section (model status, **Verified for training**, **Save for training**,
+**Train model…**). On a short window the panel drops the correlation
+histogram first, then the curve over time (its title then reads "taller
+window needed"); both come back when the window is taller. Excluding, adding,
 or undoing a peak clears the HRV numbers immediately (they'd otherwise
 be describing beats that no longer match what's on screen) — click
-**Analyze** again to recompute them from the corrected peaks.
+**Analyze all** again to recompute them from the corrected peaks.
 
 ---
 
@@ -112,7 +141,7 @@ be describing beats that no longer match what's on screen) — click
 The detail plot always shows two traces, layered on top of each other:
 
 - The **primary trace** (solid) — whichever of raw/filtered you have
-  selected via the sidebar's "Show raw signal" toggle.
+  selected via the Filters popover's "Show raw signal" toggle.
 - A **ghost trace** (faint, 20% opacity) — the other one, so the effect
   of filtering is always visible even when you're focused on the raw
   view.
@@ -122,14 +151,15 @@ whole app, so you can tell at a glance which one you're looking at
 without reading the label. Green dots are accepted peaks; a red dashed
 line is the active detection threshold.
 
-<img src="screenshots/03_detection_zoom_bradycardia.png" width="800" alt="Detection view zoomed on a bradycardia episode, showing wider RR spacing">
+<img src="screenshots/03_detection_zoom_bradycardia.png" width="800" alt="Detection view zoomed on 246–250 s: a noise burst and an isolated premature beat">
 
-The screenshot above is zoomed into the demo recording's inserted
-bradycardia episode — note the visibly wider spacing between peaks
-compared to the baseline window shown earlier. This is exactly the kind
-of thing the [Events](#abnormal-events) tab classifies
-automatically across the whole recording, so you don't have to spot it
-by scrolling through manually.
+The screenshot above is zoomed on 246–250 s of the same recording: a
+burst of noise near 248 s (the dip in the quality trace) and
+an isolated premature beat at 247.7 s, visible as the short RR followed by a
+longer one in the RR / HR traces below. Premature beats, pauses and
+brady- / tachycardia runs are what the [Events](#abnormal-events) tab
+classifies automatically across the whole recording, so you don't have to
+spot them by scrolling through manually.
 
 ---
 
@@ -286,7 +316,7 @@ parasympathetic (CPI) indices after Candia-Rivera et al., J Physiol 2025
 authors' MATLAB code
 ([github.com/diegocandiar/robust_hrv](https://github.com/diegocandiar/robust_hrv)).
 It needs only the detected peaks — Analyze is not required — and uses the
-analysis window, the sidebar **Min / Max RR** bounds and the beats removed
+analysis window, the **Min / Max RR** bounds of the detection bar and the beats removed
 by artifact correction, like every other HRV view. The result records the
 analysis window it was computed on: after you change the window, the
 status line turns orange ("computed on the analysis window …, now …") until
@@ -379,7 +409,9 @@ and CSI / CPI are still shown.
 Choose **Event-locked** in the selector of Time course.
 
 1. **Mark the events.** Add one annotation per condition change (injection,
-   stimulus…) in **Annotations**; its **start** time is the event onset.
+   stimulus…) with the **Annotations** chip of the Signal & Detection bar
+   (pacing / stimulation periods: the **Pacing** chip beside it); its
+   **start** time is the event onset.
    Give events of the same kind the same label.
 2. **Compute the Autonomic indices** (⟳ Compute in the bar above).
 3. **Choose the events and windows.** **Events** = *All*, one label, or
@@ -411,11 +443,12 @@ Choose **Event-locked** in the selector of Time course.
    not population inference. **p** is the test's p (exact for small
    samples), **p(z)** the normal p of the z shown (MATLAB `signrank`'s
    approximate p); near 0.05 they can disagree.
-6. **💾 Save to cohort registry.** Fill in the sidebar **Subject ID** and
-   **Project name** first: they are stored with every event, together with
-   the method, window, ks, kp and pre / post windows. **Set the Subject ID
-   for each animal**: the sidebar keeps its value from one file to the
-   next, and the per-subject calibration counts every recording filed
+6. **💾 Save to cohort registry.** Fill in **Subject ID** and **Project** in
+   the Recording sheet (click the file chip) first: they are stored with
+   every event, together with the method, window, ks, kp and pre / post
+   windows. **Set the Subject ID for each animal**: the Recording sheet keeps
+   its value from one file to the next (a saved session brings its own
+   Subject ID back; its Project only fills an empty entry), and the per-subject calibration counts every recording filed
    under one ID as one animal. The status turns orange when the ID looks
    like the untouched default (`subject_01`) or when another recording of
    the project is already saved under it. Saving with the *All* filter
@@ -580,6 +613,51 @@ earlier versions, exactly). N is saved with the session and stated in every repo
   around it (which share at least 3/4 of their beats). On 248 this takes the
   neighbouring rows whose QT differs by more than 5 ms from 26 % to 3 %. A row
   reporting its own beat keeps its own T.
+- **Biphasic T.** A low biphasic T (on 248, +0.09 then −0.06) has two candidate ends:
+  the end of the first phase (~34 ms after R) and the end of the second (~47 ms).
+  Each row used to take the end of whichever phase was the larger on its own median,
+  so the choice came and went with the noise in blocks of rows (on 248, 467 rows at
+  ~45 ms, 997 at ~34 ms, 284 empty: fake QT steps of ~11 ms that the consensus above,
+  over N / 2 + 1 rows, could not remove). Now a biphasic T — a run of the other sign
+  right before or after the largest T phase, at least 30 % of it and 4× the noise of
+  a median beat — ends where its **last** phase comes back to the PR level, and its T
+  peak is its first phase's.
+  - *Which phases:* decided on the median of the 8 N beats around each row (a
+    decision every N / 2 rows; ~45 s at N = 32), not on the row's own median. The
+    Delineation row of the exports states how many rows followed a biphasic,
+    monophasic or ambiguous median. A single decision for the whole recording (tried
+    first) missed a T that changes during it, deleted QT prolongation episodes as
+    NaN, and made a row's T end depend on beats minutes away.
+  - *That median's T end:* the line through the times its last phase's trailing edge
+    (4 ms moving average) falls through 70, 60 … 30 % of the phase, meeting the PR
+    level. The PR level is the mean of every 6 ms stretch of the PR segment weighted
+    by its flatness: the one flattest stretch (the QRS-onset baseline) jumped between
+    two levels 0.03 apart on the sloping PR segment of 247, moving the T end by
+    ~1.7 ms in blocks of rows.
+  - *Each row's T end:* that one moved by the lag at which that median's last phase
+    fits the row best in least squares — within 4 ms of the lag of the whole T, itself
+    searched within ±15 ms; the whole T's lag when the last phase alone is under 3×
+    its noise. Fitted on every sample of the T, the lag does not take its slope from
+    the noise of a 3–8-sample edge, and keeps every row of a low biphasic T up to
+    ~1.7× the noise of 248 (45 % of them at 3.6×).
+  - *No T end* on a row whose T is not told from noise or that clearly lacks the last
+    phase; where the second phase is 15–30 % of the first, or the medians around
+    disagree on how many phases there are (ambiguous — **no row** there rather than
+    rows switching); and where that median blends the beats before and after a QT
+    change (its edge crossings are not on one line: those rows are measured on their
+    own median, often without T end for a few seconds).
+  - *Limits:* a T end that shifts is read in full, a T that widens at ~3/4 of its
+    change. A QT change shorter than that median (~45 s) is read with up to ~3 ms
+    error. A notched T (two humps of the same sign) ends at its first hump, as
+    before.
+
+  On 248 QT is now 49.9 ms [49.5–50.4] on 99.8 % of the rows (39.0 [38.1–48.9] on
+  83.8 % before), on 247 50.0 ms [49.6–50.3] on 99.7 % (39.2 [38.6–40.3] on 99.1 %):
+  ~11 ms longer (QTc ~8 ms), the negative phase now counting as part of the T. Rows
+  measured on their own beat, and N = 0 or 1, keep the end of the largest phase (on
+  247 the median T end is 33.6 ms at N = 1, 43.8 ms at N = 32): compare recordings at
+  the same N. On synthetics of known truth with those shapes the T end is 0.3–0.7 ms
+  late at the noise of 248.
 - **Premature beats.** A beat whose preceding RR is under 70 % of the local median
   RR, the beat after it, and a beat ending an interval over 130 % of it join no
   ensemble and report **their own single-beat delineation**, never their
@@ -619,11 +697,51 @@ QRS (e.g. after a drug) is measured in full. QRS onset, J point and T end are
 each placed where a least-squares line through the middle (30–70 %) of the
 wave edge meets that baseline (a Q or S wave counts as the initial / terminal
 QRS deflection once it dips more than 2 % of R, or 3× the PR-segment noise,
-below the baseline; the R wave uses 5 %). P onset is placed the same way on
+below the baseline; the R wave uses 5 %). With a rolling median (N > 1), a small
+**initial QRS wave** of the other sign that the Q (or R) runs straight out of —
+peaking at most 3 ms before the Q is back near the baseline, and more than 1 %
+of R and 5× the noise above both the PR baseline and the level it rises from
+(the trace 5–8 ms before its peak), on a 1.5 ms moving average — starts the QRS,
+and QRS onset is where the line through the times that wave rises through 30, 50
+and 70 % of its height meets that level, not the Q edge. Whether there is such
+a wave, and how far its onset leads the Q edge, is decided on the median of the
+max(8 N, 256) beats around each row (the majority of the neighbouring such
+medians), not on the row's own median, and each row's QRS onset is its own
+Q / R edge onset moved by that lead. On the Experiment 13 recordings (248: +18 %
+of R at −6 ms before a Q at −2.5; 247: +2–3 % at −7.5 before a Q at −4.5) the Q
+edge started the QRS 3–4 ms late: QRS onset is now −8.3 ms (248) and −9.2 ms
+(247), QRS 11.2 → 15.3 and 12.2 → 15.3 ms, PR 3–4 ms shorter and QT 3–4 ms
+longer (only those intervals and QRS onset change; the same at N = 8). A wave
+still rising at the start of that 3 ms span is the end of a P running into the
+QRS, not counted, and neither is a PR segment that merely sits above a PR window
+landed in the negative phase of a biphasic P. A row measured on its own beat,
+and N = 1, keeps the Q / R edge (the 247 wave is under 5× a single beat's
+noise): QRS is ~3–4 ms shorter and PR as much longer there, so switching N moves
+PR that much relative to the 55 ms AV-delay cutoff. A wave within about a third
+of the threshold (on a synthetic, 1.4 % of R at 2–3× the 248 noise) can still
+count on some stretches of 16 or more rows and not on others (QRS onset ~3.5 ms
+apart). P onset is placed the same way on
 the P-wave upstroke, searched up to 30 ms before the P peak (when a P riding
 on the previous T never returns to the baseline, the part of the upstroke
 above the T–P junction is used, and the onset is not placed before that
-junction). The P peak is searched after the previous beat's T peak and
+junction). With a rolling median (N > 1), a **biphasic P** — a trough the other
+way first, at least 25 % of the peak and above the P detection threshold — starts where the trace comes back up
+through the PR baseline after that trough, provided the P peak follows within
+8 ms (a trough farther away is the previous T's tail; a T tail ending less
+than ~4 ms before a fast-rising P can still move the onset that much earlier):
+on a notched P the upstroke line breaks on the shoulder, or lands on the
+notch about 4 ms late, depending on how high the shoulder rises.
+The foot of the trough would be the earlier atrial onset, but at N = 32 it is
+not reliable (its SD within 30 s is 5–13× the up-crossing's on the Experiment 13
+recordings), so PR starts at the up-crossing; on the Footshocks recording this
+took PR from 69 % of the rows at 46.2 ms (with a false step from 45 to 48 ms
+around 600 s) to 99.7 % at 48.8 ms. A row measured on its own beat (premature
+beat, too few ensemble members) keeps the upstroke line. The rule depends on
+polarity: in the mirror image of a biphasic P (a smaller first phase of the
+peak's own sign, then a larger phase the other way) the P peak is that first
+phase and the onset stays at the foot of the deflection, so its PR reads about
+4.5 ms longer than the same shape the other way up; neither Experiment 13
+recording has that shape. The P peak is searched after the previous beat's T peak and
 measured against the PR baseline, so at 500–700 bpm the previous T wave is
 not taken for this beat's P (PR read ~60 ms instead of 42 at 500 bpm before,
 with false "Sustained PR prolongation" events); a beat without a P wave
@@ -724,9 +842,9 @@ episodes — all measured against this recording's own baseline heart
 rate, not a fixed cutoff. The color-coded ribbon at the top gives an
 at-a-glance view of where events cluster; each card on the left is one
 episode. Click a card (or a ribbon segment) to zoom the RR-series plot
-straight to that episode — in the screenshot above, the demo recording's
-inserted bradycardia, pause, and irregular run were all found and are
-listed with their exact timing and severity.
+straight to that episode — in the screenshot above, the one event of the
+recording, the isolated premature beat at 247.7 s, is listed with its exact
+timing and severity.
 
 The baseline is always the first N seconds of the analysis window. The mockup's
 second choice, "30 s before an annotation", is **not available**: it would be a new
@@ -819,8 +937,8 @@ the series those values come from, without basis n or state.
   Time course, Autonomic CSI/CPI, Intervals, Events) with its state, its key
   result and an **Include** tick. A line out of date says why next to its value.
 - **Export Excel**, **GraphPad Prism**, **PDF report**, **Copy text** and
-  **Save .txt**. The buttons of the right panel's EXPORTS section do the same
-  exports (the panel starts closed: **Stats ⟨** in the header).
+  **Save .txt**. **More ▾** holds the other exports: RR intervals CSV, Figures
+  (PNG), Everything (ZIP: Excel + figures) and Events PDF.
 
 **Include** decides what the Excel workbook, the ZIP (its workbook and its
 figures), the Prism file, the PDF report and the text report hold. It is on by default for what is
@@ -943,7 +1061,7 @@ length).
 
 <img src="screenshots/13_parameters_dialog.png" width="420" alt="Parameters dialog, top section">
 
-Open **⚙ Parameters** (top toolbar, right side) for every setting that
+Open **⚙ Parameters** (**⋯** menu of the header, right side) for every setting that
 affects analysis: channel/subject metadata, sampling rate override,
 filter cutoffs, and detection thresholds. Metrics use mouse-calibrated
 algorithms, but protocol-specific reference ranges are not currently
@@ -954,23 +1072,29 @@ data for your strain and experimental conditions.
 
 ## Exporting & saving your work
 
-- **Save Session** (toolbar, or `Ctrl+S`) writes a `.ecgsession` file with
+- **Save Session** (header, or `Ctrl+S`) writes a `.ecgsession` file with
   every result computed so far, so reopening it later restores the exact
   state — no need to re-run detection or analysis.
 - The **Report** tab holds the exports with their Include ticks and the
-  provenance. The **EXPORTS** section of the right panel (closed at first: **Stats ⟨**
-  in the header) covers everything else: a formatted Excel
-  workbook, GraphPad Prism `.pzfx`, a one-page PDF report (signal strip,
-  key metrics, Poincaré diagram, abnormal-events summary), a
-  per-episode annotated PDF for abnormal events, and CSV. Time course > Autonomic
+  provenance, and every export: **Export Excel**,
+  **GraphPad Prism** `.pzfx`, **PDF report** (signal strip, key metrics,
+  Poincaré diagram, abnormal-events summary), **Copy text** / **Save .txt**,
+  and under **More ▾** the RR intervals CSV, the figures, the ZIP and the
+  per-episode annotated Events PDF. The header's **Export…** opens the
+  Report tab. Time course > Autonomic
   results add their own Excel sheets and Prism tables (see
   [Exports](#exports) in the Autonomic section).
 - **💾 Save to cohort registry** (Time course > Event-locked) keeps
   each recording's per-event autonomic results in the local registry, for
   the cohort calibration of ks / kp.
 - If you're building a training set for the ML R-peak detector, **Save
-  for Training** (right panel, ML Detector Saving section) caches this
-  recording's corrected peaks without needing a full session save.
+  for training** (Signal quality panel, shown with Method = ML Detector)
+  caches this recording's corrected peaks without needing a full session
+  save.
+- A saved session also restores the Recording sheet (channel, rate, crop,
+  Subject ID), the detection bar (method, threshold, Min / Max RR), the
+  Filters popover (including SG options and the raw / filtered view), the
+  auto-correction switch and the analysis window.
 
 ---
 
@@ -984,7 +1108,7 @@ data for your strain and experimental conditions.
   no-filter mode always leaves polarity untouched.
 - **A window/dialog seems to freeze on close** — give background
   operations (Detect Peaks, Analyze, Classify) a moment to finish; the
-  toolbar's progress bar and ETA readout show whether something is still
+  header's progress bar and ETA readout show whether something is still
   running.
 - **A metric needs a protocol-specific reference range** — the application
   does not currently grade results against selectable experimental contexts;

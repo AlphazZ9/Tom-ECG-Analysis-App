@@ -13,8 +13,9 @@ import tkinter.font as tkfont
 from ecg.ui.theme import (
     THEME, NK_AVAILABLE, BG, PANEL, BORDER, BORDER2, TEXT, MUTED, LIGHT, BLUE,
     GREEN, ORANGE, BLUE_HOVER, PURPLE, PURPLE_DARK, TEAL, TEAL_DARK, GREEN_DARK,
-    COLOR_PRIMARY, SPACE_XS, SPACE_S, SPACE_M, SPACE_L, FONT_SMALL,
-    FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR, FONT_HINT,
+    COLOR_PRIMARY, SPACE_XS, SPACE_S, SPACE_M, SPACE_L, FONT_SMALL, FONT_LABEL,
+    FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR, FONT_HINT, FONT_TITLE, FONT_MONO,
+    FONT_CARD_TITLE,
 )
 
 # Mixin of ECGApp: `self: ECGApp` shows pyright the whole app surface, so a
@@ -31,21 +32,18 @@ class ToolbarMixin:
     # ─── KPI bar ──────────────────────────────────────────────
 
     def _build_toolbar(self: ECGApp) -> None:
-        """Primary instrument-style toolbar spanning the FULL window width.
+        """Header spanning the full window width: identity and file chip on
+        the left, the commands on the right.
 
-        Packed on self (not inside main -- see _build()), before the
-        sidebar/main split, so it isn't confined to main's width. Consolidates
-        what used to be split across the old KPI/top bar AND the sidebar's
-        numbered workflow buttons (Preview/Run) into one real toolbar, per
-        the Adaptive Workbench brief: Open/Save/Export/Detect Peaks/Analyze/
-        Settings, Undo/Redo, project name, progress indicator.
+        There is no sidebar any more: the file chip opens the Recording sheet
+        (channel, rate, subject, crop...), the ▾ beside Open the recent files,
+        and ⋯ the rarely used commands (Parameters, Theme, shortcuts, reset,
+        clear session cache) -- see app_header_menus.py.
 
-        btn_preview/btn_run/btn_save_session are RELOCATED here (same
-        attribute names, same CTkButton objects) rather than recreated --
+        btn_preview/btn_run/btn_save_session keep their attribute names:
         session_controller.py/signal_controller.py/analysis_controller.py all
         reference them by name for busy-state text swaps ("Loading…",
-        "Analysing…", "Saving…", "Restoring…") and must keep working
-        unchanged.
+        "Analysing…", "Saving…", "Restoring…").
         """
         bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
         bar.pack(side="top", fill="x")
@@ -72,53 +70,49 @@ class ToolbarMixin:
         row.pack(fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
         row.pack_propagate(False)
 
-        # ── Left panel toggle ──────────────────────────────────────────────
-        self.btn_toggle_left_panel = ctk.CTkButton(
-            row, text="⟨ Sidebar", width=88, height=34,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            font=FONT_BTN_SEC, corner_radius=8,
-            command=self._toggle_left_panel,
-        )
-        self.btn_toggle_left_panel.pack(side="left", padx=(0, SPACE_S))
-        self._bind_hover_tip(self.btn_toggle_left_panel, "Hide/show the left panel")
+        # Right cluster packed first: when the window is narrow, pack takes
+        # the room from the file chip (packed last), never from a command.
+        right = ctk.CTkFrame(row, fg_color="transparent")
+        right.pack(side="right")
 
-        # ── File ops chip: Open / Save ────────────────────────────────────
-        # Export is reached solely from the right panel's EXPORTS section now
-        # (was previously duplicated here too via a toolbar dropdown).
-        file_chip = self._toolbar_chip(row)
+        # ── File ops chip: Open ▾ / Save ──────────────────────────────────
+        file_chip = self._toolbar_chip(right)
         file_chip.pack(side="left", padx=(0, SPACE_M))
-
         # Open is a one-time setup step, not part of the Detect/Analyze
-        # pipeline -- styled neutral (matching Theme/panel-toggle) rather
-        # than a third saturated-blue button competing with Detect Peaks
-        # for attention.
+        # pipeline -- styled neutral rather than a third saturated-blue
+        # button competing with Detect Peaks for attention.
         ctk.CTkButton(
-            file_chip, text="📂  Open", width=90, height=34,
+            file_chip, text="📂  Open", width=80, height=34,
             fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
             font=FONT_BTN_SEC, corner_radius=8,
             command=self._open_file,
-        ).pack(side="left", padx=(SPACE_S, SPACE_XS))
+        ).pack(side="left", padx=(SPACE_S, 0))
+        self.btn_recent = ctk.CTkButton(
+            file_chip, text="▾", width=30, height=34,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+            font=FONT_BTN_SEC, corner_radius=8,
+            command=self._toggle_recent_menu,
+        )
+        self.btn_recent.pack(side="left", padx=(SPACE_XS, SPACE_S))
+        self._bind_hover_tip(self.btn_recent, "Recent files")
 
         # Starts visibly disabled (muted, matching Undo/Redo's idle look)
         # rather than a full-saturation green that reads as clickable
         # before any session exists to save -- _set_save_session_enabled()
         # restores the green "ready" look the moment it actually is.
-        # font=FONT_BTN_SEC to match Open in this same chip -- it used to be
-        # FONT_CARD_TITLE (bold, 1pt larger), which with Open's FONT_BTN_SEC
-        # made this one 34px-tall row mix three different button fonts.
         self.btn_save_session = ctk.CTkButton(
             file_chip, text="💾  Save Session", command=self._save_session,
             fg_color=BORDER, hover_color=BORDER, text_color=MUTED,
-            font=FONT_BTN_SEC, height=34, corner_radius=8,
+            font=FONT_BTN_SEC, height=34, width=120, corner_radius=8,
             state="disabled")
         self.btn_save_session.pack(side="left", padx=(0, SPACE_S))
 
-        # ── Analysis actions chip: Detect Peaks / Analyze ─────────────────
-        analysis_chip = self._toolbar_chip(row)
+        # ── Analysis actions chip: Detect Peaks / Analyze / Export ────────
+        analysis_chip = self._toolbar_chip(right)
         analysis_chip.pack(side="left", padx=(0, SPACE_M))
 
         self.btn_preview = ctk.CTkButton(
-            analysis_chip, text="Detect Peaks",
+            analysis_chip, text="Detect Peaks", width=116,
             command=self._preview,
             fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
             font=FONT_BTN_PRIMARY, height=34, corner_radius=8)
@@ -126,7 +120,7 @@ class ToolbarMixin:
 
         run_color = GREEN if NK_AVAILABLE else BORDER2
         self.btn_run = ctk.CTkButton(
-            analysis_chip, text="Analyze all",
+            analysis_chip, text="Analyze all", width=108,
             command=self._run_analysis,
             fg_color=run_color, hover_color=GREEN_DARK if NK_AVAILABLE else BORDER2,
             text_color="white", font=FONT_BTN_PRIMARY, height=34,
@@ -141,97 +135,75 @@ class ToolbarMixin:
                 "auto-run is on. Intervals and Events have their own buttons.")
 
         self.btn_toolbar_export = ctk.CTkButton(
-            analysis_chip, text="Export…", width=84, height=34, font=FONT_BTN_SEC,
+            analysis_chip, text="Export…", width=76, height=34, font=FONT_BTN_SEC,
             fg_color=BORDER, hover_color=BORDER2, text_color=TEXT, corner_radius=8,
             command=self._show_export)
         self.btn_toolbar_export.pack(side="left", padx=(0, SPACE_S))
         self._bind_hover_tip(self.btn_toolbar_export,
                              "Report tab: what goes in the exports, and the formats")
 
-        # ── Edit chip: Undo / Redo toolbar mirrors ────────────────────────
-        edit_chip = self._toolbar_chip(row)
+        # ── Edit chip: Undo / Redo (Ctrl+Z / Ctrl+Y) ──────────────────────
+        edit_chip = self._toolbar_chip(right)
         edit_chip.pack(side="left", padx=(0, SPACE_M))
         self.btn_toolbar_undo = ctk.CTkButton(
-            edit_chip, text="↩ Undo", width=88, height=34, font=FONT_BTN_SEC,
+            edit_chip, text="↩ Undo", width=72, height=34, font=FONT_BTN_SEC,
             fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
             corner_radius=8, state="disabled", command=self._undo_edit)
         self.btn_toolbar_undo.pack(side="left", padx=(SPACE_S, SPACE_XS))
         self.btn_toolbar_redo = ctk.CTkButton(
-            edit_chip, text="↪ Redo", width=88, height=34, font=FONT_BTN_SEC,
+            edit_chip, text="↪ Redo", width=72, height=34, font=FONT_BTN_SEC,
             fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
             corner_radius=8, state="disabled", command=self._redo_edit)
         self.btn_toolbar_redo.pack(side="left", padx=(0, SPACE_S))
 
-        # Thin vertical rule -- the button chips end here and the rest of
-        # the bar is mostly empty space at idle (no file loaded yet), so a
-        # visible seam anchors "controls" vs. "status" instead of the
-        # identity label appearing to float in a blank stretch.
-        ctk.CTkFrame(row, width=1, fg_color=BORDER).pack(
-            side="left", fill="y", pady=SPACE_S, padx=(0, SPACE_M))
+        # ── ⋯: Parameters, Theme, light / dark, shortcuts, reset, cache ───
+        self.btn_more_menu = ctk.CTkButton(
+            right, text="⋯", width=40, height=34, font=FONT_CARD_TITLE,
+            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
+            corner_radius=8, command=self._toggle_more_menu)
+        self.btn_more_menu.pack(side="left")
+        self._bind_hover_tip(
+            self.btn_more_menu,
+            "Parameters, theme, keyboard shortcuts, reset to mouse defaults, clear session cache")
 
-        # ── Identity: project name + file name ────────────────────────────
+        # ── Identity: app name, project, file chip ─────────────────────────
         left = ctk.CTkFrame(row, fg_color="transparent")
-        left.pack(side="left")
+        left.pack(side="left", fill="x", expand=True, padx=(0, SPACE_M))
+        ctk.CTkLabel(left, text="ECG Analysis", font=FONT_TITLE, text_color=TEXT,
+                     anchor="w").pack(side="left", padx=(SPACE_XS, SPACE_M))
         self.lbl_topbar_project = ctk.CTkLabel(
-            left, text="—", font=FONT_SIDEBAR_HDR, text_color=TEXT, anchor="w")
-        self.lbl_topbar_project.pack(side="left")
-        ctk.CTkLabel(left, text="   ", font=FONT_HINT, text_color=LIGHT).pack(side="left")
-        self.lbl_topbar_file = ctk.CTkLabel(
-            left, text="No file loaded", font=FONT_HINT, text_color=MUTED, anchor="w")
-        self.lbl_topbar_file.pack(side="left")
+            left, text="", width=0, font=FONT_SIDEBAR_HDR, text_color=TEXT, anchor="w")
+        self.lbl_topbar_project.pack(side="left", padx=(0, SPACE_M))
+        self._bind_hover_tip(self.lbl_topbar_project, "Project name (Recording sheet)")
 
-        # ── Status readout — the app's single non-modal feedback channel ──
-        # Was a child of the left sidebar's DETECTION accordion, so it went
-        # dark whenever that section was collapsed or the panel hidden, and
-        # every hover tip (routed through the same label -- see
-        # _bind_hover_tip) read as a detection setting. Living in the
-        # always-visible toolbar, it survives both. Fills the slack between
-        # the file identity and the quality gauge/Settings cluster.
-        # No wraplength: a long status message or hover tip used to wrap to
-        # 2-3 lines and, since this row has a fixed height (pack_propagate
-        # (False) above), spill downward over the quality gauge/badge and
-        # the Parameters/Theme/"Stats ⟩" buttons to its right, hiding them
-        # entirely. Kept single-line and truncated to fit instead -- see
-        # _fit_status_text()/_refresh_status_text().
+        # The file chip: file · channel · rate, opening the Recording sheet.
+        # A frame of labels rather than a CTkButton, so the text set by
+        # _update_topbar_filename() is the file identity alone (no "▾").
+        # Sized to its text; packed last, it is the one cut short when the
+        # window is narrow.
+        self.file_chip = ctk.CTkFrame(left, fg_color=BG, corner_radius=8, border_width=1,
+                                      border_color=BORDER2)
+        self.file_chip.pack(side="left")
+        chevron = ctk.CTkLabel(self.file_chip, text="▾", font=FONT_LABEL, text_color=MUTED,
+                               width=16, height=28)
+        chevron.pack(side="right", padx=(SPACE_XS, SPACE_M))
+        self.lbl_topbar_file = ctk.CTkLabel(
+            self.file_chip, text="No file loaded", font=FONT_MONO, text_color=TEXT,
+            anchor="w", height=28)
+        self.lbl_topbar_file.pack(side="left", fill="x", expand=True, padx=(SPACE_M, 0))
+        for w in (self.file_chip, self.lbl_topbar_file, chevron):
+            w.bind("<Button-1>", lambda _e: self._toggle_recording_sheet())
+            w.configure(cursor="hand2")
+            self._bind_hover_tip(
+                w, "Recording: channel, sampling rate, subject, project, crop, notes, session")
+
+        # ── Status readout -- the app's single non-modal feedback channel.
+        # Built by _build_status_label in the slack of the tab row: kept
+        # single-line and truncated to fit (see _fit_status_text()).
         self._status_font = tkfont.Font(font=FONT_SMALL)
-        # Built by _build_status_label: the slack of the header is gone to the
-        # buttons and the file chip of the redesign, the tab row has room for it.
         self.lbl_status = None
         self._status_text, self._status_color = "Ready", MUTED
         self._status_display_raw, self._status_display_color = "Ready", MUTED
-
-        # ── Right: Settings/Theme. Signal quality sits next to the signal it
-        # judges (Signal & Detection), not in the header. ─────────────────
-        right = ctk.CTkFrame(row, fg_color="transparent")
-        right.pack(side="right")
-
-        # Parameters moved back into the always-visible toolbar -- it's the
-        # app's only settings dialog and the sidebar's bottom-of-scroll
-        # button was invisible without deliberate scrolling on any normal
-        # window height.
-        ctk.CTkButton(right, text="⚙  Parameters", width=110, height=34,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      font=FONT_BTN_SEC, command=self._open_params_dialog,
-                      corner_radius=8).pack(side="left", padx=(0, SPACE_S))
-        ctk.CTkButton(right, text="Theme", width=76, height=34,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      font=FONT_BTN_SEC, command=self._open_theme_dialog,
-                      corner_radius=8).pack(side="left", padx=(0, SPACE_S))
-        ctk.CTkButton(right, text="☀/☾", width=52, height=34,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      font=FONT_BTN_SEC, corner_radius=8,
-                      command=self._toggle_dark_live,
-                      ).pack(side="left", padx=(0, SPACE_S))
-
-        # ── Right panel toggle ─────────────────────────────────────────────
-        self.btn_toggle_right_panel = ctk.CTkButton(
-            right, text="Stats ⟩", width=88, height=34,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            font=FONT_BTN_SEC, corner_radius=8,
-            command=self._toggle_right_panel,
-        )
-        self.btn_toggle_right_panel.pack(side="left")
-        self._bind_hover_tip(self.btn_toggle_right_panel, "Hide/show the right panel")
 
     def _build_status_label(self: ECGApp, bar) -> None:
         """The status readout, in the slack of the tab row *bar*."""

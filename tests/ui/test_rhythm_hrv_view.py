@@ -436,9 +436,11 @@ def test_tab_is_renamed_and_old_sessions_follow():
 
 
 def test_entropy_cap_is_kept_by_a_rebuild():
+    # snapshot_ui_state and restore_ui_state share one list of entries.
     import inspect
-    assert "ent_entropy_cap" in inspect.getsource(SessionController.snapshot_ui_state)
-    assert "ent_entropy_cap" in inspect.getsource(SessionController.restore_ui_state)
+    assert "ent_entropy_cap" in SessionController._SNAPSHOT_ENTRIES
+    for fn in (SessionController.snapshot_ui_state, SessionController.restore_ui_state):
+        assert "self._SNAPSHOT_ENTRIES" in inspect.getsource(fn)
 
 
 def test_entropy_cap_entry_still_reaches_the_job(monkeypatch, recording):

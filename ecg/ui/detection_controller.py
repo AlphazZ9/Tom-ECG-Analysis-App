@@ -26,7 +26,6 @@ from ecg.core.detection import (
 from ecg.core.ml_detector import detect_peaks_ml, MLPeakModel
 from ecg.ui.theme import (
     BLUE, BORDER, BORDER2, GREEN, LIGHT, MUTED, ORANGE, ORANGE_DEEP, RED,
-    SPACE_M, SPACE_S,
 )
 from ecg.ui.dialogs import MethodAgreementDialog
 
@@ -190,17 +189,14 @@ class DetectionController:
             else:
                 self.app._sg_frame.pack_forget()
 
-        # ML Detector needs a trained model before it can run, and that
-        # status lives in a right-panel section that starts collapsed on
-        # the opposite side of the window -- surface it inline, right next
-        # to the Method combobox, instead of only in that far-away section.
-        lbl = getattr(self.app, "lbl_ml_inline_status", None)
-        if lbl is not None:
+        # ML Detector needs a trained model before it can run: its status,
+        # verified flag and training show in the Signal quality panel while
+        # it is the method (absent from test doubles without that panel).
+        show_ml = getattr(self.app, "_show_ml_section", None)
+        if show_ml is not None:
             if choice == "ML Detector":
                 self.app.refresh_ml_status()
-                lbl.pack(fill="x", padx=SPACE_M, pady=(0, SPACE_S))
-            else:
-                lbl.pack_forget()
+            show_ml(choice == "ML Detector")
 
     def on_filtering_toggle(self) -> None:
         """Grey out (not hide) FILTER SETTINGS -- notch/band-pass/cleaning
