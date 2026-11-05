@@ -30,7 +30,11 @@ if trapz is None:
 from ecg.core.models import (
     AnalysisResults, MouseECG, QTC_FORMULA_LABELS, normalize_qtc_formula,
 )
-from ecg.core.wave_template import WaveTemplate, detect_waves_on_beat, format_windows
+from ecg.core.wave_template import (QRS_INITIAL_FRAC, QRS_INITIAL_GAP_MS,
+                                    QRS_INITIAL_NOISE_K, T_PHASE_ABSENT_FRAC, T_PHASE_FRAC,
+                                    T_PLAN_REFINE_MS, T_PLAN_SHIFT_MS, T_PLAN_SNR,
+                                    WaveTemplate, _moving_average, detect_waves_on_beat,
+                                    format_windows)
 
 # Detected locally rather than imported from theme.py: this module is pure
 # NumPy/SciPy/pandas with no Tkinter/CTk dependency, and theme.py does
@@ -2060,7 +2064,12 @@ def compute_qtc(
 # QT, not in QRS); T end = line fitted through the 70-30 % part of the T-wave
 # trailing edge meeting the PR baseline (the mouse T-wave end is gradual and
 # ambiguous: read QT with care); P onset = the same kind of line through the
-# P upstroke meeting the PR baseline. None of the four is clamped to a
+# P upstroke meeting the PR baseline -- on a rolling median, a biphasic P
+# starts at the up-crossing after its initial trough, the QRS at the start
+# of a small initial wave of the other sign before Q (decided on the median
+# of the max(8 N, 256) beats around the row), and a biphasic T ends with its
+# last phase, the phases decided on the median of the 8 N beats around the
+# row (ensemble_disclosure). None of the four is clamped to a
 # template window (see detect_waves_on_beat).
 INTERVAL_DEFINITIONS: "tuple[tuple[str, str], ...]" = (
     ("PR",  "P onset → QRS onset"),
@@ -2134,6 +2143,25 @@ _ENSEMBLE_MIN_FRACTION: int = 4
 # next row's from 26 % to 3 %, and the rows switching NaN / measured from
 # 294 to 29 (N // 8: 4.7 %, 52).
 _ENSEMBLE_T_ROWS_FRACTION: int = 4
+# Pairs of disjoint ensembles the noise of a median beat is measured on
+# (_ensemble_noise_sd), spread over the recording.
+_ENSEMBLE_NOISE_PAIRS: int = 64
+# Which phases a row's T has (detect_waves_on_beat t_plan) is decided on the
+# median of the _ENSEMBLE_T_PLAN_X * N beats around it (one decision every
+# N // 2 rows): on each row's own median the second phase of a low biphasic
+# T came and went with the noise (T end jumping by one phase in blocks of
+# rows), and a single decision for the whole recording (the median of all
+# its beats) missed or blended a T that changes during it and made a row's
+# T end depend on beats minutes away. 8 x 32 beats ~ 45 s at RR 175 ms.
+_ENSEMBLE_T_PLAN_X: int = 8
+_ENSEMBLE_T_PLAN_GUARD: int = 4
+# Whether the QRS starts with a small initial wave (detect_waves_on_beat
+# qrs_initial_plan) is decided the same way, on a median of at least
+# _ENSEMBLE_QRS_PLAN_BEATS beats whatever N: decided on each row's own
+# median, a 3 %-of-R wave at 2-3 x the 248 noise counted on 25-80 % of the
+# N = 32 rows (QRS onset -8.5 or -5.2 ms in blocks of rows), and on a 64-beat
+# median (N = 8) on 60 % of them.
+_ENSEMBLE_QRS_PLAN_BEATS: int = 256
 # Artifact rule, on the residual to the local median beat outside the QRS
 # (+-_ARTIFACT_QRS_MS around R, where a slight misalignment dominates it).
 # On both real recordings its RMS tops out near 4 x its recording median and
@@ -2238,6 +2266,207 @@ def _artifact_beats(beats: "np.ndarray", usable: "np.ndarray", centre: int,
     return flagged
 
 
+def _ensemble_noise_sd(beats_m: "np.ndarray", joins: "np.ndarray",
+                       members_of: "Callable[[int], Optional[np.ndarray]]",
+                       n_ens: int, centre: int, fs: float) -> float:
+    """Noise SD of a rolling-median beat smoothed by a 4 ms moving average
+    (the trace the T phases are read on, ``detect_waves_on_beat``
+    t_phase_noise): from the difference between the medians of two rows N
+    beats apart, which share no beat, after the QRS (robust SD / sqrt 2;
+    median over at most _ENSEMBLE_NOISE_PAIRS such pairs spread over the
+    recording). 0.0 when the recording holds no such pair."""
+    n = len(joins)
+    first = np.arange(0, max(0, n - n_ens), n_ens)
+    if len(first) > _ENSEMBLE_NOISE_PAIRS:
+        first = first[np.linspace(0, len(first) - 1, _ENSEMBLE_NOISE_PAIRS).astype(int)]
+    i_a = centre + int(round(_ARTIFACT_QRS_MS / 1000.0 * fs))
+    w = max(1, int(round(0.004 * fs)))
+    sds = []
+    for i in first:
+        if not (joins[i] and joins[i + n_ens]):
+            continue
+        ma, mb = members_of(int(i)), members_of(int(i + n_ens))
+        if ma is None or mb is None:
+            continue
+        d = _nan_median_rows(beats_m[ma, i_a:]) - _nan_median_rows(beats_m[mb, i_a:])
+        ok = np.isfinite(d)
+        stop = len(d) if ok.all() else int(np.argmin(ok))   # finite stretch
+        if stop < 4 * w:
+            continue
+        d = _moving_average(d[:stop], w)
+        sds.append(1.4826 * float(np.median(np.abs(d - np.median(d)))) / np.sqrt(2.0))
+    return float(np.median(sds)) if sds else 0.0
+
+
+def _ensemble_t_plans(beats_m: "np.ndarray", joins: "np.ndarray", r: "np.ndarray",
+                      pre: "np.ndarray", post: "np.ndarray", centre: int, fs: float,
+                      rr_med: float, n_ens: int, noise: float,
+                      template: "WaveTemplate") -> "tuple[int, list[Optional[dict]]]":
+    """T phase plans along the recording (``detect_waves_on_beat`` t_plan):
+    (step, plans), row i following plans[i // step]. Plan k is delineated
+    on the median of the joining beats among the _ENSEMBLE_T_PLAN_X * N
+    rows centred on row k * step + step // 2 (step = N // 2), within reach
+    in time (median window sides), its noise *noise* (that of an N-beat
+    median) scaled by sqrt(N / beats). None when fewer than N beats join or
+    that median has no T end (those rows decide their phases themselves)."""
+    n = len(joins)
+    step = max(1, n_ens // 2)
+    half = _ENSEMBLE_T_PLAN_X * n_ens // 2
+    reach = half * rr_med * (1.0 + _ENSEMBLE_RR_HIGH)
+    plans: "list[Optional[dict]]" = []
+    for c in range(step // 2, (n + step - 1) // step * step, step):
+        c = min(c, n - 1)
+        j0, j1 = max(0, c - half), min(n, c + half)
+        rows = j0 + np.flatnonzero(joins[j0:j1] & (np.abs(r[j0:j1] - r[c]) <= reach))
+        if len(rows) < max(2, n_ens):
+            plans.append(None)
+            continue
+        lo, hi = int(np.median(pre[rows])), int(np.median(post[rows]))
+        med = _nan_median_rows(beats_m[rows, centre - lo:centre + hi])
+        ok = np.isfinite(med)
+        if not ok[lo]:
+            plans.append(None)
+            continue
+        # The finite stretch around R (a column no beat reaches is NaN).
+        a = lo - int(np.argmin(ok[lo::-1])) + 1 if not ok[:lo + 1].all() else 0
+        b = lo + int(np.argmin(ok[lo:])) if not ok[lo:].all() else len(med)
+        bt = (np.arange(len(med)) - lo)[a:b] / fs * 1000.0
+        plan: dict = {}
+        detect_waves_on_beat(med[a:b], bt, template, next_r_ms=rr_med / fs * 1000.0,
+                             p_onset_biphasic=True,
+                             t_phase_noise=noise * np.sqrt(n_ens / len(rows)),
+                             t_plan_out=plan)
+        plans.append(plan or None)
+    # A one-phase plan next to a two-phase or an ambiguous one (within
+    # _ENSEMBLE_T_PLAN_GUARD plans), and a two-phase plan next to a one-phase
+    # one or to one whose second phase is too small to tell (15-30 % of the
+    # first): the second phase is near the thresholds there, and the rows
+    # would jump between the two T ends (a second phase at ~20 % of the first
+    # came out one-phase on some plans, two-phase or ambiguous on others).
+    # Neither: the T end is ambiguous. A two-phase plan next to one whose
+    # second phase the noise hides keeps its T end.
+    kind = [0 if not p else (-2 if p.get("small_phase") else -1) if p.get("ambiguous")
+            else int(p.get("phases", 1)) for p in plans]
+    g = _ENSEMBLE_T_PLAN_GUARD
+    for k, kk in enumerate(kind):
+        near = kind[max(0, k - g):k + g + 1]
+        if ((kk == 2 and (1 in near or -2 in near))
+                or (kk == 1 and (2 in near or -1 in near or -2 in near))):
+            plans[k] = {"ambiguous": True}
+    # The plans at either end of the recording, on fewer beats (their window
+    # cut by the end), that lost their T end to the noise: those of the
+    # nearest plan inwards within _ENSEMBLE_T_PLAN_X plans (inside the
+    # recording, a median without a T end is a blend across a QT change, and
+    # its rows decide their phases themselves).
+    full = [k for k, p in enumerate(plans) if p is not None]
+    if full:
+        for k in range(len(plans)):
+            near = full[0] if k < full[0] else full[-1] if k > full[-1] else None
+            if near is not None and abs(near - k) <= _ENSEMBLE_T_PLAN_X:
+                plans[k] = plans[near]
+    return step, plans
+
+
+def _ensemble_qrs_plans(beats_m: "np.ndarray", joins: "np.ndarray", r: "np.ndarray",
+                        pre: "np.ndarray", post: "np.ndarray", centre: int, fs: float,
+                        rr_med: float, n_ens: int,
+                        template: "WaveTemplate") -> "tuple[int, list[Optional[dict]]]":
+    """Initial QRS wave plans along the recording (``detect_waves_on_beat``
+    qrs_initial_plan): (step, plans), row i following plans[i // step].
+    Plan k is found (qrs_initial_wave, ``qrs_bounds`` initial_out) on the
+    median of the joining beats among the max(_ENSEMBLE_T_PLAN_X * N,
+    _ENSEMBLE_QRS_PLAN_BEATS) rows centred on row k * step + step // 2 (step
+    = that many // 16), within reach in time. Whether the QRS starts with an
+    initial wave is then the majority among the plans within
+    _ENSEMBLE_T_PLAN_GUARD of each, and so is whether it comes before a Q or
+    the R; the wave's lead over the Q (R) edge onset is the plan's own, or
+    the median of its neighbours' when the wave counts by the majority
+    alone. None (rows keep the Q / R edge) where no plan around has N
+    joining beats."""
+    n = len(joins)
+    beats = max(_ENSEMBLE_T_PLAN_X * n_ens, _ENSEMBLE_QRS_PLAN_BEATS)
+    step = max(1, beats // 16)
+    half = beats // 2
+    reach = half * rr_med * (1.0 + _ENSEMBLE_RR_HIGH)
+    found: "list[Optional[dict]]" = []
+    for c in range(step // 2, (n + step - 1) // step * step, step):
+        c = min(c, n - 1)
+        j0, j1 = max(0, c - half), min(n, c + half)
+        rows = j0 + np.flatnonzero(joins[j0:j1] & (np.abs(r[j0:j1] - r[c]) <= reach))
+        if len(rows) < max(2, n_ens):
+            found.append(None)
+            continue
+        lo, hi = int(np.median(pre[rows])), int(np.median(post[rows]))
+        med = _nan_median_rows(beats_m[rows, centre - lo:centre + hi])
+        ok = np.isfinite(med)
+        if not ok[lo]:
+            found.append(None)
+            continue
+        a = lo - int(np.argmin(ok[lo::-1])) + 1 if not ok[:lo + 1].all() else 0
+        b = lo + int(np.argmin(ok[lo:])) if not ok[lo:].all() else len(med)
+        bt = (np.arange(len(med)) - lo)[a:b] / fs * 1000.0
+        out: dict = {}
+        detect_waves_on_beat(med[a:b], bt, template, next_r_ms=rr_med / fs * 1000.0,
+                             qrs_initial_wave=True, qrs_initial_out=out)
+        found.append(out or None)
+    g = _ENSEMBLE_T_PLAN_GUARD
+    plans: "list[Optional[dict]]" = []
+    for k in range(len(found)):
+        near = [p for p in found[max(0, k - g):k + g + 1] if p]
+        if not near:
+            plans.append(None)
+            continue
+        yes = [p for p in near if p.get("found")]
+        if 2 * len(yes) <= len(near):
+            plans.append({"found": False, "from_q": None, "lead": 0.0})
+            continue
+        from_q = 2 * sum(bool(p.get("from_q")) for p in yes) > len(yes)
+        yes = [p for p in yes if bool(p.get("from_q")) == from_q]
+        own = found[k]
+        lead = (float(own["lead"]) if own and own.get("found")
+                and bool(own.get("from_q")) == from_q
+                else float(np.median([float(p["lead"]) for p in yes])))
+        plans.append({"found": True, "from_q": from_q, "lead": lead})
+    return step, plans
+
+
+def _qrs_plans_summary(plans: "list[Optional[dict]]", step: int, n_rows: int) -> dict:
+    """``attrs["ensemble"]["qrs_plans"]``: how many rows followed a plan with
+    an initial QRS wave (``_ensemble_qrs_plans``), and its median lead over
+    the Q / R edge (ms)."""
+    rows = {"initial_wave": 0, "edge": 0, "none": 0}
+    leads = []
+    for k, p in enumerate(plans):
+        cnt = max(0, min(n_rows, (k + 1) * step) - k * step)
+        kind = "none" if not p else "initial_wave" if p.get("found") else "edge"
+        rows[kind] += cnt
+        if kind == "initial_wave":
+            leads.append(float(p["lead"]))
+    return {"rows": rows,
+            "lead_ms_median": round(float(np.median(leads)), 2) if leads else None}
+
+
+def _t_plans_summary(plans: "list[Optional[dict]]", step: int, n_rows: int) -> dict:
+    """``attrs["ensemble"]["t_plans"]``: how many rows followed each kind of
+    T phase plan (``_ensemble_t_plans``), and the median plan T end."""
+    kinds = {"biphasic": 0, "monophasic": 0, "ambiguous": 0, "none": 0}
+    ends = []
+    for k, p in enumerate(plans):
+        rows = max(0, min(n_rows, (k + 1) * step) - k * step)
+        kind = ("none" if not p else "ambiguous" if p.get("ambiguous") else
+                "biphasic" if int(p.get("phases", 1)) == 2 else "monophasic")
+        kinds[kind] += rows
+        if kind in ("biphasic", "monophasic"):
+            ends.append(float(p["end_ms"]))
+    shape = None
+    two = [p for p in plans if p and not p.get("ambiguous") and int(p.get("phases", 1)) == 2]
+    if two:
+        pos = sum(int(p.get("first_sign", 1)) > 0 for p in two)
+        shape = "+ then −" if 2 * pos >= len(two) else "− then +"
+    return {"beats": _ENSEMBLE_T_PLAN_X, "rows": kinds, "biphasic_shape": shape,
+            "end_ms_median": float(np.median(ends)) if ends else None}
+
+
 def _ensemble_t_consensus(t_peak: "np.ndarray", t_offset: "np.ndarray",
                           r: "np.ndarray", in_ens: "np.ndarray", half: int,
                           reach: float) -> "tuple[np.ndarray, np.ndarray]":
@@ -2303,6 +2532,68 @@ def ensemble_window_limit(n: int, window_s: "Optional[float]") -> str:
             "(not a beat-to-beat result)")
 
 
+def _qrs_onset_disclosure(plans: "Optional[dict]", n: int) -> str:
+    """The QRS-onset clause of ``ensemble_disclosure``, for the summary of the
+    initial-wave plans the rows followed (``attrs["ensemble"]["qrs_plans"]``;
+    absent from frames measured before those plans)."""
+    beats = max(_ENSEMBLE_T_PLAN_X * n, _ENSEMBLE_QRS_PLAN_BEATS)
+    rows = (plans or {}).get("rows") or {}
+    lead = (plans or {}).get("lead_ms_median")
+    kinds = ", ".join(f"{int(rows[k])} {lab}" for k, lab in (
+        ("initial_wave", "starting with an initial wave"
+         + (f" ({float(lead):+.1f} ms on the Q / R edge)" if lead is not None else "")),
+        ("edge", "at the Q / R edge"), ("none", "without such a median"))
+        if int(rows.get(k, 0)))
+    return ("QRS onset is the start of the first QRS deflection: a small wave of the "
+            "other sign that the Q (or R) runs straight out of (more than "
+            f"{QRS_INITIAL_FRAC * 100:.0f} % of R and {QRS_INITIAL_NOISE_K:.0f}x the "
+            "noise above both the PR baseline and the level it rises from, peaking at "
+            f"most {QRS_INITIAL_GAP_MS:.0f} ms before the Q is back near the baseline) "
+            "starts the QRS, not the Q edge; whether there is one, and how far its onset "
+            f"leads the Q edge, is decided on the median of the {beats} beats around "
+            "each row (the majority of the neighbouring such medians), and the row's QRS "
+            "onset is its own Q / R edge onset moved by that lead"
+            + (f" (rows: {kinds})" if kinds else "")
+            + "; a wave within about a third of that threshold can still count on some "
+            f"stretches of {max(1, beats // 16)}+ rows and not on others (QRS onset "
+            "~3-4 ms apart); rows measured on their own beat, and N = 1, keep the Q / R "
+            "edge (QRS ~3-4 ms shorter, PR as much longer where there is a wave); ")
+
+
+def _t_end_disclosure(plans: "Optional[dict]", n: int) -> str:
+    """The T-end clause of ``ensemble_disclosure``, for the summary of the T
+    phase plans the rows followed (``attrs["ensemble"]["t_plans"]``)."""
+    x = int((plans or {}).get("beats", _ENSEMBLE_T_PLAN_X))
+    rows = (plans or {}).get("rows") or {}
+    kinds = ", ".join(f"{int(rows[k])} {lab}" for k, lab in (
+        ("biphasic", f"biphasic ({(plans or {}).get('biphasic_shape') or '+ then −'})"),
+        ("monophasic", "monophasic"), ("ambiguous", "ambiguous"),
+        ("none", "without a T end on that median")) if int(rows.get(k, 0)))
+    return ("a biphasic T (a run of the other sign right before or after its largest "
+            f"phase, at least {T_PHASE_FRAC * 100:.0f} % of it) ends where its LAST phase "
+            "comes back to the PR level and peaks at its first phase; which phases a "
+            f"row's T has is decided on the median of the {x * n} beats around it"
+            + (f" (rows: {kinds})" if kinds else "")
+            + ", not on the row's own median, on which a low second phase came and went "
+            "with the noise; that median's T end is the line through the times its last "
+            "phase's trailing edge (4 ms moving average) falls through 70 to 30 % meeting "
+            "the PR level (every 6 ms stretch of the PR segment, weighted by its flatness), "
+            "and the row's is that one moved by the lag at which that median's last phase "
+            f"fits the row best in least squares (within {T_PLAN_REFINE_MS:.0f} ms of the "
+            f"lag of its whole T, itself within ±{T_PLAN_SHIFT_MS:.0f} ms; the whole T's "
+            f"lag when the last phase alone is under {T_PLAN_SNR:.0f} x its noise): a T "
+            "that widens faster than that window follows is read at ~3/4 of its change, a "
+            "shift in full; no T end on a row whose T is not told from noise or that "
+            "clearly lacks the last phase, or where that median is ambiguous (second phase "
+            f"{T_PHASE_ABSENT_FRAC * 100:.0f}-{T_PHASE_FRAC * 100:.0f} % of the first or "
+            "hidden by its noise, or one-phase next to two-phase or ambiguous medians); "
+            "rows next to a median without a T end (one blending the beats before and after "
+            "a QT change: its edge crossings not on one line) decide their phases "
+            "themselves, on their own median, without a T end where it blends too; rows "
+            "measured on their own beat, and N = 1, keep the end of the largest phase "
+            "against the one flattest PR stretch; ")
+
+
 def ensemble_disclosure(intervals: "Optional[pd.DataFrame]") -> str:
     """How the rows of *intervals* were delineated: the "Delineation" row of
     the exports and reports. A frame without the record is per beat: it was
@@ -2329,6 +2620,17 @@ def ensemble_disclosure(intervals: "Optional[pd.DataFrame]") -> str:
                f"among the {int(info['t_rows'])} rows around it (which share most of their "
                "beats), so that the T end does not flip between two candidates of the "
                "median beat from row to row; " if int(info.get("t_rows", 0)) > 1 else "")
+            + ("a biphasic P (a trough the other way less than 8 ms before its peak) "
+               "starts where the trace comes back up through the PR baseline after that "
+               "trough, not at the foot of the trough (rows measured on their own beat "
+               "keep the upstroke line; in the mirror image, a smaller first phase of the "
+               "peak's own sign, the P peak is that first phase and PR starts at the foot "
+               "of the deflection, ~4.5 ms longer); "
+               if info.get("p_onset") == "biphasic up-crossing" else "")
+            + (_qrs_onset_disclosure(info.get("qrs_plans"), n)
+               if info.get("qrs_onset") == "initial wave" else "")
+            + (_t_end_disclosure(info.get("t_plans"), n)
+               if info.get("t_end") == "end of the last phase" else "")
             + "QTc pairs each median QT with the mean preceding RR of the same ensemble "
               "(RR_ensemble_ms), RR_ms stays the row's own; "
             + ensemble_window_limit(n, window)
@@ -2647,6 +2949,30 @@ def analyse_intervals(
         ens_n[ens_artifact] = 0
         ens_members: "list[Optional[np.ndarray]]" = [None] * n_valid
 
+        def _members(i: int) -> "Optional[np.ndarray]":
+            """Ensemble of row *i* (a beat that joins ensembles): the joining
+            beats among the N centred on it and within reach in time; None
+            when fewer than ens_min."""
+            j0, j1 = max(0, i - n_ens // 2), min(n_valid, i + n_ens - n_ens // 2)
+            m = j0 + np.flatnonzero(
+                ens_joins[j0:j1] & (np.abs(valid_rp[j0:j1] - valid_rp[i]) <= ens_reach))
+            return m if len(m) >= ens_min else None
+
+        # Noise of a median beat, against which a second T phase is told
+        # from baseline noise (detect_waves_on_beat t_phase_noise).
+        t_noise = _ensemble_noise_sd(beats_m, ens_joins, _members, n_ens,
+                                     fixed_hw, fs)
+        # Which phases the T has, decided on the median of the beats around
+        # each row (detect_waves_on_beat t_plan, _ENSEMBLE_T_PLAN_X).
+        t_step, t_plans = _ensemble_t_plans(beats_m, ens_joins, valid_rp.astype(float),
+                                            pre_v, post_v, fixed_hw, fs, rr_med, n_ens,
+                                            t_noise, wave_template)
+        # Whether the QRS starts with an initial wave, decided likewise on
+        # wider medians (detect_waves_on_beat qrs_initial_plan).
+        q_step, qrs_plans = _ensemble_qrs_plans(beats_m, ens_joins, valid_rp.astype(float),
+                                                pre_v, post_v, fixed_hw, fs, rr_med, n_ens,
+                                                wave_template)
+
     tick = max(1, n_valid // 20)
     for i in range(n_valid):
         r0 = int(valid_rp[i])
@@ -2658,24 +2984,27 @@ def analyse_intervals(
             p_from = (t_peak[i - 1] - r0) / fs * 1000
         next_r = ((rpeaks_all[i_next[i]] - r0) / fs * 1000
                   if i_next[i] < len(rpeaks_all) else None)
-        beat = None
+        beat, on_median = None, False
         if ens_on:
             if ens_artifact[i]:
                 continue
             if ens_joins[i]:
-                j0, j1 = max(0, i - n_ens // 2), min(n_valid, i + n_ens - n_ens // 2)
-                members = j0 + np.flatnonzero(
-                    ens_joins[j0:j1] & (np.abs(valid_rp[j0:j1] - r0) <= ens_reach))
-                if len(members) >= ens_min:
+                members = _members(i)
+                if members is not None:
                     beat = _nan_median_rows(
                         beats_m[members, fixed_hw - lo:fixed_hw + hi])
                     ens_n[i] = len(members)
                     ens_members[i] = members
+                    on_median = True
         if beat is None:
             beat = cleaned[r0 - lo:r0 + hi].astype(float)
         det = detect_waves_on_beat(beat, bt_ms,
                                    wave_template, p_search_from_ms=p_from,
-                                   next_r_ms=next_r)
+                                   next_r_ms=next_r, p_onset_biphasic=on_median,
+                                   qrs_initial_plan=(qrs_plans[i // q_step]
+                                                     if on_median else None),
+                                   t_phase_noise=t_noise if on_median else None,
+                                   t_plan=t_plans[i // t_step] if on_median else None)
 
         def _ms_to_samp(v: float) -> float:
             return valid_rp[i] + v / 1000.0 * fs if np.isfinite(v) else np.nan
@@ -2849,6 +3178,21 @@ def analyse_intervals(
             "members_median": float(np.median(in_ens)) if len(in_ens) else 0.0,
             "qtc_rr":     "mean preceding RR of the ensemble",
             "t_rows":     t_rows,
+            # A biphasic P starts at the up-crossing after its trough
+            # (detect_waves_on_beat p_onset_biphasic); absent from older frames.
+            "p_onset":    "biphasic up-crossing",
+            # QRS onset at the start of a small initial wave of the other
+            # sign before Q / R, found on the medians of the T phase plans
+            # (_ensemble_qrs_plans); absent from older frames.
+            "qrs_onset":  "initial wave",
+            "qrs_plans":  _qrs_plans_summary(qrs_plans, q_step, n_valid),
+            # A biphasic T ends with its last phase (t_phase_noise), told
+            # from noise against this SD of a median beat; absent from older
+            # frames.
+            "t_end":      "end of the last phase",
+            "t_noise":    float(t_noise),
+            # The T phase plans the rows followed (_ensemble_t_plans).
+            "t_plans":    _t_plans_summary(t_plans, t_step, n_valid),
         }
     else:
         df.attrs["ensemble"] = {"n": 1}

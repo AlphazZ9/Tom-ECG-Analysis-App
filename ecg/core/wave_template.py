@@ -658,9 +658,86 @@ QRS_NOISE_K:     float = 3.0
 # QRS_NOISE_K x the noise SD): with the 5 % threshold a small Q (3-4 % of R)
 # was skipped and QRS onset moved to the R upstroke, ~3 ms late.
 QRS_QS_THRESH_FRAC: float = 0.02
+# Initial QRS wave (qrs_bounds initial_wave): a deflection of the other sign
+# just before the Q (or R) the onset is walked from, peaking at most
+# QRS_INITIAL_GAP_MS before the first sample where that Q (R) is back in its
+# threshold band and departing, on a QRS_INITIAL_SMOOTH_MS moving average,
+# by more than QRS_INITIAL_FRAC of R and QRS_INITIAL_NOISE_K x the noise SD
+# from both the PR baseline and the level it rises from (the median of the
+# QRS_INITIAL_FOOT_MS ending QRS_INITIAL_RISE_MS before its peak): the QRS
+# starts with it (248: +18 % of R at -6 ms before a Q at -2.5; 247: +2-3 %
+# at -7.5 before a Q at -4.5, 13-20 x the noise; both start at -8 to
+# -9.5 ms, the Q edge at -4 / -6), where the line through the times its
+# moving average rises through QRS_INITIAL_LEVELS of it meets that level.
+# Without the moving average, the Q/S threshold (2 % of R or 3 x the noise)
+# took single noisy samples for a wave (7 % of the rows of a 248-like
+# synthetic with none, at 2 x its noise); with it, that threshold missed the
+# 247 wave on 6 % of the rows. Against the PR baseline alone, a PR window in
+# the last phase of a biphasic P made the whole PR segment a "wave" (onset
+# -17 to -23 ms on 3 % of the rows of a synthetic without one). Decided on
+# wide medians only (analysis _ensemble_qrs_plans): on a row's own N = 32
+# median, the noise made a 3 %-of-R wave count on some rows only.
+QRS_INITIAL_GAP_MS:    float = 3.0
+QRS_INITIAL_SMOOTH_MS: float = 1.5
+QRS_INITIAL_FRAC:      float = 0.01
+QRS_INITIAL_NOISE_K:   float = 5.0
+QRS_INITIAL_RISE_MS:   float = 5.0
+QRS_INITIAL_FOOT_MS:   float = 3.0
+QRS_INITIAL_LEVELS: "tuple[float, ...]" = (0.3, 0.5, 0.7)
 # P onset is searched back at most this far from the P peak, whatever the
 # template's P_onset window (a mouse P upstroke lasts ~5-15 ms).
 P_ONSET_SPAN_MS: float = 30.0
+# A P counts as biphasic (p_onset_biphasic) when the trough before its peak
+# deviates from the baseline the other way by at least this fraction of the
+# peak's deviation. Its onset is the up-crossing after that trough only when
+# the P peak follows within P_BIPHASIC_SPAN_MS (2-6 ms on the real biphasic P
+# waves at N = 32, whatever the size of a shoulder in between); a trough
+# farther from the peak is the previous T's tail followed by a flat stretch,
+# and the leading-edge line applies.
+P_BIPHASIC_TROUGH_FRAC: float = 0.25
+P_BIPHASIC_SPAN_MS:     float = 8.0
+# Biphasic T (t_phase_noise): the phases of the T are the sign runs of the
+# trace against the PR baseline (4 ms moving average). The run next to the
+# T peak's, of the other sign, is a second T phase when it reaches both
+# T_PHASE_FRAC of the peak's deviation and T_PHASE_NOISE_X times the noise
+# SD of that moving average; below T_PHASE_ABSENT_FRAC of the peak, or
+# T_PHASE_ABSENT_NOISE_X times the noise when a T_PHASE_FRAC phase would
+# pass the noise test, it is baseline noise (and so is any run that small
+# between two phases); in between the T end is ambiguous (NaN). A run is a
+# T phase only if it follows the other one within T_PHASE_GAP_MS (no
+# isoelectric stretch in between) and peaks inside the T search span, or at
+# most T_PHASE_EDGE_MS before its start (a first phase cut by the window
+# edge).
+T_PHASE_FRAC:           float = 0.3
+T_PHASE_ABSENT_FRAC:    float = 0.15
+T_PHASE_NOISE_X:        float = 4.0
+T_PHASE_ABSENT_NOISE_X: float = 2.5
+T_PHASE_GAP_MS:         float = 4.0
+T_PHASE_EDGE_MS:        float = 2.0
+# With a phase plan (t_plan, decided on a wider median), a row's T is found
+# by least squares (_t_from_plan): the plan's whole T moved within
+# +-T_PLAN_SHIFT_MS of where it is on the plan, then each phase alone within
+# T_PLAN_REFINE_MS of that lag, by T_PLAN_LAG_STEP_MS; a fit whose gain is
+# under T_PLAN_SNR times its noise SD is not used (on a low biphasic T at
+# 1.7 x the 248 noise every row keeps a T end, bias +0.4 to +0.7 ms; at
+# 3.6 x 45 % do, the others are NaN). A phase that fails the noise test is
+# read at the lag of the whole T, but a beat on which it is clearly missing
+# (gain under T_PLAN_ABSENT_GAIN of the plan's by 2 SD) gets no T end. The
+# plan's own T end is its edge line through the times its 4 ms moving
+# average falls through the T_PLAN_LEVELS fractions of the phase, after the
+# last sample at or above T_PLAN_EDGE_TOP of it, and none when a crossing is
+# more than T_PLAN_LINE_TOL_MS off that line (a median blending a QT
+# change); the plan trace is kept from 2 * T_PLAN_TOL_MS before its first
+# phase's peak to as far after its T end.
+T_PLAN_SNR:             float = 3.0
+T_PLAN_SHIFT_MS:        float = 15.0
+T_PLAN_REFINE_MS:       float = 4.0
+T_PLAN_ABSENT_GAIN:     float = 0.5
+T_PLAN_LINE_TOL_MS:     float = 1.0
+T_PLAN_LAG_STEP_MS:     float = 0.25
+T_PLAN_TOL_MS:          float = 8.0
+T_PLAN_LEVELS: "tuple[float, ...]" = (0.3, 0.4, 0.5, 0.6, 0.7)
+T_PLAN_EDGE_TOP:        float = 0.85
 _QRS_MAX_WALK_MS: float = 30.0   # never search further than this from Q/R/S
 # The edge line may meet the baseline at most this far beyond the first
 # sample back inside the threshold band (a 5 % threshold on a slow initial
@@ -744,6 +821,9 @@ def qrs_bounds(
     j_t:       "Optional[float]",
     base_lo:   float,
     base_hi:   float,
+    initial_wave: bool = False,
+    initial_out:  "Optional[dict]" = None,
+    initial_plan: "Optional[dict]" = None,
 ) -> "tuple[float, float]":
     """QRS onset and QRS offset (J point), ms relative to R = 0.
 
@@ -760,6 +840,23 @@ def qrs_bounds(
       the 30-70 % part of that initial deflection meets the baseline
       (``edge_baseline_crossing``: exact for a linear deflection,
       insensitive to the threshold value and to sample noise).
+      With *initial_wave* (the wide medians of ``analysis``
+      ``_ensemble_qrs_plans``), a deflection of the other sign that the Q
+      (R) runs straight out of -- peaking at most ``QRS_INITIAL_GAP_MS``
+      before that wave is back in its band, and above both the PR baseline
+      and the level just before its leading edge by more than
+      ``QRS_INITIAL_FRAC`` of R and ``QRS_INITIAL_NOISE_K`` x the noise SD,
+      on a ``QRS_INITIAL_SMOOTH_MS`` moving average -- is the initial QRS
+      deflection, and the onset is its leading-edge line meeting that level
+      instead (the Q edge alone started the QRS 3-4 ms late on 247 / 248);
+      *initial_out* receives ``found``, ``from_q`` (walked from a Q, not
+      the R) and ``lead`` (that onset minus the Q / R edge onset, ms). With
+      *initial_plan* (such a dict, from the median of the beats around a
+      row), the onset is the Q / R edge onset plus the plan's ``lead`` when
+      the plan found a wave before the same kind of edge, and the edge onset
+      otherwise: the wave is not decided again on the row. Neither on a
+      single beat: the 247 wave (2-3 % of R) is under 5 x a single beat's
+      noise (~1.3 % of R), so it would count on some beats only.
     * **Offset (J point)** -- the terminal deflection is the S wave when S
       dips below the baseline by more than the threshold, otherwise the R
       downstroke (same Q/S threshold). The trace is followed forwards until
@@ -818,7 +915,8 @@ def qrs_bounds(
     # ── Onset ───────────────────────────────────────────────────────────
     onset = nan
     i_q = _idx(q_t) if _ok(q_t) else None
-    if i_q is not None and i_q < i_r and dev[i_q] < -qs_thr:
+    from_q = i_q is not None and i_q < i_r and dev[i_q] < -qs_thr
+    if from_q:
         start, inside = i_q, (lambda v: v < -qs_thr)   # Q wave: below baseline
     else:
         start, inside = i_r, (lambda v: v > thr)       # R upstroke
@@ -830,6 +928,70 @@ def qrs_bounds(
         t_on = _tangent(k - 1, start, start)
         onset = float(np.clip(t_on, float(bt[k - 1]) - _QRS_MAX_EXTRAP_MS,
                               float(bt[start])))
+        if initial_plan is not None:
+            # The initial wave as found on the median of the beats around
+            # (initial_out of that median): its lead over the Q (R) edge
+            # onset, on this beat's own Q (R) edge. Not decided again here:
+            # near the threshold the noise of one row's median made the wave
+            # count on some rows and not on the next (onset ~3 ms apart).
+            if (initial_plan.get("found")
+                    and bool(initial_plan.get("from_q")) == from_q):
+                onset += float(initial_plan["lead"])
+        elif initial_wave:
+            found, onset_q = False, onset
+            sgn = -1.0 if from_q else 1.0
+            ma = _moving_average(mb, max(1, int(round(QRS_INITIAL_SMOOTH_MS / dt_ms))))
+            dw = -sgn * (ma - base)
+            rise = int(round(QRS_INITIAL_RISE_MS / dt_ms))
+            foot = max(2, int(round(QRS_INITIAL_FOOT_MS / dt_ms)))
+            # Not clipped to the PR window: on a median whose PR window
+            # ended inside the wave's foot, that clipped the wave's peak.
+            j0 = k - 1 - int(round(QRS_INITIAL_GAP_MS / dt_ms))
+            if j0 - rise - foot >= 0:
+                i_w = j0 + int(np.argmax(dw[j0:k]))
+                f1 = i_w - rise
+                f0 = f1 - foot
+                # The level the wave rises from: the trace just before its
+                # leading edge. A PR window in the last phase of a biphasic P
+                # put the whole PR segment more than the threshold above the
+                # PR "baseline" (onset at -23 ms instead of -5).
+                lvl = float(np.median(mb[f0:f1 + 1]))
+                a_foot = -sgn * (float(ma[i_w]) - lvl)
+                # Noise: of the PR window, or of the stretch just before the
+                # foot when lower (a PR window ending in the wave's foot
+                # read the wave's slope as noise).
+                pre = mb[max(0, f0 - (i1 - i0)):f0]
+                nz = min(noise, float(np.std(pre))) if len(pre) >= 3 else noise
+                w_thr = max(QRS_INITIAL_FRAC * abs(r_amp), QRS_INITIAL_NOISE_K * nz)
+                # A peak inside the span (still rising at its start, it is
+                # the end of a P running into the QRS), above both the PR
+                # baseline and the level it rises from.
+                if i_w > j0 and min(float(dw[i_w]), a_foot) > w_thr:
+                    # Its leading edge: the line through the times the moving
+                    # average last rises through QRS_INITIAL_LEVELS of the
+                    # wave before its peak, meeting that level. The samples'
+                    # 30-70 % band holds 2-3 samples of a 2 ms edge, and the
+                    # steepest-sample fallback took a noise wiggle 7 ms
+                    # before the wave for the edge (onset at -14 ms).
+                    yy = -sgn * (ma - lvl)
+                    ts = []
+                    for lv in QRS_INITIAL_LEVELS:
+                        j = i_w
+                        while j > f0 and yy[j - 1] >= lv * a_foot:
+                            j -= 1
+                        if j <= f0:
+                            break
+                        ts.append(float(bt[j - 1]) + dt_ms * (lv * a_foot - yy[j - 1])
+                                  / (yy[j] - yy[j - 1]))
+                    t_w = (float(np.polyfit(QRS_INITIAL_LEVELS, ts, 1)[1])
+                           if len(ts) == len(QRS_INITIAL_LEVELS) else float("nan"))
+                    if np.isfinite(t_w):
+                        t_w = float(np.clip(t_w, float(bt[f0]), float(bt[i_w])))
+                        if t_w < onset:
+                            onset, found = t_w, True
+            if initial_out is not None:
+                initial_out.update(found=found, from_q=bool(from_q),
+                                   lead=float(onset - onset_q) if found else 0.0)
 
     # ── Offset (J point) ────────────────────────────────────────────────
     offset = nan
@@ -957,12 +1119,51 @@ def pr_baseline_window(
     return float(bt[i0 + j]), float(bt[i0 + j + w - 1])
 
 
+def pr_baseline_level(
+    beat_time: "np.ndarray",
+    beat:      "np.ndarray",
+    q_t:       "Optional[float]",
+) -> float:
+    """PR-segment level the T end of a rolling median is read against
+    (``detect_waves_on_beat`` *t_phase_noise*): the mean level of every
+    ``PR_BASELINE_WIDTH_MS`` segment of the ``pr_baseline_window`` span,
+    weighted by (flattest SD / its SD) ** 4. ``pr_baseline_window`` picks
+    ONE segment, and where the PR segment slopes, two segments of about the
+    same flatness took turns on neighbouring medians (247: levels 0.03
+    apart, the T end jumping by 1.7 ms in blocks of rows); the weighted
+    level changes smoothly with the trace. NaN when the span is too short.
+    """
+    bt = np.asarray(beat_time, dtype=float)
+    mb = np.asarray(beat,      dtype=float)
+    if len(bt) < 10:
+        return float("nan")
+    dt_ms = float(bt[1] - bt[0])
+    hi_ms = float(q_t) if (q_t is not None and np.isfinite(q_t) and q_t < 0) else 0.0
+    lo_ms = max(hi_ms - _PR_BASELINE_SPAN_MS, float(bt[0]))
+    i0 = int(np.searchsorted(bt, lo_ms - 1e-9))
+    i1 = int(np.searchsorted(bt, hi_ms - 1e-9))
+    w  = max(3, int(round(PR_BASELINE_WIDTH_MS / dt_ms)))
+    if i1 - i0 < w:
+        return float("nan")
+    win  = np.lib.stride_tricks.sliding_window_view(mb[i0:i1], w)
+    sd   = win.std(axis=1)
+    wt   = (max(float(sd.min()), 1e-12) / np.maximum(sd, 1e-12)) ** 4
+    return float(wt @ win.mean(axis=1) / wt.sum())
+
+
 def detect_waves_on_beat(
     beat:      "np.ndarray",
     beat_time: "np.ndarray",
     template:  "WaveTemplate",
     p_search_from_ms: "Optional[float]" = None,
     next_r_ms: "Optional[float]" = None,
+    p_onset_biphasic: bool = False,
+    t_phase_noise: "Optional[float]" = None,
+    t_plan: "Optional[dict]" = None,
+    t_plan_out: "Optional[dict]" = None,
+    qrs_initial_wave: bool = False,
+    qrs_initial_out:  "Optional[dict]" = None,
+    qrs_initial_plan: "Optional[dict]" = None,
 ) -> "dict[str, float]":
     """Detect P/Q/R/S/J/T landmarks on a single beat aligned on R=0.
 
@@ -978,6 +1179,57 @@ def detect_waves_on_beat(
     next_r_ms : time (ms from R) of the next beat's R. At mouse heart rates
         the window after R reaches the next beat's P wave, which is not this
         beat's T. None: nothing is excluded from the T search.
+    p_onset_biphasic : a P whose initial deflection is opposite to its peak
+        (biphasic / notched P, trough at least ``P_BIPHASIC_TROUGH_FRAC`` of
+        the peak's deviation) starts where the trace comes back up through
+        the baseline after that trough (see ``_p_onset``). Set by
+        ``analyse_intervals`` for the rows measured on a rolling median
+        (ensemble_beats > 1) only: a row measured on its own beat (timing
+        outlier, too few ensemble members, N = 0 or 1) keeps the leading-edge
+        line.
+    qrs_initial_wave : a small deflection of the other sign that the Q (or
+        R) runs straight out of starts the QRS (``qrs_bounds``
+        *initial_wave*), found on this beat; what was found goes into
+        *qrs_initial_out*. Set by ``analyse_intervals`` on the wide medians
+        of ``_ensemble_qrs_plans`` only, never on a row.
+    qrs_initial_plan : the initial wave as found on the median of the beats
+        around (``qrs_bounds`` *initial_plan*): a row's QRS onset is its own
+        Q / R edge onset moved by that wave's lead. Passed by
+        ``analyse_intervals`` for the rows measured on a rolling median
+        (ensemble_beats > 1); None: the Q / R edge.
+    t_phase_noise : noise SD of the beat's 4 ms moving average. Given, a
+        biphasic T (two adjacent phases of opposite sign, the smaller at
+        least ``T_PHASE_FRAC`` of the larger and ``T_PHASE_NOISE_X`` times
+        this noise) ends where its LAST phase returns to the baseline, and
+        its T peak is the peak of its FIRST phase, whichever phase is the
+        larger (see ``_t_phases``); the line meeting the baseline is that
+        through the times the moving average first falls through the
+        ``T_PLAN_LEVELS`` fractions of the phase (``_edge``), not through
+        the samples of its 30-70 % band, and the baseline is the
+        flatness-weighted PR level (``pr_baseline_level``), not the one PR
+        segment QRS onset is measured from. NaN T end when the second phase
+        is too small to be told from noise. Passed by ``analyse_intervals`` with
+        *p_onset_biphasic* (rows measured on a rolling median); None: the T
+        end is that of the largest phase, so two phases of similar size
+        take turns at ending the T.
+    t_plan : with *t_phase_noise*, a phase plan (filled in *t_plan_out* by
+        this function on a median of more beats: ``analyse_intervals`` uses
+        the median of the beats around the row, ``_ensemble_t_plans``): the
+        phases are not decided again on this beat, whose noise made a
+        second phase near the thresholds count on some rows and not on
+        others (T end jumping by one phase in blocks of rows). The plan's
+        T, then each of its phases, is fitted to this beat by least squares
+        over a lag; the T end is the plan's T end moved by the lag of the
+        last phase (of the whole T when that phase alone is not told from
+        noise); NaN T peak and T end when the T is not told from noise or
+        the plan is ambiguous (see ``_t_from_plan``).
+    t_plan_out : a dict filled with the phase plan of this beat (with
+        *t_phase_noise*, without *t_plan*): ``phases`` (1 or 2),
+        ``first_ms`` / ``first_sign``, ``last_ms`` / ``last_sign``,
+        ``end_ms`` (its T end) and ``edge_t`` / ``edge_v`` (the 4 ms moving
+        average against the baseline over its T);
+        ``{"ambiguous": True}`` when the second phase is too small to be
+        told from noise; left empty when no T end is found.
 
     Returns
     -------
@@ -1007,7 +1259,10 @@ def detect_waves_on_beat(
       value when they cannot be placed).
     • T end: trailing-edge line (``edge_baseline_crossing``) meeting the
       baseline, searched up to the later of the template and default T-end
-      window ends; NaN, not an edge value, when it falls outside.
+      window ends; NaN, not an edge value, when it falls outside. On a
+      rolling median (*t_phase_noise*), that of the LAST phase of a
+      biphasic T, and with *t_plan* the phase plan of a wider median read on
+      the beat (``_t_from_plan``).
     """
     bt = np.asarray(beat_time, dtype=float)
     mb = np.asarray(beat,      dtype=float)
@@ -1051,7 +1306,7 @@ def detect_waves_on_beat(
             return 0.0
         return float(np.median(mb[i0:i1]))
 
-    def _p_onset(t_peak_ms: float, base: float) -> float:
+    def _p_onset(t_peak_ms: float, base: float, min_dev: float = 0.0) -> float:
         """P onset: the P leading edge (least-squares line through its
         30-70 % band, ``edge_baseline_crossing``) meeting the isoelectric
         level *base*, searched back at most P_ONSET_SPAN_MS from the P peak
@@ -1063,7 +1318,10 @@ def detect_waves_on_beat(
         part of the edge above the junction is the P alone once the T has
         ended (P onset hidden under the T end at RR ~100 ms), and the P
         cannot start before the signal stops falling when the T is still
-        decaying under it. NaN -- never a window-edge value -- when the
+        decaying under it. With *p_onset_biphasic*, a biphasic P (trough the
+        other way first, at least *min_dev* -- the P detection threshold --
+        below *base*) starts at the up-crossing after that trough instead.
+        NaN -- never a window-edge value -- when the
         edge starts at the span / beat-window start or the line meets the
         baseline outside the searched span."""
         nan_ = float("nan")
@@ -1079,6 +1337,24 @@ def detect_waves_on_beat(
         frac = (sm - base) / ext
         iso, t_jct = base, None
         j = int(np.argmin(frac[:-1]))               # lowest point before the peak
+        # Biphasic / notched P (p_onset_biphasic): the initial deflection is
+        # opposite to the peak (and a wave: above the P detection threshold,
+        # not a noise dip), and a shoulder between it and the peak breaks
+        # the edge line (a flat fit through the shoulder, or the notch
+        # upstroke ~4 ms late). The onset is where the trace first comes
+        # back through the baseline after that trough, provided the P peak
+        # follows closely: a trough followed by a flat stretch and then the
+        # P is the end of the previous T, not the P's first phase. Not a
+        # test of the rise right after the crossing, which a small shoulder
+        # fails on one median and passes on the next (rows flipping by 4 ms).
+        if (p_onset_biphasic and frac[j] <= -P_BIPHASIC_TROUGH_FRAC
+                and -frac[j] * abs(ext) >= min_dev):
+            up = np.flatnonzero((frac[j:-1] < 0) & (frac[j + 1:] >= 0))
+            if len(up):
+                q = j + int(up[0])
+                t_up = float(bt[i_lo + q]) + dt_ms * (-frac[q]) / (frac[q + 1] - frac[q])
+                if t_peak_ms - P_BIPHASIC_SPAN_MS <= t_up < t_peak_ms - 1.0:
+                    return t_up
         # A band-pass leaves the PR segment below the level the P starts from
         # (undershoot before the QRS), so the lowest point is a slow ramp far
         # before the P: its real foot is where the steep edge begins.
@@ -1117,14 +1393,48 @@ def detect_waves_on_beat(
             return nan_
         return float(t_on)
 
+    def _edge(tt: "np.ndarray", yy: "np.ndarray", amp: float,
+              t_from: float, t_to: float) -> "Optional[np.ndarray]":
+        """Times at which the trailing edge of yy (the phase made positive)
+        falls through T_PLAN_LEVELS of *amp*: the first falls after its
+        last sample at or above T_PLAN_EDGE_TOP of *amp* in t_from..t_to
+        (so a noise wiggle in the trough or near the baseline is not the
+        edge); linear between samples. None when there is no such edge."""
+        k0 = int(np.searchsorted(tt, t_from, side="left"))
+        k1 = int(np.searchsorted(tt, t_to, side="right"))
+        y = yy[k0:k1]
+        top = np.flatnonzero(y >= T_PLAN_EDGE_TOP * amp)
+        if not len(top):
+            return None
+        out = []
+        for lv in T_PLAN_LEVELS:
+            below = np.flatnonzero(y[top[-1]:] < lv * amp)
+            if not len(below):
+                return None
+            m = k0 + top[-1] + int(below[0])
+            y0, y1 = yy[m - 1], yy[m]
+            out.append(tt[m - 1] + (y0 - lv * amp) / (y0 - y1) * (tt[m] - tt[m - 1]))
+        return np.asarray(out)
+
     def _slope_offset(t_peak_ms: float, end_ms: float,
-                      base: "Optional[float]") -> float:
+                      base: "Optional[float]", fit_smoothed: bool = False,
+                      stop_ms: "Optional[float]" = None,
+                      line_tol: "Optional[float]" = None) -> float:
         """T end: the T-wave trailing edge (least-squares line through its
         30-70 % amplitude band, see ``edge_baseline_crossing``) meeting the
         isoelectric level *base* (the PR-segment baseline; the last 20 ms
         before *end_ms* when there is none). NaN when that line meets the
         baseline before the T peak or past *end_ms* (the T end is not inside
-        the searched span) -- never a value clamped onto an edge."""
+        the searched span) -- never a value clamped onto an edge. With
+        *fit_smoothed* the line is fitted on the 4 ms moving average rather
+        than on the samples: the edge of a small T phase holds only ~3
+        samples in its 30-70 % band, too few for a line through noise; with
+        *stop_ms* the edge ends there at the latest (the phase's first
+        return through the baseline, see ``_t_phases``); with *line_tol*
+        (a phase plan's median, ``t_plan_out``) NaN when a crossing time is
+        more than *line_tol* ms off that line: the edge is two edges, that
+        median blending beats before and after a QT change (the line from
+        the early 70 % and the late 30 % crossings ended 10-25 ms late)."""
         i_pk = _idx(t_peak_ms)
         i_hi = min(n - 1, _idx(end_ms))
         if i_hi <= i_pk + 2:
@@ -1148,11 +1458,241 @@ def detect_waves_on_beat(
                 i_end = i_pk + int(np.argmin(frac[:int(up[0]) + 1]))
                 if i_end <= i_pk + 2:
                     i_end = i_hi
-        t_off = edge_baseline_crossing(bt[i_pk:i_end + 1], mb[i_pk:i_end + 1],
-                                       base, ext, dt_ms, smooth_ms=4.0)
+        if stop_ms is not None and np.isfinite(stop_ms) and i_pk + 2 < _idx(stop_ms) < i_end:
+            i_end = _idx(stop_ms)
+        if fit_smoothed:
+            # The line through the times the 4 ms moving average first falls
+            # through each T_PLAN_LEVELS fraction of the phase (see _edge):
+            # a line fitted on the samples of the 30-70 % band took a small
+            # plateau in it for the slope (T end 25 ms late on 248).
+            # The phase amplitude is that moving average's at the peak: sm,
+            # edge-padded at the peak, weighs the peak sample alone, and a
+            # noise spike there put 85 % of it out of the trace's reach (no
+            # T end on a tenth of the 248 medians).
+            sg = np.sign(ext)
+            ma = sg * (_moving_average(mb, max(1, int(round(4.0 / dt_ms))))[i_pk:i_end + 1]
+                       - base)
+            e = (_edge(bt[i_pk:i_end + 1], ma, float(ma[0]), float(bt[i_pk]),
+                       float(bt[i_end])) if ma[0] > 0 else None)
+            t_off = float("nan")
+            if e is not None:
+                fit = np.polyfit(np.asarray(T_PLAN_LEVELS), e, 1)
+                bent = np.max(np.abs(np.polyval(fit, np.asarray(T_PLAN_LEVELS)) - e))
+                if line_tol is None or bent <= line_tol:
+                    t_off = float(fit[1])
+        else:
+            t_off = edge_baseline_crossing(bt[i_pk:i_end + 1], mb[i_pk:i_end + 1],
+                                           base, ext, dt_ms, smooth_ms=4.0)
         if not np.isfinite(t_off) or t_off <= t_peak_ms or t_off > float(bt[i_hi]):
             return float("nan")
         return float(t_off)
+
+    small_phase = [False]      # set by _t_phases, read by _t_plan_of
+
+    def _t_phases(t_peak_ms: float, lo_ms: float, hi_ms: float,
+                  base: float, noise: float) -> "tuple[float, float, float]":
+        """(first phase peak, last phase peak, end of the last phase's run)
+        in ms of the T wave whose largest phase peaks at *t_peak_ms*, phases
+        searched between *lo_ms* and *hi_ms* (the T search span), *noise*
+        the SD of the 4 ms moving average; NaN when the T end is ambiguous.
+        At most two phases: the largest one, and the run of the other sign
+        right before it or, failing that, right after it (see T_PHASE_FRAC).
+        The one before is tried first, so a T whose two phases are of
+        similar size gives the same pair whichever of them is the larger.
+        The run ends at the trace's first return through the baseline: the
+        last phase's edge stops there, not on a later noise trough of the
+        same sign (which, deeper than a low phase, took the edge line)."""
+        nan_ = float("nan")
+        v = _moving_average(mb, max(1, int(round(4.0 / dt_ms)))) - base
+        pos, starts, ends, amps, peaks, k = _t_runs(v, lo_ms, hi_ms, t_peak_ms)
+        a_main = float(amps[k])
+        if a_main <= 0:
+            return t_peak_ms, t_peak_ms, nan_
+
+        def _end(j: int) -> float:
+            return float(bt[min(n - 1, int(ends[j]))])
+        is_phase = max(T_PHASE_FRAC * a_main, T_PHASE_NOISE_X * noise)
+        # A run too small to be told from noise is no phase only when a
+        # phase big enough to count would have been told from it: under more
+        # noise it may be a phase the noise hides (ambiguous), and calling it
+        # absent made the T monophasic on some medians, biphasic on others.
+        keep = amps >= (max(T_PHASE_ABSENT_FRAC * a_main, T_PHASE_ABSENT_NOISE_X * noise)
+                        if T_PHASE_FRAC * a_main >= T_PHASE_NOISE_X * noise
+                        else T_PHASE_ABSENT_FRAC * a_main)
+
+        def _side(step: int) -> str:
+            j = k + step
+            while 0 <= j < len(amps) and not keep[j]:
+                j += step
+            if not 0 <= j < len(amps) or pos[starts[j]] == pos[starts[k]]:
+                return "none"
+            gap = (starts[k] - ends[j]) if step < 0 else (starts[j] - ends[k])
+            if (gap * dt_ms > T_PHASE_GAP_MS
+                    or not lo_ms - T_PHASE_EDGE_MS <= bt[peaks[j]] <= hi_ms):
+                return "none"
+            if amps[j] >= is_phase:
+                return "phase"
+            # Ambiguous by its size (not only hidden by the noise).
+            small_phase[0] = small_phase[0] or bool(amps[j] < T_PHASE_FRAC * a_main)
+            return "ambiguous"
+
+        def _next(step: int) -> int:
+            j = k + step
+            while not keep[j]:
+                j += step
+            return j
+
+        before = _side(-1)
+        if before == "phase":
+            return float(bt[peaks[_next(-1)]]), t_peak_ms, _end(k)
+        if before == "ambiguous":
+            return nan_, nan_, nan_
+        after = _side(+1)
+        if after == "phase":
+            j = _next(+1)
+            return t_peak_ms, float(bt[peaks[j]]), _end(j)
+        if after == "ambiguous":
+            return nan_, nan_, nan_
+        return t_peak_ms, t_peak_ms, _end(k)
+
+    def _t_runs(v: "np.ndarray", lo_ms: float, hi_ms: float,
+                t_peak_ms: float) -> tuple:
+        """Sign runs of *v* (the 4 ms moving average against the baseline):
+        (positive?, start, end [exclusive], amplitude, peak index) of each.
+        A run whose peak is outside the T search span *lo_ms* -
+        T_PHASE_EDGE_MS .. *hi_ms* is no T phase (amplitude 0), except the
+        one holding the T peak *t_peak_ms*, whose amplitude and peak are the
+        T peak's: a J/ST dip of the same sign with no zero crossing before a
+        - then + T shares its run, and the second phase was compared with
+        the dip."""
+        pos = v > 0
+        cut = np.flatnonzero(pos[1:] != pos[:-1]) + 1
+        starts, ends = np.r_[0, cut], np.r_[cut, n]          # [start, end)
+        peaks = np.array([a + int(np.argmax(np.abs(v[a:b])))
+                          for a, b in zip(starts, ends)])
+        amps = np.abs(v[peaks])
+        amps[(bt[peaks] < lo_ms - T_PHASE_EDGE_MS) | (bt[peaks] > hi_ms)] = 0.0
+        k = int(np.searchsorted(ends, _idx(t_peak_ms), side="right"))
+        peaks[k] = _idx(t_peak_ms)
+        amps[k] = abs(v[peaks[k]])
+        return pos, starts, ends, amps, peaks, k
+
+    def _t_plan_of(t_first: float, t_last: float, base: float) -> dict:
+        """The phase plan (``t_plan_out``) of the T phases _t_phases found:
+        peak time and sign of the first and the last phase, and how many
+        phases (1 or 2); ``{"ambiguous": True}`` when the T end was, with
+        ``"small_phase": True`` when a second phase is there but between
+        T_PHASE_ABSENT_FRAC and T_PHASE_FRAC of the first."""
+        if not (np.isfinite(t_first) and np.isfinite(t_last)):
+            return ({"ambiguous": True, "small_phase": True} if small_phase[0]
+                    else {"ambiguous": True})
+        v = _moving_average(mb, max(1, int(round(4.0 / dt_ms)))) - base
+        return {"phases": 1 if t_last == t_first else 2,
+                "first_ms": float(t_first), "first_sign": 1 if v[_idx(t_first)] >= 0 else -1,
+                "last_ms": float(t_last), "last_sign": 1 if v[_idx(t_last)] >= 0 else -1}
+
+    def _t_from_plan(plan: dict, lo_ms: float, hi_ms: float,
+                     base: float, noise: float) -> "tuple[float, float]":
+        """(T peak, T end) in ms of a beat whose T phases follow *plan* (that
+        of the median of the beats around it, ``t_plan``), found on this
+        beat's 4 ms moving average by least squares (``_fit_lag``): first
+        the lag of the plan's whole T (its phases together, within
+        +-T_PLAN_SHIFT_MS), then that of each phase alone within
+        T_PLAN_REFINE_MS of it. The T end is the plan's (its last-phase edge
+        line meeting the baseline) moved by the lag of the last phase, or
+        of the whole T when the last phase alone is not told from noise; the
+        T peak is this beat's extremum inside the first phase so moved.
+        Fitted on every sample of the T, the lag does not take the slope of
+        a 3-8-sample edge from the noise (a line through the 30-70 % band
+        spread the T end over 15 ms on a low T; an edge read at fixed
+        levels lost most rows of a low phase once the noise reached ~1.7 x
+        that of 248). A T that widens faster than the plan follows is read
+        at ~3/4 of its line-end change, a shift in full. NaN for both when
+        the plan is ambiguous or the whole T is not told from noise; NaN T
+        end when this beat clearly lacks the last phase (T_PLAN_ABSENT_GAIN)
+        or past *hi_ms*."""
+        nan_ = float("nan")
+        if plan.get("ambiguous") or not plan.get("phases"):
+            return nan_, nan_
+        v = _moving_average(mb, max(1, int(round(4.0 / dt_ms)))) - base
+        g_t, g_v = (np.asarray(plan[k], dtype=float) for k in ("edge_t", "edge_v"))
+        runs = [_plan_run(g_t, g_v, float(plan[k + "_ms"]), int(plan[k + "_sign"]))
+                for k in ("first", "last")]
+        if runs[0] is None or runs[1] is None:
+            return nan_, nan_
+        span = np.arange(-T_PLAN_SHIFT_MS, T_PLAN_SHIFT_MS + 1e-9, T_PLAN_LAG_STEP_MS)
+        whole = _fit_lag(v, g_t[runs[0][0]:runs[1][1] + 1],
+                         g_v[runs[0][0]:runs[1][1] + 1], noise, span)[0]
+        if whole is None:
+            return nan_, nan_
+        # Each phase alone within T_PLAN_REFINE_MS of the whole T's lag: the
+        # first one for the T peak, the last one for the T end.
+        span_r = whole + span[np.abs(span) <= T_PLAN_REFINE_MS]
+        ja, jb = runs[0]
+        one = _fit_lag(v, g_t[ja:jb + 1], g_v[ja:jb + 1], noise, span_r)[0]
+        lag_first = whole if one is None else one
+        ja, jb = runs[1]
+        seg = g_t[ja:jb + 1], g_v[ja:jb + 1]
+        one, gain, sd = _fit_lag(v, *seg, noise, span_r)
+        absent = False
+        if one is None:
+            # Not told from noise alone: the whole T's lag, unless this beat
+            # clearly lacks the phase (its gain there under
+            # T_PLAN_ABSENT_GAIN by 2 SD): no T end then.
+            _l, gain, sd = _fit_lag(v, *seg, noise, np.array([whole]))
+            absent = bool(gain + 2.0 * sd < T_PLAN_ABSENT_GAIN)
+        lags = [lag_first, whole if one is None else one]
+        f_sign = int(plan["first_sign"])
+        i0 = _idx(float(g_t[runs[0][0]]) + lags[0])
+        i1 = _idx(float(g_t[runs[0][1]]) + lags[0])
+        t_pk = (float(bt[i0 + int(np.argmax(f_sign * v[i0:i1 + 1]))])
+                if i1 >= i0 else float(plan["first_ms"]) + lags[0])
+        t_end = float(plan["end_ms"]) + lags[1]
+        return t_pk, (t_end if t_pk < t_end <= hi_ms and not absent else nan_)
+
+    def _plan_run(g_t: "np.ndarray", g_v: "np.ndarray", t_ref: float,
+                  sign: int) -> "Optional[tuple[int, int]]":
+        """First and last index of the run of sign *sign* of the plan trace
+        *g_v* holding *t_ref* (a phase peak); None when there is none."""
+        sg = sign * g_v
+        j = int(np.argmin(np.abs(g_t - t_ref)))
+        if sg[j] <= 0:
+            return None
+        ja, jb = j, j
+        while ja > 0 and sg[ja - 1] > 0:
+            ja -= 1
+        while jb < len(sg) - 1 and sg[jb + 1] > 0:
+            jb += 1
+        return (ja, jb) if jb - ja >= 2 else None
+
+    def _fit_lag(v: "np.ndarray", tt: "np.ndarray", gg: "np.ndarray", noise: float,
+                 lags: "np.ndarray") -> "tuple[Optional[float], float, float]":
+        """(lag, gain, gain SD): the lag among *lags* (ms) at which the plan
+        segment *gg* (times *tt*) moved fits this beat's moving average *v*
+        best in least squares, at the plan's own amplitude (with a free gain
+        the fit went to the flat baseline after the T, gain ~0; by
+        correlation alone onto the R wave), and this beat's least-squares
+        gain on the segment so moved, with its SD from *noise* (the SD of a
+        4 ms moving average). Lag None when it is at the edge of a span of
+        lags (the fit lies outside it) or the gain is under T_PLAN_SNR
+        times its SD."""
+        nan_ = float("nan")
+        x = np.interp(tt[None, :] + lags[:, None], bt, v, left=np.nan, right=np.nan)
+        res = np.sum((x - gg[None, :]) ** 2, axis=1)
+        e = float(gg @ gg)
+        if not np.isfinite(res).any() or e <= 0:
+            return None, nan_, nan_
+        k = int(np.nanargmin(res))
+        # The moving average's noise is correlated over its w samples
+        # (triangular autocorrelation).
+        w = max(1, int(round(4.0 / dt_ms)))
+        ac = np.correlate(gg, gg, "full")
+        rho = np.clip(1.0 - np.abs(np.arange(-(len(gg) - 1), len(gg))) / w, 0.0, None)
+        sd = noise * np.sqrt(max(float(ac @ rho), 0.0)) / e
+        gain = float(x[k] @ gg) / e
+        if (len(lags) > 1 and k in (0, len(lags) - 1)) or not gain >= T_PLAN_SNR * sd:
+            return None, gain, sd
+        return float(lags[k]), gain, sd
 
     def _descend(t0: "Optional[float]", edge_ms: float, step: int) -> "Optional[float]":
         """*t0* moved downhill (on a ~1 ms moving average) in direction
@@ -1220,7 +1760,10 @@ def detect_waves_on_beat(
     # wide QRS for a negative P.
     pr_lo, pr_hi = pr_baseline_window(bt, mb, None, q_t)
     if np.isfinite(pr_lo):
-        qon_t, qoff_t = qrs_bounds(bt, mb, q_t, s_t, j_t, pr_lo, pr_hi)
+        qon_t, qoff_t = qrs_bounds(bt, mb, q_t, s_t, j_t, pr_lo, pr_hi,
+                                   initial_wave=qrs_initial_wave,
+                                   initial_out=qrs_initial_out,
+                                   initial_plan=qrs_initial_plan)
     else:
         qon_t = qoff_t = float("nan")
     # QRS onset / offset are interval END POINTS: they are NOT clamped to
@@ -1432,7 +1975,8 @@ def detect_waves_on_beat(
     # An interval end point like QRS onset and T end: not clamped to the
     # P_onset template window (which capped it ~9 ms before the P peak with
     # the defaults and cut long PRs short), NaN when it cannot be placed.
-    po_t = (_p_onset(p_t, pr_base if pr_base is not None else pre_baseline)
+    po_t = (_p_onset(p_t, pr_base if pr_base is not None else pre_baseline,
+                     snr_thresh)
             if p_t is not None else float("nan"))
 
     # ── T offset ──────────────────────────────────────────────────────────
@@ -1443,8 +1987,45 @@ def detect_waves_on_beat(
     # Reference level: the PR-segment baseline (pr_base, above). The end of
     # the beat window is still inside the T wave at high mouse heart rates,
     # so a baseline taken there moved the T end.
-    to_t   = (_slope_offset(t_t, to_end, pr_base)
-              if np.isfinite(t_t) and to_end > t_t else float("nan"))
+    t_last, t_stop_edge = t_t, None
+    biphasic = t_phase_noise is not None
+    t_noise_ = max(0.0, float(t_phase_noise)) if biphasic else 0.0
+    t_base = pr_base
+    if biphasic and pr_base is not None:
+        # On a rolling median, the flatness-weighted PR level: the T end of
+        # a low phase moves ~1.7 ms per 0.03 of baseline (pr_baseline_level).
+        lvl = pr_baseline_level(bt, mb, q_t)
+        t_base = lvl if np.isfinite(lvl) else pr_base
+    if biphasic and t_plan is not None and t_base is not None:
+        # The phase plan of the beats around: the same phase ends the T on
+        # neighbouring rows, whatever the noise of the row (_t_from_plan).
+        t_t, to_t = _t_from_plan(t_plan, t_lo_eff, min(to_end, t_stop),
+                                 t_base, t_noise_)
+    else:
+        if biphasic and np.isfinite(t_t) and t_base is not None:
+            # Biphasic T: its peak is that of the first phase and its end that
+            # of the last one, so that two phases of similar size do not take
+            # turns at being the T (T end jumping by one phase between rows).
+            t_first, t_last, t_stop_edge = _t_phases(
+                t_t, t_lo_eff, min(to_end, t_stop), t_base, t_noise_)
+            if t_plan_out is not None:
+                t_plan_out.update(_t_plan_of(t_first, t_last, t_base))
+            t_t = t_first if np.isfinite(t_first) else t_t
+        to_t   = (_slope_offset(t_last, to_end, t_base, fit_smoothed=biphasic,
+                                stop_ms=t_stop_edge,
+                                line_tol=T_PLAN_LINE_TOL_MS if biphasic else None)
+                  if np.isfinite(t_last) and to_end > t_last else float("nan"))
+        if t_plan_out is not None and t_plan_out.get("phases"):
+            if np.isfinite(to_t):
+                # The T phases on this beat, which each row's are fitted to
+                # (_t_from_plan).
+                v_e = _moving_average(mb, max(1, int(round(4.0 / dt_ms)))) - t_base
+                e0 = _idx(min(t_t, t_last) - 2.0 * T_PLAN_TOL_MS)
+                e1 = _idx(to_t + 2.0 * T_PLAN_TOL_MS) + 1
+                t_plan_out.update(end_ms=float(to_t), edge_t=bt[e0:e1].copy(),
+                                  edge_v=v_e[e0:e1].copy())
+            else:
+                t_plan_out.clear()
 
     # Ordering with the P and T peaks (see above).
     if np.isfinite(qon_t) and (qon_t <= ((p_t + 1.0) if p_t is not None else bt0)):
