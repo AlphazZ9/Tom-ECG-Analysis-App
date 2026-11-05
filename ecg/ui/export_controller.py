@@ -686,6 +686,10 @@ class ExportController:
                     slot = app._slots.get(slot_key)
                     if slot and slot.fig:
                         try:
+                            # Drawn even if its tab never was (plots.CanvasSlot).
+                            flush = getattr(slot, "flush", None)
+                            if flush is not None:
+                                flush()
                             buf = io.BytesIO()
                             slot.fig.savefig(buf, format="png", dpi=300,
                                              facecolor=PLOT["bg"])

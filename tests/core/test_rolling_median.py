@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from ecg.core import analysis
+from ecg.core import delineation_pool
 from ecg.core.detection import classify_arrhythmias
 from ecg.core.metric_table import MetricTable, interval_rows
 from ecg.core import wave_template
@@ -68,7 +69,10 @@ def test_n_0_or_1_delineates_each_beat_on_itself(monkeypatch, n):
         seen.append(beat.copy())
         return real(beat, bt, *a, **k)
 
-    monkeypatch.setattr(analysis, "detect_waves_on_beat", spy)
+    # The rows are delineated in ecg.core.delineation_pool (in order: a
+    # worker process would not see the patch).
+    monkeypatch.setattr(delineation_pool, "detect_waves_on_beat", spy)
+    monkeypatch.setenv("ECG_DELIN_SERIAL", "1")
     df = _measure(sig, rp, n)
     monkeypatch.undo()
     base = analysis.analyse_intervals(sig, rp, FS, np.diff(rp) / FS * 1000.0,
@@ -342,7 +346,10 @@ def test_rows_measured_on_their_own_beat_keep_the_leading_edge_line(monkeypatch)
             calls.append((beat.copy(), bt.copy(), a, dict(k)))
         return real(beat, bt, *a, **k)
 
-    monkeypatch.setattr(analysis, "detect_waves_on_beat", spy)
+    # The rows are delineated in ecg.core.delineation_pool (in order: a
+    # worker process would not see the patch).
+    monkeypatch.setattr(delineation_pool, "detect_waves_on_beat", spy)
+    monkeypatch.setenv("ECG_DELIN_SERIAL", "1")
     df = _measure(sig, rp, 32)
     monkeypatch.undo()
     single = _measure(sig, rp, 1)

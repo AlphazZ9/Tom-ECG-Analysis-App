@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 
 from ecg.core import analysis
+from ecg.core import delineation_pool
 from ecg.core.wave_template import (
     WaveTemplate, _mouse_demo_beat, detect_waves_on_beat, edge_baseline_crossing,
     pr_baseline_window, qrs_bounds,
@@ -418,7 +419,10 @@ def test_qrs_onset_is_dropped_when_no_interval_uses_it(monkeypatch):
         calls.append(1)
         return det
 
-    monkeypatch.setattr(analysis, "detect_waves_on_beat", _fake)
+    # The rows are delineated in ecg.core.delineation_pool (in order: a
+    # worker process would not see the patch).
+    monkeypatch.setattr(delineation_pool, "detect_waves_on_beat", _fake)
+    monkeypatch.setenv("ECG_DELIN_SERIAL", "1")
     df, _ = _intervals(np.full(30, 200.0))
     row = df.iloc[10]
     assert np.isnan(row["PR_ms"]) and np.isnan(row["QRS_ms"]) and np.isnan(row["QT_ms"])

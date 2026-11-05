@@ -206,6 +206,12 @@ class ToolbarMixin:
         """
         if btn is None:
             return
+        # Reconfiguring a CTkButton redraws it (~15 ms with its border): the
+        # tick and every detection step ask for the same look again and again.
+        want = (bool(enabled), kind)
+        if getattr(btn, "_ecg_look", None) == want and (btn.cget("state") == "normal") == enabled:
+            return
+        btn._ecg_look = want
         if enabled:
             look = button_style(kind)
             btn.configure(state="normal", fg_color=look["fg_color"],

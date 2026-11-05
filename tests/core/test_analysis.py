@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 from ecg.core import analysis
+from ecg.core import delineation_pool
 from ecg.core.detection import correct_rr_artifacts
 from ecg.core.models import MouseECG, QTC_FORMULA_LABELS, normalize_qtc_formula
 from ecg.core.wave_template import WaveTemplate
@@ -535,7 +536,10 @@ def _record_windows(monkeypatch):
         return {k: np.nan for k in ("P_onset", "P_peak", "Q_peak", "S_peak",
                                     "J_peak", "T_peak", "T_offset")}
 
-    monkeypatch.setattr(analysis, "detect_waves_on_beat", _fake_detect)
+    # The rows are delineated in ecg.core.delineation_pool (in order: a
+    # worker process would not see the patch).
+    monkeypatch.setattr(delineation_pool, "detect_waves_on_beat", _fake_detect)
+    monkeypatch.setenv("ECG_DELIN_SERIAL", "1")
     return windows
 
 

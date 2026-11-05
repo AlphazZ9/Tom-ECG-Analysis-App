@@ -30,6 +30,11 @@ if trapz is None:
 from ecg.core.models import (
     AnalysisResults, MouseECG, QTC_FORMULA_LABELS, normalize_qtc_formula,
 )
+from ecg.core import fast_entropy
+from ecg.core.delineation_pool import (
+    LANDMARKS, DelinCtx, delineate_all, ensemble_members,
+    nan_median_rows as _nan_median_rows,
+)
 from ecg.core.wave_template import (QRS_INITIAL_FRAC, QRS_INITIAL_GAP_MS,
                                     QRS_INITIAL_NOISE_K, T_PHASE_ABSENT_FRAC, T_PHASE_FRAC,
                                     T_PLAN_REFINE_MS, T_PLAN_SHIFT_MS, T_PLAN_SNR,
@@ -1903,6 +1908,8 @@ def analyse_hrv_nonlinear(
     if progress_cb:
         progress_cb(20, "Computing SD1/SD2, DFA, SampEn/ApEn… (may take 30 s+)")
 
+    # The same entropy values, counted without a KDTree per call (fast_entropy).
+    fast_entropy.install()
     nk_failed_reason: "Optional[str]" = None
     poincare_cols = ("HRV_SD1", "HRV_SD2", "HRV_SD1SD2", "HRV_S",
                      "HRV_CSI", "HRV_CVI", "HRV_CSI_Modified")
@@ -2185,16 +2192,6 @@ def normalize_ensemble_beats(value: object, default: int = 1) -> int:
     except (TypeError, ValueError, OverflowError):
         return default
     return min(max(n, 1), ENSEMBLE_BEATS_MAX)
-
-
-def _nan_median_rows(block: "np.ndarray") -> "np.ndarray":
-    """Median of each column ignoring NaN: faster than np.nanmedian on the
-    small blocks delineation asks for tens of thousands of times."""
-    s = np.sort(block, axis=0)            # NaN sorts last
-    k = (~np.isnan(block)).sum(axis=0)
-    c = np.arange(block.shape[1])
-    lo, hi = np.maximum((k - 1) // 2, 0), np.maximum(k // 2, 0)
-    return 0.5 * (s[lo, c].astype(float) + s[hi, c].astype(float))
 
 
 def _timing_outliers(rpeaks: "np.ndarray", fs: float) -> "np.ndarray":
@@ -2950,13 +2947,7 @@ def analyse_intervals(
         ens_members: "list[Optional[np.ndarray]]" = [None] * n_valid
 
         def _members(i: int) -> "Optional[np.ndarray]":
-            """Ensemble of row *i* (a beat that joins ensembles): the joining
-            beats among the N centred on it and within reach in time; None
-            when fewer than ens_min."""
-            j0, j1 = max(0, i - n_ens // 2), min(n_valid, i + n_ens - n_ens // 2)
-            m = j0 + np.flatnonzero(
-                ens_joins[j0:j1] & (np.abs(valid_rp[j0:j1] - valid_rp[i]) <= ens_reach))
-            return m if len(m) >= ens_min else None
+            return ensemble_members(i, ens_joins, valid_rp, n_ens, ens_min, ens_reach)
 
         # Noise of a median beat, against which a second T phase is told
         # from baseline noise (detect_waves_on_beat t_phase_noise).
@@ -2973,55 +2964,31 @@ def analyse_intervals(
                                                 pre_v, post_v, fixed_hw, fs, rr_med, n_ens,
                                                 wave_template)
 
-    tick = max(1, n_valid // 20)
-    for i in range(n_valid):
-        r0 = int(valid_rp[i])
-        lo, hi = int(pre_v[i]), int(post_v[i])
-        bt_ms = np.arange(-lo, hi) / fs * 1000
-        p_from = None
-        if (i > 0 and pos_v[i] > 0 and valid_rp[i - 1] == rpeaks_all[pos_v[i] - 1]
-                and r0 - valid_rp[i - 1] >= gap_min and np.isfinite(t_peak[i - 1])):
-            p_from = (t_peak[i - 1] - r0) / fs * 1000
-        next_r = ((rpeaks_all[i_next[i]] - r0) / fs * 1000
-                  if i_next[i] < len(rpeaks_all) else None)
-        beat, on_median = None, False
-        if ens_on:
+    ctx = DelinCtx(
+        cleaned=cleaned, fs=float(fs), template=wave_template, valid_rp=valid_rp,
+        pre_v=pre_v, post_v=post_v, pos_v=pos_v, i_next=i_next, rpeaks_all=rpeaks_all,
+        gap_min=float(gap_min), ens_on=ens_on)
+    if ens_on:
+        ctx.beats_m, ctx.fixed_hw = beats_m, fixed_hw
+        ctx.ens_artifact, ctx.ens_joins = ens_artifact, ens_joins
+        ctx.n_ens, ctx.ens_min, ctx.ens_reach = n_ens, ens_min, ens_reach
+        ctx.q_step, ctx.qrs_plans, ctx.t_step, ctx.t_plans = q_step, qrs_plans, t_step, t_plans
+        ctx.t_noise = t_noise
+    land = delineate_all(ctx, lambda done: _prog(
+        10 + int(72 * done / n_valid), f"Detecting landmarks… {done}/{n_valid}"))
+    p_onset, p_peak, qrs_on, q_peak, s_peak, qrs_off, j_peak, t_peak, t_offset = (
+        land[k] for k in LANDMARKS)
+    if ens_on:
+        # Who joined whose median: cheap to redo here, and what the QTc RR and
+        # the T consensus below read.
+        for i in range(n_valid):
             if ens_artifact[i]:
-                continue
-            if ens_joins[i]:
+                ens_n[i] = 0
+            elif ens_joins[i]:
                 members = _members(i)
                 if members is not None:
-                    beat = _nan_median_rows(
-                        beats_m[members, fixed_hw - lo:fixed_hw + hi])
                     ens_n[i] = len(members)
                     ens_members[i] = members
-                    on_median = True
-        if beat is None:
-            beat = cleaned[r0 - lo:r0 + hi].astype(float)
-        det = detect_waves_on_beat(beat, bt_ms,
-                                   wave_template, p_search_from_ms=p_from,
-                                   next_r_ms=next_r, p_onset_biphasic=on_median,
-                                   qrs_initial_plan=(qrs_plans[i // q_step]
-                                                     if on_median else None),
-                                   t_phase_noise=t_noise if on_median else None,
-                                   t_plan=t_plans[i // t_step] if on_median else None)
-
-        def _ms_to_samp(v: float) -> float:
-            return valid_rp[i] + v / 1000.0 * fs if np.isfinite(v) else np.nan
-
-        p_onset [i] = _ms_to_samp(det["P_onset"])
-        p_peak  [i] = _ms_to_samp(det["P_peak"])
-        qrs_on  [i] = _ms_to_samp(det.get("QRS_onset", np.nan))
-        q_peak  [i] = _ms_to_samp(det["Q_peak"])
-        s_peak  [i] = _ms_to_samp(det["S_peak"])
-        qrs_off [i] = _ms_to_samp(det.get("QRS_offset", np.nan))
-        j_peak  [i] = _ms_to_samp(det["J_peak"])
-        t_peak  [i] = _ms_to_samp(det["T_peak"])
-        t_offset[i] = _ms_to_samp(det["T_offset"])
-
-        if (i + 1) % tick == 0:
-            _prog(10 + int(72 * (i + 1) / n_valid),
-                  f"Detecting landmarks… {i + 1}/{n_valid}")
 
     # T peak / T end of the ensemble rows: the row's within its neighbours.
     t_rows = 0

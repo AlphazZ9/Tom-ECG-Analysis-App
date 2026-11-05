@@ -265,6 +265,22 @@ def _snap_to_r(
 #  R-vs-J DISAMBIGUATION  (partagé entre les deux détecteurs)
 # ════════════════════════════════════════════════════════════
 
+# Per-peak quantities of _adaptive_j_upstroke_ratio, kept for the signal they
+# were measured on: the threshold slider re-runs it on nearly the same peaks
+# at every step, and each one depends on its peak (or pair of peaks) alone.
+# Keyed on the array object itself (held here, so its id is not reused); the
+# app never edits a signal in place, it replaces it.
+_J_CACHE: "dict" = {"signal": None, "key": None, "slope": {}, "noise": {}}
+
+
+def _j_cache_for(signal: np.ndarray, fs: float, slope_window_ms: float,
+                 snr_window_ms: float) -> "dict":
+    key = (float(fs), float(slope_window_ms), float(snr_window_ms), len(signal))
+    if _J_CACHE["signal"] is not signal or _J_CACHE["key"] != key:
+        _J_CACHE.update(signal=signal, key=key, slope={}, noise={})
+    return _J_CACHE
+
+
 def _adaptive_j_upstroke_ratio(
     peaks: np.ndarray,
     signal: np.ndarray,
@@ -318,10 +334,16 @@ def _adaptive_j_upstroke_ratio(
         return base_ratio
 
     # ── 1. Upstrokes de tous les candidats ────────────────────────────────
-    slopes = np.array([
-        _upstroke_slope_at(int(p), signal, fs, slope_window_ms)
-        for p in peaks
-    ], dtype=np.float64)
+    cache = _j_cache_for(signal, fs, slope_window_ms, snr_window_ms)
+    slope_of = cache["slope"]
+    slopes_l = []
+    for p in peaks:
+        p = int(p)
+        v = slope_of.get(p)
+        if v is None:
+            v = slope_of[p] = _upstroke_slope_at(p, signal, fs, slope_window_ms)
+        slopes_l.append(v)
+    slopes = np.array(slopes_l, dtype=np.float64)
     slopes = slopes[slopes > 1e-9]
     if len(slopes) < 3:
         return base_ratio
@@ -333,14 +355,17 @@ def _adaptive_j_upstroke_ratio(
     amp_med = float(np.median(signal[peaks]))
     half_w  = max(1, int(snr_window_ms / 2.0 / 1000.0 * fs))
     noise_segs: list[float] = []
+    noise_of = cache["noise"]
     for i in range(len(peaks) - 1):
         a, b = int(peaks[i]), int(peaks[i + 1])
         mid  = (a + b) // 2
         lo   = max(0,          mid - half_w)
         hi   = min(len(signal), mid + half_w)
-        seg  = signal[lo:hi]
-        if len(seg) > 4:
-            noise_segs.append(float(np.std(seg)))
+        if hi - lo > 4:
+            v = noise_of.get((lo, hi))
+            if v is None:
+                v = noise_of[(lo, hi)] = float(np.std(signal[lo:hi]))
+            noise_segs.append(v)
     noise_std = float(np.median(noise_segs)) if noise_segs else (amp_med * 0.1)
     snr       = amp_med / (noise_std + 1e-9)
 
@@ -681,6 +706,45 @@ def fix_polarity(
     return signal_out, inverted, cands, proms
 
 
+# The local reference prominence of every candidate (apply_threshold's
+# adaptive mode) depends on the candidates, not on the threshold: kept for
+# the last (cands, proms) arrays, held here so their ids are not reused.
+_REF_CACHE: "dict" = {"cands": None, "proms": None, "key": None, "refs": None}
+
+
+def _local_reference_proms(cands: np.ndarray, proms: np.ndarray, fs: float,
+                           adaptive_window_s: float) -> np.ndarray:
+    """For each candidate, the median prominence of the candidates within
+    ±adaptive_window_s / 2 (the global median when fewer than 4)."""
+    key = (float(fs), float(adaptive_window_s), len(cands))
+    c = _REF_CACHE
+    if c["cands"] is cands and c["proms"] is proms and c["key"] == key:
+        return c["refs"]
+    half_win_samples = int(adaptive_window_s / 2.0 * fs)
+    global_ref = float(np.median(proms))
+    n_c = len(cands)
+    refs = np.empty(n_c, dtype=np.float64)
+    # Two-pointer sliding window instead of an O(n) boolean scan per
+    # candidate (O(n^2) total). `cands` is sorted ascending (guaranteed —
+    # find_peaks/np.sort upstream), so as idx increases the window
+    # [center-half_win, center+half_win] only ever moves forward, never
+    # backward — lo/hi need only advance, never reset. Same result,
+    # linear instead of quadratic in the number of candidates.
+    lo = 0
+    hi = 0
+    for idx in range(n_c):
+        center = cands[idx]
+        while lo < n_c and cands[lo] < center - half_win_samples:
+            lo += 1
+        while hi < n_c and cands[hi] <= center + half_win_samples:
+            hi += 1
+        count = hi - lo
+        # Médiane locale — insensible aux outliers hauts (artefacts, R ectopiques)
+        refs[idx] = float(np.median(proms[lo:hi])) if count >= 4 else global_ref
+    c.update(cands=cands, proms=proms, key=key, refs=refs)
+    return refs
+
+
 def apply_threshold(
     cleaned: np.ndarray,
     cands: np.ndarray,
@@ -704,28 +768,9 @@ def apply_threshold(
     )
 
     if use_adaptive:
-        half_win_samples = int(adaptive_window_s / 2.0 * fs)
-        mask = np.zeros(len(cands), dtype=bool)
-        global_ref = float(np.median(proms))
-        n_c = len(cands)
-        # Two-pointer sliding window instead of an O(n) boolean scan per
-        # candidate (O(n^2) total). `cands` is sorted ascending (guaranteed —
-        # find_peaks/np.sort upstream), so as idx increases the window
-        # [center-half_win, center+half_win] only ever moves forward, never
-        # backward — lo/hi need only advance, never reset. Same result,
-        # linear instead of quadratic in the number of candidates.
-        lo = 0
-        hi = 0
-        for idx in range(n_c):
-            center = cands[idx]
-            while lo < n_c and cands[lo] < center - half_win_samples:
-                lo += 1
-            while hi < n_c and cands[hi] <= center + half_win_samples:
-                hi += 1
-            count = hi - lo
-            # Médiane locale — insensible aux outliers hauts (artefacts, R ectopiques)
-            ref = float(np.median(proms[lo:hi])) if count >= 4 else global_ref
-            mask[idx] = proms[idx] >= thresh_frac * ref
+        refs = _local_reference_proms(cands, proms, fs, adaptive_window_s)
+        # Element by element as before: proms[idx] >= thresh_frac * ref.
+        mask = np.asarray(proms, dtype=np.float64) >= thresh_frac * refs
         log.debug("apply_threshold: adaptive mode  frac=%.3f", thresh_frac)
     else:
         # Médiane globale — P75 tirait le seuil trop haut sur signaux avec outliers

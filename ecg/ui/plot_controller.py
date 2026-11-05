@@ -403,7 +403,8 @@ class PlotController:
         )
 
         cache = self._ov_cache
-        if cache is not None and cache["key"] == key and cache["ax"] in slot.fig.axes:
+        if (cache is not None and cache["key"] == key and cache["ax"] in slot.fig.axes
+                and slot._pending is None):     # a deferred draw would undo the fast path
             ax = cache["ax"]
             for artist in cache["cursor_artists"]:
                 try:

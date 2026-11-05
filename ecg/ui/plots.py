@@ -227,6 +227,9 @@ class CanvasSlot:
         self._yscale_bar:       bool             = yscale_bar
         self._yscale_cid:       Optional[int]    = None   # mpl event id
         self._placeholder_text: str              = placeholder
+        # A slot on a hidden tab draws when it is shown (see _defer).
+        self._pending:          Optional[str]    = None
+        self._map_bound:        bool             = False
 
         # ── Optional Y-scale bar (above canvas) ───────────────────────────
         if yscale_bar:
@@ -421,7 +424,40 @@ class CanvasSlot:
 
     # ── Drawing ────────────────────────────────────────────────────────────
 
-    def _redraw(self) -> None:
+    # ── Deferred drawing ───────────────────────────────────────────────────
+    # Drawing a figure nobody can see (another tab) costs the same as drawing
+    # one on screen, and Analyze lands results for every tab at once: a slot
+    # on a hidden tab of a shown window keeps its draw function and draws
+    # when it is mapped (its tab shown), or when flush() asks (an export
+    # reading .fig). With the window itself not shown (start-up, tests) it
+    # draws at once, as before.
+
+    def _hidden(self) -> bool:
+        try:
+            return (bool(self.frame.winfo_toplevel().winfo_viewable())
+                    and not self.frame.winfo_viewable())
+        except tk.TclError:
+            return False
+
+    def _defer(self, kind: str) -> None:
+        self._pending = kind
+        if not self._map_bound:
+            self.frame.bind("<Map>", lambda _e: self.flush(), add="+")
+            self._map_bound = True
+
+    def flush(self) -> None:
+        """Draw what was deferred, if anything (before reading .fig)."""
+        kind, self._pending = self._pending, None
+        if kind == "draw":
+            self._redraw(force=True)
+        elif kind == "placeholder":
+            self._show_placeholder(force=True)
+
+    def _redraw(self, force: bool = False) -> None:
+        if not force and self._hidden():
+            self._defer("draw")
+            return
+        self._pending = None
         self.fig.clear()
         self.fig.patch.set_facecolor(PLOT["bg"])
         self._set_cl_pads()
@@ -445,7 +481,11 @@ class CanvasSlot:
             self.frame.after(50, self._readback_ylim)
         self.canvas.draw_idle()
 
-    def _show_placeholder(self) -> None:
+    def _show_placeholder(self, force: bool = False) -> None:
+        if not force and self._hidden():
+            self._defer("placeholder")
+            return
+        self._pending = None
         self.fig.clear()
         ax = self.fig.add_subplot(111)
         ax.set_facecolor(PLOT["axes"])
