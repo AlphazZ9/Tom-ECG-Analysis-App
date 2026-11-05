@@ -27,6 +27,10 @@ from ecg.ui.theme import (
     SPACE_XS, SPACE_S, SPACE_M, FONT_LABEL, FONT_SMALL, FONT_KPI_LABEL, FONT_HINT,
     FONT_SUBSECTION, FONT_BTN_SEC, FONT_CARD_TITLE,
 )
+from ecg.ui.theme import BLUE, BLUE_HOVER
+from ecg.ui.theme import THEME, card_style, chip_style, CARD_PAD, PAGE_GAP
+from ecg.ui.theme import combo_style, input_style
+from ecg.ui.theme import button_style
 
 # Mixin of ECGApp: `self: ECGApp` shows pyright the whole app surface, so a
 # typo in self.xxx is reported. It is deliberately not a supertype of this
@@ -54,27 +58,29 @@ class DetectionBarMixin:
     """ECGApp detection bar, Filters popover and method help."""
 
     def _build_detection_bar(self: ECGApp, parent) -> None:
-        bar = ctk.CTkFrame(parent, fg_color=CARD, corner_radius=8, border_width=1,
-                           border_color=BORDER)
-        bar.pack(side="top", fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
+        # The mockup's detection card: 12 px above and below, 16 px inside
+        # the sides, 14 px between controls.
+        bar = ctk.CTkFrame(parent, **card_style())
+        bar.pack(side="top", fill="x", pady=(0, PAGE_GAP))
         g = ctk.CTkFrame(bar, fg_color="transparent")
-        g.pack(fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_S))
+        g.pack(fill="x", padx=CARD_PAD, pady=(10, 12))
         g.grid_columnconfigure(1, weight=1)
 
         def caption(col: int, text: str) -> ctk.CTkLabel:
             lbl = ctk.CTkLabel(g, text=text, font=FONT_KPI_LABEL, text_color=MUTED,
                                anchor="w", height=16)
-            lbl.grid(row=0, column=col, sticky="w", padx=(0, SPACE_M))
+            lbl.grid(row=0, column=col, sticky="w", padx=(0, 14), pady=(0, 4))
             return lbl
 
         # ── Method ───────────────────────────────────────────────
         caption(0, "Method")
         self.cb_det_method = ctk.CTkComboBox(
-            g, font=FONT_LABEL, height=30, width=200,
-            fg_color=BG, border_color=BLUE, button_color=BLUE,
-            text_color=TEXT, dropdown_fg_color=BG, dropdown_text_color=TEXT,
+            g,
+            width=int(210 * THEME.font_scale),
             values=["Auto (NeuroKit2)", "SG + Derivative (10 kHz)", "Wavelet (CWT)", "Envelope Max", "ML Detector"],
-            command=self._on_det_method_change)
+            command=self._on_det_method_change,
+            **combo_style(),
+        )
         self.cb_det_method.set("SG + Derivative (10 kHz)")
         self.cb_det_method.grid(row=1, column=0, sticky="w", padx=(0, SPACE_M))
         # ML status lives in the Signal quality panel's ML section now, shown
@@ -94,13 +100,12 @@ class DetectionBarMixin:
         thr_row.grid(row=1, column=1, sticky="ew", padx=(0, SPACE_M))
         self.sl_thr = ctk.CTkSlider(
             thr_row, from_=0.01, to=2.0,  # type: ignore
-            progress_color=RED, button_color=RED,
-            button_hover_color="#FF5252", fg_color=BORDER,
+            progress_color=BLUE, button_color=BLUE,
+            button_hover_color=BLUE_HOVER, fg_color=BORDER,
             height=20, command=self._on_threshold_slide)
         self.sl_thr.set(0.50)
         self.sl_thr.pack(side="left", fill="x", expand=True, padx=(0, SPACE_S))
-        self.ent_thr = ctk.CTkEntry(thr_row, width=64, height=30, font=FONT_LABEL,
-                                    fg_color=BG, border_color=BORDER2, text_color=TEXT)
+        self.ent_thr = ctk.CTkEntry(thr_row, width=64, **input_style())
         self.ent_thr.insert(0, "0.50")
         self.ent_thr.pack(side="left")
         self.ent_thr.bind("<Return>",   self._on_threshold_entry)
@@ -119,8 +124,7 @@ class DetectionBarMixin:
                 (2, "Min RR (ms)", "minrr", f"{MouseECG.MIN_RR_MS:g}", _MIN_RR_TIP),
                 (3, "Max RR (ms)", "maxrr", f"{MouseECG.RR_MAX_MS:g}", _MAX_RR_TIP)):
             caption(col, label)
-            ent = ctk.CTkEntry(g, width=72, height=30, font=FONT_LABEL, fg_color=BG,
-                               border_color=BORDER2, text_color=TEXT)
+            ent = ctk.CTkEntry(g, width=72, **input_style())
             ent.insert(0, default)
             ent.grid(row=1, column=col, sticky="w", padx=(0, SPACE_M))
             setattr(self, f"ent_{attr}", ent)
@@ -138,10 +142,14 @@ class DetectionBarMixin:
         self.btn_pacing = self._chip(chips, f"Pacing {len(self._pacing_periods)}",
                                      self._open_pacing_periods)
         self._bind_hover_tip(self.btn_pacing, "Pacing / stimulation periods")
+        h = button_style()["height"]
         self.btn_method_help = ctk.CTkButton(
-            chips, text="?", width=30, height=30, font=FONT_CARD_TITLE,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT, corner_radius=15,
-            command=self._toggle_method_help)
+            chips,
+            text="?",
+            width=h,
+            command=self._toggle_method_help,
+            **button_style("secondary", font=FONT_CARD_TITLE, corner_radius=h // 2),
+        )
         self.btn_method_help.pack(side="left")
         self._bind_hover_tip(self.btn_method_help, "Detection methods and threshold")
 
@@ -149,12 +157,9 @@ class DetectionBarMixin:
         self._build_method_help()
 
     def _chip(self: ECGApp, parent, text: str, command) -> ctk.CTkButton:
-        """A rounded outline button of the detection bar."""
-        btn = ctk.CTkButton(parent, text=text, height=30, font=FONT_BTN_SEC, width=0,
-                            fg_color=BG, hover_color=BORDER, text_color=TEXT,
-                            border_width=1, border_color=BORDER2, corner_radius=15,
-                            command=command)
-        btn.pack(side="left", padx=(0, SPACE_S))
+        """A rounded outline button of the detection bar (the mockup's chip)."""
+        btn = ctk.CTkButton(parent, text=text, width=0, command=command, **chip_style())
+        btn.pack(side="left", padx=(0, SPACE_M))
         return btn
 
     # ── Filters popover ──────────────────────────────────────────
@@ -215,11 +220,12 @@ class DetectionBarMixin:
         ctk.CTkLabel(grp, text="Signal cleaning:", font=FONT_SMALL,
                      text_color=MUTED, anchor="w").pack(anchor="w", pady=(SPACE_XS, 0))
         self.cb_clean = ctk.CTkComboBox(
-            grp, font=FONT_LABEL, height=28, width=_HINT_W, fg_color=BG,
-            border_color=BORDER2, button_color=BORDER2, text_color=TEXT,
-            dropdown_fg_color=BG, dropdown_text_color=TEXT,
+            grp,
+            width=_HINT_W,
             values=["neurokit", "pantompkins1985", "elgendi2010", "hamilton2002", "biosppy"],
-            command=lambda _v: self._refresh_filter_preview())
+            command=lambda _v: self._refresh_filter_preview(),
+            **combo_style(),
+        )
         self.cb_clean.set("neurokit")
         self.cb_clean.pack(fill="x", pady=(SPACE_XS, 0))
 
@@ -275,8 +281,7 @@ class DetectionBarMixin:
         text = "Filters: " + (" · ".join(parts) if parts else "off")
         on = bool(parts)
         if chip.cget("text") != text:
-            chip.configure(text=text, border_color=BLUE if on else BORDER2,
-                           text_color=BLUE if on else TEXT)
+            chip.configure(text=text, **chip_style(active=on))
 
     # ── Method help ──────────────────────────────────────────────
 

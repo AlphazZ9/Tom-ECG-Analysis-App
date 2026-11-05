@@ -26,6 +26,8 @@ from ecg.ui.theme import (
     BG, BORDER, BORDER2, TEXT, MUTED, LIGHT, BLUE, SPACE_XS, SPACE_S, SPACE_M,
     FONT_LABEL, FONT_SMALL, FONT_KPI_LABEL, FONT_HINT, FONT_BTN_SEC, FONT_CARD_TITLE,
 )
+from ecg.ui.theme import input_style
+from ecg.ui.theme import button_style
 
 # Mixin of ECGApp: `self: ECGApp` shows pyright the whole app surface, so a
 # typo in self.xxx is reported. It is deliberately not a supertype of this
@@ -77,8 +79,7 @@ class HeaderMenusMixin:
                   pady=(0, SPACE_S))
         ctk.CTkLabel(cell, text=label, font=FONT_SMALL, text_color=MUTED,
                      anchor="w", height=18).pack(fill="x")
-        ent = ctk.CTkEntry(cell, font=FONT_LABEL, height=30, width=_SHEET_ENTRY_W, fg_color=BG,
-                           border_color=BORDER2, text_color=TEXT)
+        ent = ctk.CTkEntry(cell, width=_SHEET_ENTRY_W, **input_style())
         ent.insert(0, default)
         ent.pack(fill="x")
         setattr(self, f"ent_{attr}", ent)
@@ -104,9 +105,13 @@ class HeaderMenusMixin:
         ch = self._sheet_entry(g, 0, 0, "Channel", "channel", "ECG")
         ch.pack_configure(side="left", fill="x", expand=True)
         ch.configure(width=_SHEET_ENTRY_W - 60)
-        ctk.CTkButton(ch.master, text="List…", width=54, height=30, font=FONT_BTN_SEC,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT, corner_radius=6,
-                      command=self._show_channels).pack(side="left", padx=(SPACE_XS, 0))
+        ctk.CTkButton(
+            ch.master,
+            text="List…",
+            width=54,
+            command=self._show_channels,
+            **button_style("secondary"),
+        ).pack(side="left", padx=(SPACE_XS, 0))
         # Sampling rate, with where it came from (file or entered) under it.
         self._sheet_entry(g, 0, 1, "Sampling rate (Hz)", "fs", str(MouseECG.FS_DEFAULT))
         self.lbl_fs_source = ctk.CTkLabel(
@@ -132,10 +137,14 @@ class HeaderMenusMixin:
                      font=FONT_KPI_LABEL, text_color=LIGHT, anchor="w", justify="left",
                      wraplength=2 * _SHEET_ENTRY_W).pack(fill="x", pady=(0, SPACE_S))
 
-        ctk.CTkButton(b, text="📝  Notes (this recording)…", height=30, font=FONT_BTN_SEC,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT, corner_radius=6,
-                      anchor="w", command=self._menu_command(
-                          self.recording_sheet, self._open_notes_dialog)).pack(fill="x")
+        ctk.CTkButton(
+            b,
+            text="📝  Notes (this recording)…",
+            anchor="w",
+            command=self._menu_command(
+                          self.recording_sheet, self._open_notes_dialog),
+            **button_style("secondary"),
+        ).pack(fill="x")
 
         ctk.CTkFrame(b, height=1, fg_color=BORDER).pack(fill="x", pady=SPACE_S)
         self.lbl_session_info = ctk.CTkLabel(

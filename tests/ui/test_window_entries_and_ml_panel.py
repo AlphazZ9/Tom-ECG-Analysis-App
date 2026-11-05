@@ -102,18 +102,29 @@ def test_ml_section_keeps_the_correlation_plot_readable():
         p = _Panel()
         p._build_quality_panel(host)
         root.update()
+        head, curve = p._quality_time_rows
+        # SG mode: the curve is readable at this height.
+        assert curve.winfo_ismapped()
         sg_h = p._slots["quality_time"].frame.winfo_height()
+        assert sg_h >= QUALITY_PLOT_MIN_H, sg_h
         p._show_ml_section(True)
-        root.update()
-        ml_h = p._slots["quality_time"].frame.winfo_height()
+        for _ in range(3):
+            root.update()
         assert p._ml_frame.winfo_ismapped()
-        assert ml_h >= sg_h and ml_h >= 60, (sg_h, ml_h)
+        # ML mode: the training section takes the room; the curve is either
+        # still readable or replaced by its title saying why, never a sliver.
+        if curve.winfo_ismapped():
+            assert p._slots["quality_time"].frame.winfo_height() >= QUALITY_PLOT_MIN_H
+        else:
+            assert "taller window" in head.cget("text")
         # Every ML control is still on screen, under the plot.
         bottom = host.winfo_rooty() + host.winfo_height()
         for w in (p.sw_verified_training, p.btn_save_for_training, p.btn_train_ml):
             assert w.winfo_ismapped() and w.winfo_rooty() + w.winfo_height() <= bottom
         p._show_ml_section(False)
-        root.update()
+        for _ in range(3):
+            root.update()
+        assert curve.winfo_ismapped()
         assert p._slots["quality_time"].frame.winfo_height() == sg_h
     finally:
         root.destroy()
@@ -121,7 +132,7 @@ def test_ml_section_keeps_the_correlation_plot_readable():
 
 
 @pytest.mark.parametrize("height, curve_shown, hist_shown",
-                         [(300, False, False), (380, True, False), (900, True, True)])
+                         [(330, False, False), (440, True, False), (900, True, True)])
 def test_short_panel_drops_plots_that_cannot_be_read(height, curve_shown, hist_shown):
     """On a 768-px screen both plots were squeezed until their ticks
     overlapped: the histogram steps aside first, then the curve (its title

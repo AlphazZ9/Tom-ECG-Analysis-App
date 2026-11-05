@@ -15,6 +15,8 @@ from ecg.ui.theme import (
     SPACE_M, SPACE_L, FONT_LABEL, FONT_SMALL, FONT_KPI_LABEL, FONT_BTN_PRIMARY,
     FONT_BTN_SEC, FONT_SIDEBAR_HDR,
 )
+from ecg.ui.theme import combo_style, input_style
+from ecg.ui.theme import button_style
 
 # Mixin of ECGApp: `self: ECGApp` shows pyright the whole app surface, so a
 # typo in self.xxx is reported. It is deliberately not a supertype of this
@@ -63,8 +65,7 @@ class ParamsDialogMixin:
             # Mirror value from the main window's widget
             src: Optional[ctk.CTkEntry] = getattr(self, widget_attr, None)
             default = src.get() if src is not None else ""
-            ent = ctk.CTkEntry(row, font=FONT_LABEL, height=28, fg_color=BG,
-                               border_color=BORDER2, text_color=TEXT)
+            ent = ctk.CTkEntry(row, **input_style())
             ent.insert(0, default)
             ent.grid(row=0, column=1, sticky="ew", padx=(SPACE_S, 0))
             return ent
@@ -112,12 +113,12 @@ class ParamsDialogMixin:
                      anchor="w", width=160).grid(row=0, column=0, sticky="w")
         _clean_src: Optional[ctk.CTkComboBox] = getattr(self, "cb_clean", None)
         _clean_val = _clean_src.get() if _clean_src is not None else "neurokit"
-        dlg_clean = ctk.CTkComboBox(row_cm, font=FONT_LABEL, height=28,
-                                    fg_color=BG, border_color=BORDER2,
-                                    button_color=BORDER2, text_color=TEXT,
-                                    dropdown_fg_color=BG, dropdown_text_color=TEXT,
-                                    values=["neurokit", "pantompkins1985",
-                                            "elgendi2010", "hamilton2002", "biosppy"])
+        dlg_clean = ctk.CTkComboBox(
+            row_cm,
+            values=["neurokit", "pantompkins1985",
+                                            "elgendi2010", "hamilton2002", "biosppy"],
+            **combo_style(),
+        )
         dlg_clean.set(_clean_val)
         dlg_clean.grid(row=0, column=1, sticky="ew", padx=(SPACE_S, 0))
         ctk.CTkFrame(f2, height=6, fg_color="transparent").pack()
@@ -207,10 +208,16 @@ class ParamsDialogMixin:
             self._set_status("Parameters applied ✓", GREEN)
             win.destroy()
 
-        ctk.CTkButton(btn_row, text="✔  Apply & Close", command=_apply,
-                      fg_color=GREEN, hover_color=GREEN_DARK, text_color="white",
-                      font=FONT_BTN_PRIMARY, height=36, corner_radius=8).pack(
+        ctk.CTkButton(
+            btn_row,
+            text="✔  Apply & Close",
+            command=_apply,
+            **button_style("primary"),
+        ).pack(
             side="left", padx=(0, SPACE_M))
-        ctk.CTkButton(btn_row, text="✗  Cancel", command=win.destroy,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                      font=FONT_BTN_SEC, height=36, corner_radius=8).pack(side="left")
+        ctk.CTkButton(
+            btn_row,
+            text="✗  Cancel",
+            command=win.destroy,
+            **button_style("secondary"),
+        ).pack(side="left")

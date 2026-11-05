@@ -25,6 +25,8 @@ from ecg.ui.theme import (
     FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR, FONT_MICRO, FONT_BADGE,
     FONT_SUBSECTION,
 )
+from ecg.ui.theme import combo_style, input_style
+from ecg.ui.theme import button_style, disabled_style
 from ecg.ui.plots import CanvasSlot, style_axes
 
 # Mixin of ECGApp: `self: ECGApp` shows pyright the whole app surface, so a
@@ -105,9 +107,12 @@ class CompareSegmentsMixin:
         ctk.CTkLabel(hdr,
                      text=f"{sub}  ·  {dur:.1f} s  ·  {len(rp)} peaks",
                      font=FONT_SMALL, text_color=MUTED).pack(side="left", padx=(0, SPACE_L))
-        ctk.CTkButton(hdr, text="✗  Close", command=win.destroy,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                      font=FONT_BTN_SEC, height=28, corner_radius=6).pack(
+        ctk.CTkButton(
+            hdr,
+            text="✗  Close",
+            command=win.destroy,
+            **button_style("secondary"),
+        ).pack(
             side="right", padx=SPACE_L, pady=SPACE_M)
 
         # ── Quick fill: before / after an event ─────────────────────────
@@ -135,19 +140,20 @@ class CompareSegmentsMixin:
             row.pack(fill="x", padx=SPACE_L, pady=(0, SPACE_M))
             ctk.CTkLabel(row, text="From (s):", font=FONT_SMALL,
                          text_color=MUTED, width=62).pack(side="left")
-            lo_e = ctk.CTkEntry(row, width=80, height=28, font=FONT_LABEL,
-                                fg_color=BG, border_color=col, text_color=TEXT)
+            lo_e = ctk.CTkEntry(row, width=80, **input_style())
             lo_e.insert(0, str(int(dur * i / 2)))
             lo_e.pack(side="left", padx=(0, SPACE_M))
             ctk.CTkLabel(row, text="To (s):", font=FONT_SMALL,
                          text_color=MUTED, width=46).pack(side="left")
-            hi_e = ctk.CTkEntry(row, width=80, height=28, font=FONT_LABEL,
-                                fg_color=BG, border_color=col, text_color=TEXT)
+            hi_e = ctk.CTkEntry(row, width=80, **input_style())
             hi_e.insert(0, str(int(dur * (i + 1) / 2)))
             hi_e.pack(side="left", padx=(0, SPACE_M))
-            lbl_e = ctk.CTkEntry(row, width=120, height=28, font=FONT_LABEL,
-                                 fg_color=BG, border_color=BORDER2, text_color=TEXT,
-                                 placeholder_text="Label (optional)")
+            lbl_e = ctk.CTkEntry(
+                row,
+                width=120,
+                placeholder_text="Label (optional)",
+                **input_style(),
+            )
             lbl_e.insert(0, name)
             lbl_e.pack(side="left")
             seg_entries.append({"lo": lo_e, "hi": hi_e, "lbl": lbl_e, "color": col})
@@ -183,17 +189,18 @@ class CompareSegmentsMixin:
             ctk.CTkLabel(qrow, text="Event:", font=FONT_SMALL,
                          text_color=MUTED).pack(side="left")
             cb_event = ctk.CTkComboBox(
-                qrow, width=190, height=28, font=FONT_LABEL,
-                fg_color=BG, border_color=BORDER2, button_color=BORDER2,
-                text_color=TEXT, dropdown_fg_color=BG, dropdown_text_color=TEXT,
-                values=list(_event_opts.keys()), command=_on_event_pick)
+                qrow,
+                width=190,
+                values=list(_event_opts.keys()),
+                command=_on_event_pick,
+                **combo_style(),
+            )
             cb_event.set("Pick…")
             cb_event.pack(side="left", padx=(4, SPACE_M))
 
         ctk.CTkLabel(qrow, text="Event start (s):", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left")
-        q_evt_start = ctk.CTkEntry(qrow, width=70, height=28, font=FONT_LABEL,
-                                   fg_color=BG, border_color=BORDER2, text_color=TEXT)
+        q_evt_start = ctk.CTkEntry(qrow, width=70, **input_style())
         if self.ui.nav_pos > 0:
             # Default to wherever the user is currently scrubbed to in the
             # Detection view -- most likely near the event they want to
@@ -203,15 +210,12 @@ class CompareSegmentsMixin:
 
         ctk.CTkLabel(qrow, text="Event end (s):", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left")
-        q_evt_end = ctk.CTkEntry(qrow, width=70, height=28, font=FONT_LABEL,
-                                 fg_color=BG, border_color=BORDER2, text_color=TEXT,
-                                 placeholder_text="= start")
+        q_evt_end = ctk.CTkEntry(qrow, width=70, placeholder_text="= start", **input_style())
         q_evt_end.pack(side="left", padx=(4, SPACE_M))
 
         ctk.CTkLabel(qrow, text="Window (min):", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left")
-        q_window = ctk.CTkEntry(qrow, width=55, height=28, font=FONT_LABEL,
-                                fg_color=BG, border_color=BORDER2, text_color=TEXT)
+        q_window = ctk.CTkEntry(qrow, width=55, **input_style())
         q_window.insert(0, "10")
         q_window.pack(side="left", padx=(4, SPACE_M))
 
@@ -275,10 +279,13 @@ class CompareSegmentsMixin:
                      + (f"  (recording is {dur:.0f}s)" if clamped else ""),
                 text_color=ORANGE if clamped else GREEN)
 
-        ctk.CTkButton(qrow, text="Fill segments", width=110, height=28,
-                     fg_color=TEAL, hover_color=TEAL_DARK, text_color="white",
-                     font=FONT_BTN_SEC, corner_radius=6,
-                     command=_apply_quick_fill).pack(side="left", padx=(SPACE_S, 0))
+        ctk.CTkButton(
+            qrow,
+            text="Fill segments",
+            width=110,
+            command=_apply_quick_fill,
+            **button_style("primary"),
+        ).pack(side="left", padx=(SPACE_S, 0))
         lbl_quick_status.pack(padx=SPACE_L, pady=(0, SPACE_S), anchor="w", fill="x")
 
         ctrl = ctk.CTkFrame(win, fg_color="transparent")
@@ -290,18 +297,14 @@ class CompareSegmentsMixin:
         progress_bar.pack(side="right", padx=(SPACE_M, 0))
         progress_bar.pack_forget()
 
-        run_btn = ctk.CTkButton(ctrl, text="▶  Compare",
-                                fg_color=TEAL, hover_color=TEAL_DARK,
-                                text_color="white",
-                                font=FONT_BTN_PRIMARY, height=34, corner_radius=8)
+        run_btn = ctk.CTkButton(ctrl, text="▶  Compare", **button_style("primary"))
         run_btn.pack(side="left")
         # Length of the non-overlapping blocks each segment is summarised by
         # (compare_segment_blocks) -- the beat-level RR test this replaced
         # pseudo-replicated hundreds of autocorrelated beats.
         ctk.CTkLabel(ctrl, text="Block (s):", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left", padx=(SPACE_L, 4))
-        ent_block = ctk.CTkEntry(ctrl, width=55, height=28, font=FONT_LABEL,
-                                 fg_color=BG, border_color=BORDER2, text_color=TEXT)
+        ent_block = ctk.CTkEntry(ctrl, width=55, **input_style())
         ent_block.insert(0, f"{MouseECG.SEGMENT_BLOCK_S:g}")
         ent_block.pack(side="left")
 
@@ -481,7 +484,7 @@ class CompareSegmentsMixin:
                              + (f"  ·  LF/HF withheld for {', '.join(withheld)} "
                                 f"(long RR gaps)" if withheld else ""),
                         text_color=ORANGE if withheld else GREEN)
-                    self._set_btn_enabled(export_btn, True, GREEN_DARK, GREEN)   # unlock Export button
+                    self._set_btn_enabled(export_btn, True, "primary")   # unlock Export button
                 from ecg.core.analysis import segment_comparison_text
                 lbl_mw.configure(text=segment_comparison_text(cmp, sa["label"], sb["label"]))
                 _populate_table(sa, sb)
@@ -717,11 +720,11 @@ class CompareSegmentsMixin:
         # on CTkButton's default disabled treatment, which only dims the
         # text and left this looking clickable while genuinely disabled.
         export_btn = ctk.CTkButton(
-            ctrl, text="📊  Export",
+            ctrl,
+            text="📊  Export",
             command=_export_comparison,
-            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-            font=FONT_BTN_PRIMARY, height=34, corner_radius=8,
             state="disabled",
+            **{**button_style("secondary"), **disabled_style()},
         )
         export_btn.pack(side="left", padx=(SPACE_M, 0))
 

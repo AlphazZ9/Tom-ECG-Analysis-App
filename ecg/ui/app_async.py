@@ -18,6 +18,7 @@ from ecg.ui.theme import (
     PANEL, BORDER, BORDER2, TEXT, MUTED, RED, ORANGE, SPACE_XS, SPACE_S,
     SPACE_M, FONT_LABEL, FONT_SMALL, FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_MICRO,
 )
+from ecg.ui.theme import button_style
 
 # Mixin of ECGApp: `self: ECGApp` shows pyright the whole app surface, so a
 # typo in self.xxx is reported. It is deliberately not a supertype of this
@@ -219,14 +220,18 @@ class AsyncMixin:
 
         btn_row = ctk.CTkFrame(win, fg_color="transparent")
         btn_row.pack(fill="x", padx=20, pady=(6, 8), side="bottom")
-        ctk.CTkButton(btn_row, text="Close", command=win.destroy,
-                     fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                     font=FONT_BTN_SEC, height=30, corner_radius=8
-                     ).pack(side="right")
-        ctk.CTkButton(btn_row, text="Copy details", command=_copy_details,
-                     fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                     font=FONT_BTN_SEC, height=30, corner_radius=8
-                     ).pack(side="right", padx=(0, SPACE_S))
+        ctk.CTkButton(
+            btn_row,
+            text="Close",
+            command=win.destroy,
+            **button_style("secondary"),
+        ).pack(side="right")
+        ctk.CTkButton(
+            btn_row,
+            text="Copy details",
+            command=_copy_details,
+            **button_style("secondary"),
+        ).pack(side="right", padx=(0, SPACE_S))
         lbl_copied = ctk.CTkLabel(win, text="", font=FONT_MICRO, text_color=MUTED)
         lbl_copied.pack(side="bottom", padx=20, pady=(0, 0), anchor="w")
 

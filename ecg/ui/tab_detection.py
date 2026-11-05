@@ -18,6 +18,12 @@ from ecg.ui.theme import (
     FONT_LABEL, FONT_SMALL, FONT_MONO, FONT_SIDEBAR_HDR, FONT_HINT, FONT_CARD_TITLE,
     FONT_KPI_HERO, FONT_KPI_LABEL, FONT_SUBSECTION,
 )
+from ecg.ui.theme import (
+    THEME, card_style, cell_style, HAIRLINE, FONT_SECTION_HDR, FONT_SCORE, FONT_BODY, FONT_KPI_VALUE, PAGE_PAD_X,
+    PAGE_PAD_Y, PAGE_GAP, CARD_PAD,
+)
+from ecg.ui.theme import input_style
+from ecg.ui.theme import button_style, disabled_style, toggle_style
 from ecg.core.detection import detect_rr_artifacts
 from ecg.core.models import MouseECG
 from ecg.ui.plots import CanvasSlot
@@ -30,7 +36,7 @@ from ecg.ui.tab_keys import TAB_DETECTION
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
 
-QUALITY_PANEL_W = 290
+QUALITY_PANEL_W = 320
 # Below this the quality plots' ticks and labels overlap.
 QUALITY_PLOT_MIN_H = 70
 
@@ -55,58 +61,89 @@ class TabDetectionMixin:
         #   detail toolbar (fill=x, no expand)
         #   detail plot + RR strip, signal-quality panel on their right
 
-        self._build_detection_bar(t)
+        # The mockup's page: cards on the grey, the detection card on top,
+        # then the signal card and the Signal quality card side by side.
+        page = ctk.CTkFrame(t, fg_color="transparent")
+        page.pack(side="top", fill="both", expand=True, padx=PAGE_PAD_X,
+                  pady=(PAGE_PAD_Y, PAGE_PAD_Y))
+        self._build_detection_bar(page)
+        body = ctk.CTkFrame(page, fg_color="transparent")
+        body.pack(side="top", fill="both", expand=True)
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=1)
+        sig_card = ctk.CTkFrame(body, **card_style())
+        sig_card.grid(row=0, column=0, sticky="nsew", padx=(0, PAGE_GAP))
+        t = ctk.CTkFrame(sig_card, fg_color="transparent")
+        t.pack(fill="both", expand=True, padx=SPACE_L, pady=SPACE_L)
 
         # ── Navigation bar ────────────────────────────────────────────────
-        # Instrument-style layout: 3 grouped chips inside the flat PANEL bar
-        # -- Transport | Position & Zoom | Readout (docked right).
-        nav = ctk.CTkFrame(t, fg_color=PANEL, corner_radius=0, height=34)
+        # Transport | Position & Zoom | Readout (docked right).
+        nav = ctk.CTkFrame(t, fg_color="transparent", corner_radius=0,
+                           height=button_style()["height"])
         nav.pack(side="top", fill="x")
         nav.pack_propagate(False)
 
         # ── Transport chip: jump/step controls ──────────────────────────
         transport_chip = self._toolbar_chip(nav)
-        transport_chip.pack(side="left", padx=(SPACE_M, SPACE_S))
+        transport_chip.pack(side="left", padx=(0, SPACE_S))
 
         btn_nav_reset = ctk.CTkButton(
-            transport_chip, text="⏮", width=36, height=28, font=FONT_LABEL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            corner_radius=8, command=self._nav_reset)
+            transport_chip,
+            text="⏮",
+            width=36,
+            command=self._nav_reset,
+            **button_style("secondary"),
+        )
         btn_nav_reset.pack(side="left", padx=(SPACE_S, SPACE_XS))
         self._bind_hover_tip(btn_nav_reset, "Jump to start")
 
         btn_nav_big_back = ctk.CTkButton(
-            transport_chip, text="◀◀", width=44, height=28, font=FONT_LABEL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            corner_radius=8, command=lambda: self._navigate_big(-1))
+            transport_chip,
+            text="◀◀",
+            width=44,
+            command=lambda: self._navigate_big(-1),
+            **button_style("secondary"),
+        )
         btn_nav_big_back.pack(side="left", padx=(0, SPACE_S))
         self._bind_hover_tip(btn_nav_big_back, "Big step back")
 
         btn_nav_back = ctk.CTkButton(
-            transport_chip, text="◀", width=36, height=28, font=FONT_LABEL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            corner_radius=8, command=lambda: self._navigate(-1))
+            transport_chip,
+            text="◀",
+            width=36,
+            command=lambda: self._navigate(-1),
+            **button_style("secondary"),
+        )
         btn_nav_back.pack(side="left", padx=(0, SPACE_M))
         self._bind_hover_tip(btn_nav_back, "Step back")
 
         btn_nav_fwd = ctk.CTkButton(
-            transport_chip, text="▶", width=36, height=28, font=FONT_LABEL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            corner_radius=8, command=lambda: self._navigate(+1))
+            transport_chip,
+            text="▶",
+            width=36,
+            command=lambda: self._navigate(+1),
+            **button_style("secondary"),
+        )
         btn_nav_fwd.pack(side="left", padx=(0, SPACE_S))
         self._bind_hover_tip(btn_nav_fwd, "Step forward")
 
         btn_nav_big_fwd = ctk.CTkButton(
-            transport_chip, text="▶▶", width=44, height=28, font=FONT_LABEL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            corner_radius=8, command=lambda: self._navigate_big(+1))
+            transport_chip,
+            text="▶▶",
+            width=44,
+            command=lambda: self._navigate_big(+1),
+            **button_style("secondary"),
+        )
         btn_nav_big_fwd.pack(side="left", padx=(0, SPACE_XS))
         self._bind_hover_tip(btn_nav_big_fwd, "Big step forward")
 
         btn_nav_end = ctk.CTkButton(
-            transport_chip, text="⏭", width=36, height=28, font=FONT_LABEL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            corner_radius=8, command=self._nav_end)
+            transport_chip,
+            text="⏭",
+            width=36,
+            command=self._nav_end,
+            **button_style("secondary"),
+        )
         btn_nav_end.pack(side="left", padx=(0, SPACE_S))
         self._bind_hover_tip(btn_nav_end, "Jump to end")
 
@@ -117,29 +154,26 @@ class TabDetectionMixin:
         lbl_nav_pos = ctk.CTkLabel(pos_chip, text="t =", font=FONT_SMALL,
                      text_color=MUTED)
         lbl_nav_pos.pack(side="left", padx=(SPACE_S, SPACE_XS))
-        self.ent_nav_pos = ctk.CTkEntry(
-            pos_chip, width=72, height=28, font=FONT_LABEL,
-            fg_color=CARD, border_color=BORDER2, text_color=TEXT,
-            corner_radius=6,
-            placeholder_text="0.000")
+        self.ent_nav_pos = ctk.CTkEntry(pos_chip, width=72, placeholder_text="0.000", **input_style())
         self.ent_nav_pos.pack(side="left", padx=(0, SPACE_XS))  # type: ignore[union-attr]
         ctk.CTkLabel(pos_chip, text="s", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left")
         _pos_tip = "Visible window start time — type a value and press Go (or Enter) to jump there"
         self._bind_hover_tip(lbl_nav_pos, _pos_tip)
         self._bind_hover_tip(self.ent_nav_pos, _pos_tip)
-        ctk.CTkButton(pos_chip, text="Go", width=48, height=28, font=FONT_SMALL,
-                      fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
-                      corner_radius=8,
-                      command=self._nav_goto).pack(side="left", padx=(SPACE_S, SPACE_L))
+        ctk.CTkButton(
+            pos_chip,
+            text="Go",
+            width=48,
+            command=self._nav_goto,
+            **button_style("primary"),
+        ).pack(side="left", padx=(SPACE_S, SPACE_L))
         # Bind Enter key on the position field
         self.ent_nav_pos.bind("<Return>", lambda _e: self._nav_goto())  # type: ignore[union-attr]
 
         ctk.CTkLabel(pos_chip, text="Window:", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left", padx=(0, SPACE_S))
-        self.ent_window = ctk.CTkEntry(pos_chip, width=48, height=28, font=FONT_LABEL,
-                                       fg_color=CARD, border_color=BORDER2, text_color=TEXT,
-                                       corner_radius=6)
+        self.ent_window = ctk.CTkEntry(pos_chip, width=48, **input_style())
         self.ent_window.insert(0, "2")
         self.ent_window.pack(side="left", padx=(0, SPACE_XS))
         self._bind_hover_tip(self.ent_window, "Visible window duration (s)")
@@ -161,48 +195,53 @@ class TabDetectionMixin:
         ctk.CTkLabel(spike_chip, text="Spike:", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left", padx=(SPACE_S, SPACE_XS))
         btn_spike_prev = ctk.CTkButton(
-            spike_chip, text="◀", width=28, height=28, font=FONT_LABEL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            corner_radius=8, command=lambda: self._step_spike(-1))
+            spike_chip,
+            text="◀",
+            width=28,
+            command=lambda: self._step_spike(-1),
+            **button_style("secondary"),
+        )
         btn_spike_prev.pack(side="left", padx=(0, SPACE_XS))
         self._bind_hover_tip(btn_spike_prev, "Previous suspicious beat")
         btn_spike_next = ctk.CTkButton(
-            spike_chip, text="▶", width=28, height=28, font=FONT_LABEL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            corner_radius=8, command=lambda: self._step_spike(+1))
+            spike_chip,
+            text="▶",
+            width=28,
+            command=lambda: self._step_spike(+1),
+            **button_style("secondary"),
+        )
         btn_spike_next.pack(side="left", padx=(0, SPACE_S))
         self._bind_hover_tip(btn_spike_next, "Next suspicious beat")
 
         # ── Readout chip: duration, docked to the bar's right edge ──────
         readout_chip = self._toolbar_chip(nav)
-        readout_chip.pack(side="right", padx=(SPACE_S, SPACE_M))
+        readout_chip.pack(side="right", padx=(SPACE_S, 0))
         self.lbl_sig_duration = ctk.CTkLabel(
             readout_chip, text="", font=FONT_MONO, text_color=MUTED, anchor="w")
         self.lbl_sig_duration.pack(side="left", padx=SPACE_S)  # type: ignore[union-attr]
 
         # Separator
-        tk.Frame(t, height=1, bg=BORDER).pack(side="top", fill="x", padx=SPACE_M, pady=SPACE_XS)
+        tk.Frame(t, height=1, bg=HAIRLINE).pack(side="top", fill="x", pady=SPACE_M)
 
         # Detail toolbar (fixed height)
-        hdr = ctk.CTkFrame(t, fg_color="transparent", height=32)
-        hdr.pack(side="top", fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
+        hdr = ctk.CTkFrame(t, fg_color="transparent", height=button_style()["height"])
+        hdr.pack(side="top", fill="x", pady=(0, SPACE_M))
         hdr.pack_propagate(False)
 
-        ctk.CTkLabel(hdr, text="ECG SIGNAL", font=FONT_SIDEBAR_HDR,
-                     text_color=MUTED).pack(side="left", anchor="w")
-
-        ctk.CTkFrame(hdr, width=1, fg_color=BORDER).pack(side="left", fill="y", padx=(SPACE_L, SPACE_S), pady=SPACE_XS)
+        ctk.CTkLabel(hdr, text="ECG SIGNAL", font=FONT_SECTION_HDR,
+                     text_color=MUTED).pack(side="left", anchor="w", padx=(0, SPACE_L))
 
         # ── Edit tools chip ───────────────────────────────────────────────
         edit_chip = self._toolbar_chip(hdr)
-        edit_chip.pack(side="left", padx=(0, SPACE_M))
+        edit_chip.pack(side="left", padx=(0, SPACE_S))
         self.btn_edit_mode = ctk.CTkButton(
-            edit_chip, text="Edit Peaks", width=96, height=28, font=FONT_SMALL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-            corner_radius=8,
+            edit_chip,
+            text="Edit Peaks",
+            width=96,
             command=self._toggle_edit_mode,
+            **button_style("secondary"),
         )
-        self.btn_edit_mode.pack(side="left", padx=(SPACE_S, SPACE_XS))
+        self.btn_edit_mode.pack(side="left", padx=(0, SPACE_M))
         self.lbl_edit_hint = ctk.CTkLabel(
             edit_chip,
             text="L-click: exclude/restore   R-click: add   Ctrl+Z: undo",
@@ -213,29 +252,30 @@ class TabDetectionMixin:
         # one shared edit_undo/edit_redo stack. The toolbar pair (always
         # visible, works from any tab) is now the only one.
         self.btn_clear_excl = ctk.CTkButton(
-            edit_chip, text="Clear Edits", width=100, height=28, font=FONT_SMALL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-            corner_radius=8,
+            edit_chip,
+            text="Clear Edits",
+            width=100,
             command=self._clear_manual_exclusions,
+            **button_style("secondary"),
         )
-        self.btn_clear_excl.pack(side="left", padx=(SPACE_S, SPACE_S))
+        self.btn_clear_excl.pack(side="left", padx=(0, SPACE_M))
 
         # ── Free Placement chip (bypass proximity guard) ──────────────────
         fp_chip = self._toolbar_chip(hdr)
-        fp_chip.pack(side="left", padx=(0, SPACE_M))
+        fp_chip.pack(side="left", padx=(0, SPACE_S))
         self.btn_free_placement = ctk.CTkButton(
-            fp_chip, text="Free Placement", width=118, height=28, font=FONT_SMALL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-            corner_radius=8,
+            fp_chip,
+            text="Free Placement",
+            width=118,
             command=self._toggle_free_placement,
+            **button_style("secondary"),
         )
-        self.btn_free_placement.pack(side="left", padx=(SPACE_S, SPACE_XS))
-        _fp_tip = ctk.CTkLabel(
-            fp_chip, text="?", width=28, height=28,
-            font=FONT_CARD_TITLE, text_color=MUTED,
-            fg_color=BORDER, corner_radius=14,
-        )
-        _fp_tip.pack(side="left", padx=(0, SPACE_S))
+        self.btn_free_placement.pack(side="left", padx=(0, SPACE_M))
+        _h = button_style()["height"]
+        _fp_tip = ctk.CTkButton(fp_chip, text="?", width=_h, command=lambda: None,
+                                **button_style("secondary", font=FONT_CARD_TITLE,
+                                               corner_radius=_h // 2))
+        _fp_tip.pack(side="left", padx=(0, SPACE_M))
         self._bind_hover_tip(
             _fp_tip,
             "Free Placement: right-click adds a peak at the exact clicked position — "
@@ -248,26 +288,21 @@ class TabDetectionMixin:
         rrhr_chip.pack(side="left")
         _rrhr_on = self.ui.rrhr_strip_visible
         self.btn_toggle_rrhr = ctk.CTkButton(
-            rrhr_chip, text="RR/HR/Quality", width=118, height=28, font=FONT_SMALL,
-            # "On" look is an outline, not a solid fill -- a solid BLUE chip
-            # here is indistinguishable from a primary command button like
-            # "Detect Peaks", even though this is a toggle, not an action.
-            fg_color=PANEL if _rrhr_on else BORDER,
-            hover_color=BORDER2,
-            text_color=BLUE if _rrhr_on else MUTED,
-            border_width=2 if _rrhr_on else 0,
-            border_color=BLUE,
-            corner_radius=8,
+            rrhr_chip,
+            text="RR/HR/Quality",
+            width=118,
             command=self._toggle_rrhr_strip,
+            **{**button_style("secondary"), **toggle_style(_rrhr_on)},
         )
-        self.btn_toggle_rrhr.pack(side="left", padx=(SPACE_S, SPACE_S))  # type: ignore[union-attr]
+        self.btn_toggle_rrhr.pack(side="left")  # type: ignore[union-attr]
 
         # Full-recording scrubber strip, directly above the detail plot
         # (Audacity/Premiere-style position indicator). Fixed height
         # (pack_propagate(False), mirroring nav/hdr) rather than fill=both.
         # The RR of the whole recording + draggable viewport cursor (see draw_overview()).
-        ov_frame = tk.Frame(t, bg=PLOT["bg"], bd=0, highlightthickness=0, height=72)
-        ov_frame.pack(side="top", fill="x", padx=SPACE_XS, pady=(0, SPACE_XS))
+        ov_frame = tk.Frame(t, bg=PLOT["bg"], bd=0, highlightthickness=1,
+                            highlightbackground=HAIRLINE, height=72)
+        ov_frame.pack(side="top", fill="x", pady=(0, SPACE_M))
         ov_frame.pack_propagate(False)
         self._slots["overview"] = CanvasSlot(ov_frame, 14, 0.5, toolbar=False)
         self._slots["overview"].canvas.mpl_connect(
@@ -292,10 +327,11 @@ class TabDetectionMixin:
         self.plot_area.grid_rowconfigure(0, weight=7)
         self.plot_area.grid_rowconfigure(1, weight=3 if self.ui.rrhr_strip_visible else 0)
         self.plot_area.grid_columnconfigure(0, weight=1)
-        self._build_quality_panel(self.plot_area)
+        self._build_quality_panel(body)
 
-        det_frame = tk.Frame(self.plot_area, bg=PLOT["bg"], bd=0, highlightthickness=0)
-        det_frame.grid(row=0, column=0, sticky="nsew", padx=SPACE_XS, pady=(0, SPACE_XS))
+        det_frame = tk.Frame(self.plot_area, bg=PLOT["bg"], bd=0, highlightthickness=1,
+                             highlightbackground=HAIRLINE)
+        det_frame.grid(row=0, column=0, sticky="nsew", pady=(0, SPACE_S))
         self._slots["detail"] = CanvasSlot(det_frame, 12, 6.5, toolbar=True)
 
         self._slots["detail"].canvas.mpl_connect(
@@ -308,8 +344,9 @@ class TabDetectionMixin:
         # RR/HR strip — synced to the same nav window as the detail plot,
         # via ECGApp._draw_detail()'s fan-out (see draw_detail_rrhr()).
         # Show/hide is toggled by btn_toggle_rrhr in the hdr toolbar above.
-        self.subplot_frame = tk.Frame(self.plot_area, bg=PLOT["bg"], bd=0, highlightthickness=0)
-        self.subplot_frame.grid(row=1, column=0, sticky="nsew", padx=SPACE_XS, pady=(0, SPACE_XS))
+        self.subplot_frame = tk.Frame(self.plot_area, bg=PLOT["bg"], bd=0, highlightthickness=1,
+                                      highlightbackground=HAIRLINE)
+        self.subplot_frame.grid(row=1, column=0, sticky="nsew")
         if not self.ui.rrhr_strip_visible:
             self.subplot_frame.grid_remove()
         self._slots["detail_rrhr"] = CanvasSlot(self.subplot_frame, 12, 2.8, toolbar=False)
@@ -321,41 +358,55 @@ class TabDetectionMixin:
         """Quality belongs next to the signal it judges. Values come from
         plot_quality_panel() once core results exist; the score and the
         detector agreement from _refresh_quality_live()."""
-        panel = ctk.CTkFrame(parent, width=QUALITY_PANEL_W, fg_color=CARD, corner_radius=6)
-        panel.grid(row=0, column=1, rowspan=2, sticky="ns", padx=(0, SPACE_XS), pady=(0, SPACE_XS))
+        # Its width follows the font size, so its labels fit at any scale.
+        panel_w = int(QUALITY_PANEL_W * THEME.font_scale)
+        panel = ctk.CTkFrame(parent, width=panel_w, **card_style())
+        panel.grid(row=0, column=1, sticky="ns")
         panel.pack_propagate(False)
 
-        ctk.CTkLabel(panel, text="SIGNAL QUALITY", font=FONT_SIDEBAR_HDR, text_color=MUTED,
-                     anchor="w").pack(fill="x", padx=SPACE_M, pady=(SPACE_S, 0))
+        # The mockup's card: title, the score in 40 px, then grey stat cells
+        # two by two (11 px label, 18 px value), 16 px inside the card.
+        ctk.CTkLabel(panel, text="SIGNAL QUALITY", font=FONT_SECTION_HDR, text_color=MUTED,
+                     anchor="w", height=16).pack(fill="x", padx=CARD_PAD, pady=(CARD_PAD - 4, 0))
 
         score_row = ctk.CTkFrame(panel, fg_color="transparent")
-        score_row.pack(fill="x", padx=SPACE_M)
+        score_row.pack(fill="x", padx=CARD_PAD)
         self._quality_vals = {}
         self._quality_vals["sq_score"] = ctk.CTkLabel(
-            score_row, text="—", font=FONT_KPI_HERO, text_color=TEXT, anchor="w")
+            score_row, text="—", font=FONT_SCORE, text_color=TEXT, anchor="w", height=48)
         self._quality_vals["sq_score"].pack(side="left")
         self.lbl_quality_word = ctk.CTkLabel(
-            score_row, text="", font=FONT_SMALL, text_color=MUTED, anchor="w")
-        self.lbl_quality_word.pack(side="left", padx=(SPACE_S, 0))
+            score_row, text="", font=FONT_BODY, text_color=MUTED, anchor="w")
+        self.lbl_quality_word.pack(side="left", padx=(SPACE_M, 0), pady=(SPACE_M, 0))
 
         grid = ctk.CTkFrame(panel, fg_color="transparent")
-        grid.pack(fill="x", padx=SPACE_M)
+        grid.pack(fill="x", padx=CARD_PAD, pady=(0, SPACE_S))
         grid.grid_columnconfigure((0, 1), weight=1, uniform="q")
+        cell_w = (panel_w - 2 * CARD_PAD - 10) // 2 - 20
         for i, (key, label) in enumerate((
                 ("sq_corr", "Template correlation"),
                 ("sq_noisy_time", "Time below 0.90"),
                 ("sq_badbeats", "Beats below 0.90"),
-                ("sq_agree", "Detectors agree"),
-                ("sq_artifact", "Auto-corrected"))):
-            cell = ctk.CTkFrame(grid, fg_color="transparent")
-            cell.grid(row=i // 2, column=i % 2, columnspan=2 if key == "sq_artifact" else 1,
-                      sticky="ew", pady=(0, SPACE_XS))
+                ("sq_agree", "Detectors agree"))):
+            cell = ctk.CTkFrame(grid, **cell_style())
+            cell.grid(row=i // 2, column=i % 2, sticky="nsew",
+                      padx=(0, 10) if i % 2 == 0 else 0, pady=(0, 10))
             ctk.CTkLabel(cell, text=label, font=FONT_KPI_LABEL, text_color=MUTED,
-                         anchor="w", height=14).pack(anchor="w")
-            val = ctk.CTkLabel(cell, text="—", font=FONT_LABEL, text_color=TEXT, anchor="w",
-                               height=18, wraplength=QUALITY_PANEL_W - 2 * SPACE_M, justify="left")
-            val.pack(anchor="w")
+                         anchor="w", height=14).pack(anchor="w", padx=10, pady=(8, 0))
+            val = ctk.CTkLabel(cell, text="—", font=FONT_KPI_VALUE, text_color=TEXT, anchor="w",
+                               wraplength=cell_w, justify="left", height=22)
+            val.pack(anchor="w", padx=10, pady=(2, 8))
             self._quality_vals[key] = val
+        # The mockup has four cells; the auto-correction (also stated in the
+        # context strip) is one line under them.
+        row = ctk.CTkFrame(panel, fg_color="transparent")
+        row.pack(fill="x", padx=CARD_PAD, pady=(0, SPACE_S))
+        ctk.CTkLabel(row, text="Auto-corrected", font=FONT_KPI_LABEL, text_color=MUTED,
+                     anchor="w", height=18).pack(side="left")
+        self._quality_vals["sq_artifact"] = ctk.CTkLabel(
+            row, text="—", font=FONT_LABEL, text_color=TEXT, anchor="w", height=18,
+            wraplength=panel_w - 2 * CARD_PAD - 100, justify="left")
+        self._quality_vals["sq_artifact"].pack(side="left", padx=(SPACE_M, 0))
         self._bind_hover_tip(
             self._quality_vals["sq_agree"],
             "Beats confirmed by at least one other detector, after Check detector "
@@ -365,7 +416,7 @@ class TabDetectionMixin:
         self._build_quality_actions(panel)
 
         plots = ctk.CTkFrame(panel, fg_color="transparent")
-        plots.pack(side="top", fill="both", expand=True, padx=SPACE_S)
+        plots.pack(side="top", fill="both", expand=True, padx=CARD_PAD - SPACE_XS)
         plots.grid_columnconfigure(0, weight=1)
         self._quality_plots = plots
         for row, (key, title) in enumerate((("quality_time", "Template correlation over time"),
@@ -374,7 +425,8 @@ class TabDetectionMixin:
                                 anchor="w", height=14)
             head.grid(row=2 * row, column=0, sticky="ew", padx=SPACE_XS)
             plots.grid_rowconfigure(2 * row + 1, weight=1)
-            box = tk.Frame(plots, bg=PLOT["bg"], bd=0, highlightthickness=0, height=60)
+            box = tk.Frame(plots, bg=PLOT["bg"], bd=0, highlightthickness=1,
+                           highlightbackground=HAIRLINE, height=60)
             box.grid(row=2 * row + 1, column=0, sticky="nsew", pady=(0, SPACE_XS))
             box.pack_propagate(False)
             self._slots[key] = CanvasSlot(box, 2.6, 1.0, toolbar=False)
@@ -384,15 +436,18 @@ class TabDetectionMixin:
         # on a short window, to the curve over time (_fit_quality_plots).
         self._quality_hist_rows = (head, box)
         self._quality_hist_wanted = True
-        plots.bind("<Configure>", lambda _e: self._fit_quality_plots(), add="+")
+        # The panel too: plots squeezed flat from the start never get a
+        # <Configure> of their own (their size stays 1 px).
+        for w in (plots, panel):
+            w.bind("<Configure>", lambda _e: self._fit_quality_plots(), add="+")
 
     def _build_quality_actions(self: ECGApp, panel) -> None:
         """What acts on the peaks' quality, under the plots: artifact review,
         auto-correction, detector agreement, and the ML detector's training
         (shown with Method = ML Detector, see _show_ml_section)."""
-        wrap = QUALITY_PANEL_W - 2 * SPACE_M
+        wrap = int(QUALITY_PANEL_W * THEME.font_scale) - 2 * CARD_PAD
         actions = ctk.CTkFrame(panel, fg_color="transparent")
-        actions.pack(side="bottom", fill="x", padx=SPACE_M, pady=(0, SPACE_S))
+        actions.pack(side="bottom", fill="x", padx=CARD_PAD, pady=(0, CARD_PAD - 4))
         self._quality_actions = actions
         # Review and agreement share one row: every row here is taken from the
         # correlation plot above on a 768-px screen.
@@ -406,9 +461,12 @@ class TabDetectionMixin:
         # than relying on CTkButton's default disabled treatment, which only
         # dims the text and left this looking clickable while disabled.
         self.btn_review_art = ctk.CTkButton(
-            buttons, text="Review artifacts", command=self._open_artifact_review,
-            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED, font=FONT_SMALL,
-            height=28, corner_radius=6, state="disabled")
+            buttons,
+            text="Review artifacts",
+            command=self._open_artifact_review,
+            state="disabled",
+            **{**button_style("secondary"), **disabled_style()},
+        )
         self.btn_review_art.grid(row=0, column=0, sticky="ew", padx=(0, SPACE_XS))
         self.btn_review_quality = self.btn_review_art
         self._bind_hover_tip(self.btn_review_art,
@@ -417,10 +475,12 @@ class TabDetectionMixin:
                                         dict(padx=0), default_on=False)
         self._bind_hover_tip(self.sw_artifact, "OFF by default — use Review for full control")
         self.btn_check_agreement = ctk.CTkButton(
-            buttons, text="Check agreement",
+            buttons,
+            text="Check agreement",
             command=self._check_method_agreement,
-            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-            font=FONT_SMALL, height=28, corner_radius=6, state="disabled")
+            state="disabled",
+            **{**button_style("secondary"), **disabled_style()},
+        )
         self.btn_check_agreement.grid(row=0, column=1, sticky="ew")
         self._bind_hover_tip(
             self.btn_check_agreement,
@@ -456,18 +516,22 @@ class TabDetectionMixin:
         row.pack(fill="x", padx=SPACE_S, pady=(0, SPACE_S))
         row.grid_columnconfigure((0, 1), weight=1, uniform="ml")
         self.btn_save_for_training = ctk.CTkButton(
-            row, text="📥  Save for training", command=self._save_for_training_only,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            font=FONT_SMALL, height=28, corner_radius=6)
+            row,
+            text="📥  Save for training",
+            command=self._save_for_training_only,
+            **button_style("secondary"),
+        )
         self.btn_save_for_training.grid(row=0, column=0, sticky="ew", padx=(0, SPACE_XS))
         self._bind_hover_tip(
             self.btn_save_for_training,
             "Caches this recording's peaks as training data right away, without "
             "writing a .ecgsession file or export stats.")
         self.btn_train_ml = ctk.CTkButton(
-            row, text="🤖  Train model…", command=self._open_ml_training_dialog,
-            fg_color=PURPLE, hover_color=PURPLE_DARK, text_color="white",
-            font=FONT_SMALL, height=28, corner_radius=6)
+            row,
+            text="🤖  Train model…",
+            command=self._open_ml_training_dialog,
+            **button_style("primary"),
+        )
         self.btn_train_ml.grid(row=0, column=1, sticky="ew")
         self._bind_hover_tip(self.btn_train_ml, "Train / retrain the ML R-peak detector")
         self.after(0, self.refresh_ml_status)
@@ -497,7 +561,9 @@ class TabDetectionMixin:
             return
         h = plots.winfo_height()
         row_h = QUALITY_PLOT_MIN_H + 14 + SPACE_XS      # title + plot
-        known = h > 1
+        # Not laid out yet: 1 px with the panel unmapped. With the panel shown,
+        # 1 px means squeezed flat (pack even unmaps a frame left no room).
+        known = h > 1 or bool(plots.master.winfo_ismapped())
         # A curve squeezed below that height is unreadable: its title says why
         # it is missing rather than drawing a sliver.
         curve = not known or h >= row_h
@@ -585,4 +651,4 @@ class TabDetectionMixin:
             btn.configure(text=label)
         enabled = rp is not None and len(rp) > 4
         if (btn.cget("state") == "normal") != enabled:
-            self._set_btn_enabled(btn, enabled, BLUE, BLUE_HOVER)
+            self._set_btn_enabled(btn, enabled, "secondary")

@@ -31,6 +31,7 @@ from ecg.ui.plots import CanvasSlot
 # class, which is the one check switched off here.
 # pyright: reportGeneralTypeIssues=false
 if TYPE_CHECKING:
+    from ecg.ui.widgets import PillGroup
     from ecg.ui.app import ECGApp
 
 
@@ -180,7 +181,7 @@ class StateProps:
         self._interp_ref_labels: "dict[str, ctk.CTkLabel]" = {}
         # Time course tab internal state
         self._time_frames:       "dict[str, ctk.CTkFrame]" = {}
-        self._time_seg:          "Optional[ctk.CTkSegmentedButton]" = None
+        self._time_seg:          "Optional[PillGroup]" = None
         self._time_banner:       "Optional[ctk.CTkFrame]"           = None
         self._time_banner_text:  "Optional[ctk.CTkLabel]"           = None
         self._epoch_metrics:     "dict[str, ctk.CTkCheckBox]"       = {}

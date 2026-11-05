@@ -29,6 +29,12 @@ from ecg.ui.theme import (
     PURPLE_DARK, SPACE_XS, SPACE_S, SPACE_M, SPACE_L, FONT_LABEL, FONT_SMALL,
     FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR, FONT_HINT, FONT_SECTION_HDR,
 )
+from ecg.ui.theme import (
+    BG, CARD, HAIRLINE, RADIUS, card_style, button_style, FONT_BODY, FONT_SECTION_HDR,
+    PAGE_PAD_X, PAGE_PAD_Y, PAGE_GAP, CARD_PAD,
+)
+from ecg.ui.theme import combo_style, input_style
+from ecg.ui.theme import button_style, disabled_style
 from ecg.ui.plots import CanvasSlot
 from ecg.ui.tab_keys import TAB_MORPHOLOGY
 from ecg.ui.wave_editor import WaveTemplateMiniEditor, dragged_landmark, hit_landmark
@@ -204,7 +210,7 @@ class TabMorphologyMixin:
         t = self.tabs.tab(TAB_MORPHOLOGY)
         t.grid_rowconfigure(0, weight=1)
         t.grid_columnconfigure(0, weight=1)
-        page = ctk.CTkScrollableFrame(t, fg_color=PANEL, scrollbar_button_color=BORDER,
+        page = ctk.CTkScrollableFrame(t, fg_color=BG, scrollbar_button_color=BORDER,
                                       scrollbar_button_hover_color=BORDER2)
         page.grid(row=0, column=0, sticky="nsew")
         page.grid_columnconfigure(0, weight=1)
@@ -212,7 +218,7 @@ class TabMorphologyMixin:
         self._build_morph_steps(page, 0)
 
         main = ctk.CTkFrame(page, fg_color="transparent")
-        main.grid(row=1, column=0, sticky="ew", padx=SPACE_S)
+        main.grid(row=1, column=0, sticky="ew", padx=PAGE_PAD_X)
         main.grid_columnconfigure(0, weight=1, uniform="morph")
         main.grid_columnconfigure(1, weight=1, uniform="morph")
         self._build_morph_beat(main)
@@ -224,17 +230,18 @@ class TabMorphologyMixin:
 
     def _build_morph_steps(self: ECGApp, page, row: int) -> None:
         bar = ctk.CTkFrame(page, fg_color="transparent")
-        bar.grid(row=row, column=0, sticky="ew", padx=SPACE_M, pady=(SPACE_S, SPACE_S))
+        bar.grid(row=row, column=0, sticky="ew", padx=PAGE_PAD_X, pady=(PAGE_PAD_Y, PAGE_GAP))
         self._morph_steps: "list[dict]" = []
         for i in range(3):
-            chip = ctk.CTkFrame(bar, fg_color=CARD, corner_radius=6,
+            h = button_style()["height"]
+            chip = ctk.CTkFrame(bar, fg_color=CARD, corner_radius=h // 2, height=h,
                                 border_width=1, border_color=BORDER)
-            chip.pack(side="left", padx=(0 if i == 0 else SPACE_S, 0))
+            chip.pack(side="left", padx=(0 if i == 0 else SPACE_M, 0))
             glyph = ctk.CTkLabel(chip, text=STATE_GLYPHS[NOT_COMPUTED], font=FONT_LABEL,
                                  width=0, text_color=state_color(NOT_COMPUTED))
-            glyph.pack(side="left", padx=(SPACE_M, SPACE_XS), pady=SPACE_XS)
-            text = ctk.CTkLabel(chip, text="", font=FONT_SMALL, width=0, text_color=TEXT)
-            text.pack(side="left", padx=(0, SPACE_M), pady=SPACE_XS)
+            glyph.pack(side="left", padx=(14, SPACE_M), pady=6)
+            text = ctk.CTkLabel(chip, text="", font=FONT_BODY, width=0, text_color=TEXT)
+            text.pack(side="left", padx=(0, 14), pady=6)
             step = {"chip": chip, "glyph": glyph, "text": text, "tip": "", "current": None}
             for w in (chip, glyph, text):
                 self._bind_hover_tip(w, lambda s=step: s["tip"])
@@ -245,21 +252,26 @@ class TabMorphologyMixin:
 
     def _build_morph_beat(self: ECGApp, main) -> None:
         """Steps 1-2: the mean beat with its landmarks and their editor."""
-        card = ctk.CTkFrame(main, fg_color=PANEL, corner_radius=0)
-        card.grid(row=0, column=0, sticky="nsew", padx=(0, SPACE_S))
+        outer = ctk.CTkFrame(main, **card_style())
+        outer.grid(row=0, column=0, sticky="nsew", padx=(0, PAGE_GAP))
+        card = ctk.CTkFrame(outer, fg_color="transparent")
+        card.pack(fill="both", expand=True, padx=CARD_PAD, pady=(CARD_PAD - 4, CARD_PAD))
         hdr = ctk.CTkFrame(card, fg_color="transparent")
-        hdr.pack(side="top", fill="x", padx=SPACE_S, pady=(0, SPACE_XS))
+        hdr.pack(side="top", fill="x", pady=(0, SPACE_M))
         ctk.CTkLabel(hdr, text="MEAN BEAT ± SD  ·  LANDMARKS",
-                     font=FONT_SIDEBAR_HDR, text_color=MUTED).pack(side="left")
+                     font=FONT_SECTION_HDR, text_color=MUTED).pack(side="left")
         btn_landmarks = ctk.CTkButton(
-            hdr, text="⚙  Landmarks",
+            hdr,
+            text="⚙  Landmarks",
             command=self._open_wave_template_editor,
-            fg_color=PURPLE, hover_color=PURPLE_DARK, text_color="white",
-            font=FONT_BTN_SEC, height=28, corner_radius=6,
+            **button_style("primary"),
         )
         btn_landmarks.pack(side="right")
-        self.lbl_morph_drag_hint = ctk.CTkLabel(hdr, text=DRAG_HINT, font=FONT_HINT, text_color=MUTED)
-        self.lbl_morph_drag_hint.pack(side="right", padx=(0, SPACE_M))
+        # Under the title: beside it, the hint and the title overlap on a
+        # laptop screen or with a larger font.
+        self.lbl_morph_drag_hint = ctk.CTkLabel(card, text=DRAG_HINT, font=FONT_HINT,
+                                                text_color=MUTED, anchor="w", height=16)
+        self.lbl_morph_drag_hint.pack(side="top", fill="x", pady=(0, SPACE_S))
         self._bind_hover_tip(
             btn_landmarks,
             "Edit where P, QRS onset, Q/R/S, the J point and T are searched "
@@ -267,7 +279,7 @@ class TabMorphologyMixin:
             "J point, QT = QRS onset → T end). The template belongs to this "
             "recording (kept in its session); only “Save as default "
             "template” changes the default for recordings opened later.")
-        holder = ctk.CTkFrame(card, fg_color=PANEL, corner_radius=0,
+        holder = ctk.CTkFrame(card, fg_color=CARD, corner_radius=0,
                               height=int(440 * THEME.font_scale))
         holder.pack(side="top", fill="x")
         holder.pack_propagate(False)
@@ -280,8 +292,10 @@ class TabMorphologyMixin:
 
     def _build_morph_measure(self: ECGApp, main) -> None:
         """Step 3: QTc formula, Measure, the table and the QTc-RR diagnostic."""
-        col = ctk.CTkFrame(main, fg_color="transparent")
-        col.grid(row=0, column=1, sticky="new")
+        outer = ctk.CTkFrame(main, **card_style())
+        outer.grid(row=0, column=1, sticky="nsew")
+        col = ctk.CTkFrame(outer, fg_color="transparent")
+        col.pack(fill="both", expand=True, padx=CARD_PAD, pady=CARD_PAD)
         col.grid_columnconfigure(0, weight=1)
 
         bar = ctk.CTkFrame(col, fg_color="transparent")
@@ -292,11 +306,11 @@ class TabMorphologyMixin:
         # normalize_qtc_formula, session save/restore and the exports);
         # wide enough for the longest label ("Fridericia (QT/∛RR, human)").
         self.cb_qtc_formula = ctk.CTkComboBox(
-            bar, width=int(215 * THEME.font_scale), height=28, font=FONT_LABEL,
-            fg_color=BG, border_color=BORDER2, button_color=BORDER2,
-            text_color=TEXT, dropdown_fg_color=BG, dropdown_text_color=TEXT,
+            bar,
+            width=int(215 * THEME.font_scale),
             values=list(QTC_FORMULA_LABELS.values()),
             command=self._on_qtc_formula_change,
+            **combo_style(),
         )
         # The formula in effect lives in app state (analysis.qtc_formula),
         # so a rebuild (theme toggle) re-selects it instead of silently
@@ -310,9 +324,12 @@ class TabMorphologyMixin:
         # As the formula: the value lives in app state, a rebuild keeps it.
         ens_var = ctk.StringVar(master=bar, value=str(getattr(
             getattr(self, "analysis", None), "ensemble_beats", ENSEMBLE_BEATS_DEFAULT)))
-        self.ent_ensemble = ctk.CTkEntry(bar, width=int(52 * THEME.font_scale), height=28,
-                                         font=FONT_LABEL, fg_color=BG, border_color=BORDER2,
-                                         text_color=TEXT, textvariable=ens_var)
+        self.ent_ensemble = ctk.CTkEntry(
+            bar,
+            width=int(52 * THEME.font_scale),
+            textvariable=ens_var,
+            **input_style(),
+        )
         self.ent_ensemble.pack(side="left")
         self.ent_ensemble.bind("<Return>", self._on_ensemble_change)
         self.ent_ensemble.bind("<FocusOut>", self._on_ensemble_change)
@@ -336,11 +353,11 @@ class TabMorphologyMixin:
         # is this app's warning/Edit-Mode-ON colour elsewhere and this only
         # computes measurements, it isn't a warning state.
         self.btn_run_ivl = ctk.CTkButton(
-            bar2, text="⚡  Measure intervals",
+            bar2,
+            text="⚡  Measure intervals",
             command=self._run_intervals,
-            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-            font=FONT_BTN_PRIMARY, height=max(28, int(32 * THEME.font_scale)),
-            corner_radius=8, state="disabled",
+            state="disabled",
+            **{**button_style("secondary"), **disabled_style()},
         )
         self.btn_run_ivl.pack(side="left")
         self.sw_permissive = self._switch(bar2, "Permissive bounds", dict(padx=0))
@@ -370,7 +387,8 @@ class TabMorphologyMixin:
         self.lbl_ivl_ensemble.grid(row=5, column=0, sticky="ew")
         self._ensemble_hint_key: Any = None
 
-        tbl = ctk.CTkFrame(col, fg_color=CARD, corner_radius=6, border_width=1, border_color=BORDER)
+        tbl = ctk.CTkFrame(col, fg_color=CARD, corner_radius=RADIUS, border_width=1,
+                           border_color=HAIRLINE)
         tbl.grid(row=6, column=0, sticky="ew", pady=(SPACE_S, 0))
         tbl.grid_columnconfigure(0, weight=1)
         for c, px in ((1, 70), (2, 84), (3, 118)):
@@ -403,7 +421,7 @@ class TabMorphologyMixin:
                      font=FONT_HINT, text_color=MUTED, anchor="w", justify="left",
                      wraplength=int(420 * THEME.font_scale),
                      ).grid(row=7, column=0, sticky="ew", pady=(SPACE_S, 0))
-        holder = ctk.CTkFrame(col, fg_color=PANEL, corner_radius=0,
+        holder = ctk.CTkFrame(col, fg_color=CARD, corner_radius=0,
                               height=int(170 * THEME.font_scale))
         holder.grid(row=8, column=0, sticky="ew")
         holder.pack_propagate(False)
@@ -415,13 +433,15 @@ class TabMorphologyMixin:
     def _build_morph_distributions(self: ECGApp, page, row: int) -> None:
         """The violins and the amplitude / correlation histograms, closed until
         asked for; they are drawn all the same, the exports read their figures."""
+        card = ctk.CTkFrame(page, **card_style())
+        card.grid(row=row, column=0, sticky="ew", padx=PAGE_PAD_X, pady=(PAGE_GAP, PAGE_PAD_Y))
         self.btn_morph_dist = ctk.CTkButton(
-            page, text=_DIST_CLOSED, anchor="w", command=self._toggle_morph_distributions,
-            fg_color="transparent", hover_color=BORDER, text_color=MUTED,
-            font=FONT_BTN_SEC, height=28, corner_radius=6)
-        self.btn_morph_dist.grid(row=row, column=0, sticky="ew", padx=SPACE_M, pady=(SPACE_S, 0))
-        self._morph_dist = ctk.CTkFrame(page, fg_color="transparent")
-        self._morph_dist.grid(row=row + 1, column=0, sticky="ew", padx=SPACE_S, pady=(0, SPACE_S))
+            card, text=_DIST_CLOSED, anchor="w", command=self._toggle_morph_distributions,
+            fg_color="transparent", hover_color=BG, text_color=MUTED,
+            font=FONT_SECTION_HDR, height=button_style()["height"], corner_radius=RADIUS)
+        self.btn_morph_dist.pack(fill="x", padx=SPACE_M, pady=SPACE_S)
+        self._morph_dist = ctk.CTkFrame(card, fg_color="transparent")
+        self._morph_dist.pack(fill="x", padx=CARD_PAD, pady=(0, CARD_PAD))
         for slot, w, h, px, placeholder in (
                 ("intervals", 14, 6.0, 380, "Click Measure intervals to display"),
                 ("beat_dist", 14, 4.0, 280, "Click Analyze to display")):
@@ -440,9 +460,9 @@ class TabMorphologyMixin:
         is_open = self.ui.morph_dist_open
         self.btn_morph_dist.configure(text=_DIST_OPEN if is_open else _DIST_CLOSED)
         if is_open:
-            self._morph_dist.grid()
+            self._morph_dist.pack(fill="x", padx=CARD_PAD, pady=(0, CARD_PAD))
         else:
-            self._morph_dist.grid_remove()
+            self._morph_dist.pack_forget()
 
     # ── derived on the shell's tick, like the tab's own state ─────────────
 

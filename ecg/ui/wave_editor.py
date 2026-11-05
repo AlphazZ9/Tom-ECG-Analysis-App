@@ -28,6 +28,7 @@ from ecg.ui.theme import (
     FONT_LABEL, FONT_SMALL, FONT_BTN_PRIMARY, FONT_BTN_SEC,
     FONT_HINT,
 )
+from ecg.ui.theme import button_style
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
@@ -194,52 +195,68 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
         bar.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
 
         ctk.CTkButton(
-            bar, text="↺ Reset defaults", width=130, height=30,
-            fg_color=CARD, text_color=TEXT, font=FONT_SMALL,
+            bar,
+            text="↺ Reset defaults",
+            width=130,
             command=self._reset_defaults,
+            **button_style("secondary"),
         ).pack(side="left", padx=(0, 6))
 
         ctk.CTkButton(
-            bar, text="⚡ Auto-calibrate", width=120, height=30,
-            fg_color=PURPLE_DARK, text_color="white", font=FONT_SMALL,
+            bar,
+            text="⚡ Auto-calibrate",
+            width=120,
             command=self._auto_calibrate,
+            **button_style("primary"),
         ).pack(side="left", padx=(0, 6))
 
         if self._intervals is not None:
             ctk.CTkButton(
-                bar, text="⟲ Refine from delineation", width=170, height=30,
-                fg_color=CARD, text_color=TEXT, font=FONT_SMALL,
+                bar,
+                text="⟲ Refine from delineation",
+                width=170,
                 command=self._refine_from_intervals,
+                **button_style("secondary"),
             ).pack(side="left", padx=(0, 6))
 
         ctk.CTkButton(
-            bar, text="📂 Load…", width=80, height=30,
-            fg_color=CARD, text_color=TEXT, font=FONT_SMALL,
+            bar,
+            text="📂 Load…",
+            width=80,
             command=self._load_file,
+            **button_style("secondary"),
         ).pack(side="left", padx=(0, 6))
 
         ctk.CTkButton(
-            bar, text="💾 Save to file…", width=110, height=30,
-            fg_color=CARD, text_color=TEXT, font=FONT_SMALL,
+            bar,
+            text="💾 Save to file…",
+            width=110,
             command=self._save_file,
+            **button_style("secondary"),
         ).pack(side="left", padx=(0, 6))
 
         ctk.CTkButton(
-            bar, text="✗ Cancel", width=80, height=30,
-            fg_color=CARD, text_color=TEXT, font=FONT_SMALL,
+            bar,
+            text="✗ Cancel",
+            width=80,
             command=self.destroy,
+            **button_style("secondary"),
         ).pack(side="right")
 
         ctk.CTkButton(
-            bar, text="✔ Apply to this recording", width=170, height=30,
-            fg_color=GREEN, text_color="white", font=FONT_SMALL,
+            bar,
+            text="✔ Apply to this recording",
+            width=170,
             command=self._apply,
+            **button_style("primary"),
         ).pack(side="right", padx=(0, 6))
 
         ctk.CTkButton(
-            bar, text="Save as default template", width=170, height=30,
-            fg_color=CARD, text_color=TEXT, font=FONT_SMALL,
+            bar,
+            text="Save as default template",
+            width=170,
             command=self._save_default,
+            **button_style("secondary"),
         ).pack(side="right", padx=(0, 6))
 
     # ── Drawing ───────────────────────────────────────────────────────────

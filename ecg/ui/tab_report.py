@@ -24,6 +24,11 @@ from ecg.ui.theme import (
     SPACE_M, FONT_SMALL, FONT_MONO, FONT_SIDEBAR_HDR, FONT_BTN_PRIMARY, FONT_BTN_SEC,
     FONT_CARD_TITLE,
 )
+from ecg.ui.theme import (
+    BG, HAIRLINE, RADIUS, CARD_RADIUS, card_style, button_style, FONT_BODY, FONT_SECTION_HDR, FONT_LABEL,
+    PAGE_PAD_X, PAGE_PAD_Y, PAGE_GAP, CARD_PAD,
+)
+from ecg.ui.theme import button_style
 
 # Mixin of ECGApp: `self: ECGApp` shows pyright the whole app surface, so a
 # typo in self.xxx is reported. It is deliberately not a supertype of this
@@ -50,7 +55,7 @@ class TabReportMixin:
         t = self.tabs.tab(TAB_REPORT)
         t.grid_rowconfigure(0, weight=1)
         t.grid_columnconfigure(0, weight=1)
-        page = ctk.CTkScrollableFrame(t, fg_color=PANEL, scrollbar_button_color=BORDER,
+        page = ctk.CTkScrollableFrame(t, fg_color=BG, scrollbar_button_color=BORDER,
                                       scrollbar_button_hover_color=BORDER2)
         page.grid(row=0, column=0, sticky="nsew")
         page.grid_columnconfigure(0, weight=2, uniform="report")
@@ -64,36 +69,37 @@ class TabReportMixin:
         self.btn_report_text = ctk.CTkButton(
             page, text=_TEXT_CLOSED, command=self._toggle_report_text, anchor="w",
             fg_color="transparent", hover_color=BORDER, text_color=MUTED,
-            font=FONT_BTN_SEC, height=28, corner_radius=5)
+            font=FONT_SECTION_HDR, height=button_style()["height"], corner_radius=RADIUS)
         self.btn_report_text.grid(row=1, column=0, columnspan=2, sticky="w",
-                                  padx=SPACE_M, pady=(SPACE_S, 0))
+                                  padx=PAGE_PAD_X - SPACE_M, pady=(PAGE_GAP, 0))
         self.txt_report = ctk.CTkTextbox(page, font=FONT_MONO, fg_color=CARD, text_color=TEXT,
-                                         border_width=1, border_color=BORDER, height=380)
+                                         border_width=1, border_color=BORDER,
+                                         corner_radius=CARD_RADIUS, height=380)
         self.txt_report.grid(row=2, column=0, columnspan=2, sticky="ew",
-                             padx=SPACE_M, pady=(SPACE_XS, SPACE_M))
+                             padx=PAGE_PAD_X, pady=(SPACE_S, PAGE_PAD_Y))
         self._apply_report_text_open()
         self._refresh_report(force=True)
 
     def _report_card(self: ECGApp, page, column: int, title: str) -> ctk.CTkFrame:
-        card = ctk.CTkFrame(page, fg_color=CARD, corner_radius=8, border_width=1,
-                            border_color=BORDER)
-        card.grid(row=0, column=column, sticky="nsew", padx=(SPACE_M, SPACE_S) if column == 0
-                  else (SPACE_S, SPACE_M), pady=(SPACE_M, 0))
-        ctk.CTkLabel(card, text=title.upper(), font=FONT_SIDEBAR_HDR, text_color=MUTED,
-                     anchor="w").pack(fill="x", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
+        card = ctk.CTkFrame(page, **card_style())
+        card.grid(row=0, column=column, sticky="nsew",
+                  padx=(PAGE_PAD_X, PAGE_GAP // 2) if column == 0
+                  else (PAGE_GAP // 2, PAGE_PAD_X), pady=(PAGE_PAD_Y, 0))
+        ctk.CTkLabel(card, text=title.upper(), font=FONT_SECTION_HDR, text_color=MUTED,
+                     anchor="w").pack(fill="x", padx=CARD_PAD, pady=(CARD_PAD - 4, SPACE_M))
         return card
 
     def _build_report_provenance(self: ECGApp, page) -> None:
         card = self._report_card(page, 0, "Provenance")
         grid = ctk.CTkFrame(card, fg_color="transparent")
-        grid.pack(fill="both", expand=True, padx=SPACE_M, pady=(0, SPACE_M))
+        grid.pack(fill="both", expand=True, padx=CARD_PAD, pady=(0, CARD_PAD))
         grid.grid_columnconfigure(1, weight=1)
         self._report_provenance: "dict[str, ctk.CTkLabel]" = {}
         for i, label in enumerate(_PROVENANCE_LABELS):
-            ctk.CTkLabel(grid, text=label, font=FONT_SMALL, text_color=MUTED, anchor="nw",
-                         height=20).grid(row=i, column=0, sticky="nw", padx=(0, SPACE_M))
-            value = ctk.CTkLabel(grid, text="—", font=FONT_SMALL, text_color=TEXT, anchor="nw",
-                                 justify="left", height=20)
+            ctk.CTkLabel(grid, text=label, font=FONT_LABEL, text_color=MUTED, anchor="nw",
+                         height=22).grid(row=i, column=0, sticky="nw", padx=(0, SPACE_M))
+            value = ctk.CTkLabel(grid, text="—", font=FONT_BODY, text_color=TEXT, anchor="nw",
+                                 justify="left", height=22)
             value.grid(row=i, column=1, sticky="ew")
             self._report_provenance[label] = value
         grid.bind("<Configure>", lambda e: self._wrap_report_labels(
@@ -102,7 +108,7 @@ class TabReportMixin:
     def _build_report_modules(self: ECGApp, page) -> None:
         card = self._report_card(page, 1, "What is in this report")
         table = ctk.CTkFrame(card, fg_color="transparent")
-        table.pack(fill="x", padx=SPACE_M)
+        table.pack(fill="x", padx=CARD_PAD)
         table.grid_columnconfigure(2, weight=1)
         for col, head in enumerate(("Module", "State", "Key result", "Include")):
             ctk.CTkLabel(table, text=head, font=FONT_SMALL, text_color=MUTED, anchor="w",
@@ -112,7 +118,7 @@ class TabReportMixin:
         self._report_include_ticks: "dict[str, ctk.CTkCheckBox]" = {}
         for i, m in enumerate(REPORT_MODULES):
             row = 2 * i + 2
-            ctk.CTkFrame(table, height=1, fg_color=BORDER).grid(
+            ctk.CTkFrame(table, height=1, fg_color=BORDER if i == 0 else HAIRLINE).grid(
                 row=row - 1, column=0, columnspan=4, sticky="ew", pady=SPACE_XS)
             ctk.CTkLabel(table, text=m.label, font=FONT_CARD_TITLE, text_color=TEXT, anchor="nw",
                          height=20).grid(row=row, column=0, sticky="nw", padx=(0, SPACE_M))
@@ -133,23 +139,33 @@ class TabReportMixin:
             self._report_result_vals.values(), e.width, 330))
 
         bar = ctk.CTkFrame(card, fg_color="transparent")
-        bar.pack(fill="x", padx=SPACE_M, pady=(SPACE_M, SPACE_XS))
-        ctk.CTkButton(bar, text="Export Excel", command=self._export_excel, fg_color=BLUE,
-                      hover_color=BLUE_HOVER, text_color="white", font=FONT_BTN_PRIMARY,
-                      height=34, corner_radius=6).pack(side="left", padx=(0, SPACE_S))
+        bar.pack(fill="x", padx=CARD_PAD, pady=(CARD_PAD, SPACE_S))
+        ctk.CTkButton(
+            bar,
+            text="Export Excel",
+            command=self._export_excel,
+            **button_style("primary"),
+        ).pack(side="left", padx=(0, SPACE_M))
         for text, command in (("GraphPad Prism", self._export_prism),
                               ("PDF report", self._export_pdf_report),
                               ("Copy text", self._copy_report),
                               ("Save .txt", self._save_report_txt)):
-            ctk.CTkButton(bar, text=text, command=command, fg_color=BORDER, hover_color=BORDER2,
-                          text_color=TEXT, font=FONT_BTN_SEC, height=34, width=96,
-                          corner_radius=6).pack(side="left", padx=(0, SPACE_S))
+            ctk.CTkButton(
+                bar,
+                text=text,
+                command=command,
+                width=0,
+                **button_style("secondary"),
+            ).pack(side="left", padx=(0, SPACE_M))
         # The optional exports (the right panel's EXPORTS held them): one
         # click further, the three above being the ones a report needs.
         self.btn_report_more = ctk.CTkButton(
-            bar, text="More ▾", command=self._toggle_report_more, fg_color=CARD,
-            hover_color=BORDER, text_color=TEXT, border_width=1, border_color=BORDER2,
-            font=FONT_BTN_SEC, height=34, width=80, corner_radius=6)
+            bar,
+            text="More ▾",
+            command=self._toggle_report_more,
+            width=80,
+            **button_style("secondary"),
+        )
         self.btn_report_more.pack(side="left")
         self._bind_hover_tip(self.btn_report_more,
                              "RR intervals CSV, figures (PNG), everything (ZIP), events PDF")

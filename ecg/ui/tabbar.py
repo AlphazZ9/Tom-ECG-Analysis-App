@@ -15,8 +15,8 @@ import customtkinter as ctk  # type: ignore[import-untyped]
 
 from ecg.ui.freshness import COMPUTING, NOT_COMPUTED, OUT_OF_DATE, UP_TO_DATE
 from ecg.ui.theme import (
-    THEME, PANEL, BORDER, TEXT, MUTED, BLUE, GREEN, ORANGE,
-    SPACE_XS, SPACE_S, SPACE_M, FONT_LABEL, FONT_CARD_TITLE, FONT_HINT,
+    THEME, PANEL, BG, BORDER, TEXT, MUTED, BLUE, GREEN, ORANGE, ACCENT_TEXT, TAB_H,
+    SPACE_XS, SPACE_S, SPACE_M, FONT_BODY, FONT_CARD_TITLE, FONT_HINT,
 )
 
 STATE_GLYPHS = {UP_TO_DATE: "●", OUT_OF_DATE: "◆", NOT_COMPUTED: "○", COMPUTING: "◐"}
@@ -41,17 +41,19 @@ class TabBar(ctk.CTkFrame):
         self._current: "Optional[str]" = None
         self._hint: "Optional[tk.Label]" = None
 
-        self._bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0, height=38)
-        self._bar.pack(side="top", fill="x")
+        self._bar = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0,
+                                 height=int(round(TAB_H * THEME.font_scale)))
+        self._bar.pack(side="top", fill="x", padx=0)
         self._bar.pack_propagate(False)
         ctk.CTkFrame(self, height=1, fg_color=BORDER, corner_radius=0).pack(side="top", fill="x")
-        self._body = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=0)
+        # The page under the tabs is the mockup's grey: cards stand on it.
+        self._body = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
         self._body.pack(side="top", fill="both", expand=True)
         self._body.grid_rowconfigure(0, weight=1)
         self._body.grid_columnconfigure(0, weight=1)
 
         legend = ctk.CTkFrame(self._bar, fg_color="transparent")
-        legend.pack(side="right", padx=(SPACE_S, SPACE_M))
+        legend.pack(side="right", padx=(SPACE_S, 24))
         for state in LEGEND_ORDER:
             ctk.CTkLabel(legend, text=STATE_GLYPHS[state], font=FONT_HINT, width=0,
                          text_color=state_color(state)).pack(side="left", padx=(SPACE_S, SPACE_XS))
@@ -63,17 +65,19 @@ class TabBar(ctk.CTkFrame):
     def add(self, name: str) -> ctk.CTkFrame:
         if name in self._frames:
             raise ValueError(f"tab {name!r} already exists")
-        self._frames[name] = ctk.CTkFrame(self._body, fg_color=PANEL, corner_radius=0)
+        self._frames[name] = ctk.CTkFrame(self._body, fg_color=BG, corner_radius=0)
 
+        # The mockup's tab head: 16 px each side, 4 px between heads, the
+        # first one 16 px from the window edge.
         head = ctk.CTkFrame(self._bar, fg_color="transparent", corner_radius=0)
-        head.pack(side="left", fill="y", padx=(SPACE_S, 0))
+        head.pack(side="left", fill="y", padx=(16 if not self._heads else 4, 0))
         row = ctk.CTkFrame(head, fg_color="transparent", corner_radius=0)
-        row.pack(side="top", fill="both", expand=True, padx=SPACE_S)
+        row.pack(side="top", fill="both", expand=True, padx=16)
         # width=0: a CTkLabel otherwise reserves 140 px, whatever its text.
         glyph = ctk.CTkLabel(row, text=STATE_GLYPHS[NOT_COMPUTED], font=FONT_HINT, width=0,
                              text_color=state_color(NOT_COMPUTED))
-        glyph.pack(side="left", padx=(0, SPACE_XS))
-        label = ctk.CTkLabel(row, text=name, font=FONT_LABEL, text_color=TEXT, width=0)
+        glyph.pack(side="left", padx=(0, SPACE_M))
+        label = ctk.CTkLabel(row, text=name, font=FONT_BODY, text_color=TEXT, width=0)
         label.pack(side="left")
         # width=1: a CTkFrame otherwise holds its parent at 200 px.
         line = ctk.CTkFrame(head, width=1, height=3, fg_color=PANEL, corner_radius=0)
@@ -161,6 +165,6 @@ class TabBar(ctk.CTkFrame):
 
     def _draw_head(self, name: str, selected: bool) -> None:
         head = self._heads[name]
-        head["label"].configure(font=FONT_CARD_TITLE if selected else FONT_LABEL,
-                                text_color=BLUE if selected else TEXT)
+        head["label"].configure(font=FONT_CARD_TITLE if selected else FONT_BODY,
+                                text_color=ACCENT_TEXT if selected else TEXT)
         head["line"].configure(fg_color=BLUE if selected else PANEL)

@@ -27,6 +27,7 @@ from ecg.core.ml_detector import detect_peaks_ml, MLPeakModel
 from ecg.ui.theme import (
     BLUE, BORDER, BORDER2, GREEN, LIGHT, MUTED, ORANGE, ORANGE_DEEP, RED,
 )
+from ecg.ui.theme import toggle_style
 from ecg.ui.dialogs import MethodAgreementDialog
 
 if TYPE_CHECKING:
@@ -48,10 +49,9 @@ class DetectionController:
                 btn = getattr(self.app, attr)
                 key = "undo" if "undo" in attr else "redo"
                 sym = "↩" if key == "undo" else "↪"
+                self.app._set_btn_enabled(btn, bool(n), "secondary")
                 btn.configure(
-                    state="normal" if n else "disabled",
-                    text=f"{sym} {key.title()} ({n})" if n else f"{sym} {key.title()}",
-                )
+                    text=f"{sym} {key.title()} ({n})" if n else f"{sym} {key.title()}")
             except Exception as e:
                 log.debug("undo/redo button configure failed: %s", e)
 
@@ -343,25 +343,17 @@ class DetectionController:
         """Toggle the click-to-exclude edit mode on/off."""
         self.app.detection.edit_mode = not self.app.detection.edit_mode
         if self.app.detection.edit_mode:
-            self.app.btn_edit_mode.configure(
-                fg_color=ORANGE, hover_color=ORANGE_DEEP,
-                text_color="white", text="Edit Mode ON",
-            )
+            self.app.btn_edit_mode.configure(text="Edit Mode ON", **toggle_style(True, warn=True))
             self.app.lbl_edit_hint.pack(side="left", padx=(4, 0))  # SPACE_S in app.py
         else:
-            self.app.btn_edit_mode.configure(
-                fg_color=BORDER, hover_color=BORDER2,
-                text_color=MUTED, text="Edit Peaks",
-            )
+            self.app.btn_edit_mode.configure(text="Edit Peaks", **toggle_style(False))
             self.app.lbl_edit_hint.pack_forget()
             # Also turn off free placement when leaving edit mode
             if self.app.detection.edit_free_placement:
                 self.app.detection.edit_free_placement = False
                 try:
                     self.app.btn_free_placement.configure(
-                        fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                        text="Free Placement",
-                    )
+                        text="Free Placement", **toggle_style(False))
                 except Exception:
                     pass
         if self.app.signal.filtered is not None:
@@ -379,17 +371,12 @@ class DetectionController:
         self.app.detection.edit_free_placement = not self.app.detection.edit_free_placement
         if self.app.detection.edit_free_placement:
             self.app.btn_free_placement.configure(
-                fg_color=ORANGE, hover_color=ORANGE_DEEP,
-                text_color="white", text="Free Placement ON",
-            )
+                text="Free Placement ON", **toggle_style(True, warn=True))
             self.app._set_status(
                 "Free Placement ON — R-click places a peak at the exact click position, "
                 "no snapping, no proximity guard.", ORANGE)
         else:
-            self.app.btn_free_placement.configure(
-                fg_color=BORDER, hover_color=BORDER2,
-                text_color=MUTED, text="Free Placement",
-            )
+            self.app.btn_free_placement.configure(text="Free Placement", **toggle_style(False))
             self.app._set_status("Free Placement OFF — normal proximity guard restored.", MUTED)
 
     def clear_manual_exclusions(self) -> None:

@@ -57,6 +57,7 @@ from ecg.ui.theme import (
     FONT_SMALL,
     SPACE_XS, SPACE_S, SPACE_L,
 )
+from ecg.ui.theme import toggle_style
 from ecg.ui.freshness import recorded_rr_bounds
 from ecg.ui.plots import style_axes
 from ecg.ui.tab_keys import MODE_EPOCHS, MODE_SLIDING, TAB_EVENTS, TAB_TIME_COURSE
@@ -1078,16 +1079,10 @@ class AnalysisController:
     def sync_arr_edit_btn(self) -> None:
         """The button and hint follow the mode, also on a rebuilt tab."""
         if self.app.analysis.arr_edit_mode:
-            self.app.btn_arr_edit.configure(
-                fg_color=ORANGE, hover_color=ORANGE_DEEP,
-                text_color="white", text="Edit Mode ON",
-            )
+            self.app.btn_arr_edit.configure(text="Edit Mode ON", **toggle_style(True, warn=True))
             self.app.lbl_arr_edit_hint.pack(side="left", padx=(SPACE_S, 0))
         else:
-            self.app.btn_arr_edit.configure(
-                fg_color=BORDER, hover_color=BORDER2,
-                text_color=MUTED, text="Edit peaks here",
-            )
+            self.app.btn_arr_edit.configure(text="Edit peaks here", **toggle_style(False))
             self.app.lbl_arr_edit_hint.pack_forget()
 
     def on_arr_detail_click(self, event) -> None:

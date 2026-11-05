@@ -34,6 +34,10 @@ from ecg.ui.theme import (
     SPACE_XS, SPACE_S, SPACE_M, SPACE_L, FONT_LABEL, FONT_SMALL,
     FONT_MONO, FONT_BTN_SEC, FONT_SIDEBAR_HDR, FONT_HINT,
 )
+from ecg.ui.theme import card_style, CARD_PAD, CARD_RADIUS, PAGE_PAD_X, PAGE_PAD_Y, PAGE_GAP
+from ecg.ui.theme import combo_style, input_style
+from ecg.ui.theme import button_style
+from ecg.ui.widgets import PillGroup
 
 # Mixin of ECGApp: `self: ECGApp` shows pyright the whole app surface, so a
 # typo in self.xxx is reported. It is deliberately not a supertype of this
@@ -66,8 +70,9 @@ class TabTimeCourseMixin:
 
         # ── Row 0: out-of-date banner, shown by _refresh_time_banner ──────
         self._time_banner = ctk.CTkFrame(t, fg_color=CARD, border_color=ORANGE,
-                                         border_width=1, corner_radius=6)
-        self._time_banner.grid(row=0, column=0, sticky="ew", padx=SPACE_M, pady=(SPACE_S, 0))
+                                         border_width=1, corner_radius=CARD_RADIUS)
+        self._time_banner.grid(row=0, column=0, sticky="ew", padx=PAGE_PAD_X,
+                               pady=(PAGE_PAD_Y, 0))
         self._time_banner.grid_columnconfigure(1, weight=1)
         # The diamond is the out-of-date glyph of the tab bar.
         ctk.CTkLabel(self._time_banner, text="◆", font=FONT_LABEL, text_color=ORANGE,
@@ -77,37 +82,40 @@ class TabTimeCourseMixin:
             anchor="w", justify="left", wraplength=int(1000 * THEME.font_scale))
         self._time_banner_text.grid(row=0, column=1, sticky="ew", pady=SPACE_XS)
         self.btn_time_recompute = ctk.CTkButton(
-            self._time_banner, text="⟳  Recompute", command=self._recompute_time_mode,
-            fg_color=BLUE, hover_color=BLUE_DEEP, text_color="white",
-            font=FONT_BTN_SEC, height=28, corner_radius=5)
+            self._time_banner,
+            text="⟳  Recompute",
+            command=self._recompute_time_mode,
+            **button_style("primary"),
+        )
         self.btn_time_recompute.grid(row=0, column=2, padx=SPACE_M, pady=SPACE_XS)
         self._time_banner.grid_remove()
 
         # ── Row 1: mode selector ──────────────────────────────────────────
-        seg_bar = ctk.CTkFrame(t, fg_color=PANEL, corner_radius=0)
+        seg_bar = ctk.CTkFrame(t, fg_color="transparent", corner_radius=0)
         seg_bar.grid(row=1, column=0, sticky="ew")
-        self._time_seg = ctk.CTkSegmentedButton(
-            seg_bar, values=list(TIME_COURSE_MODES), font=FONT_SMALL,
-            fg_color=PANEL, selected_color=BLUE, selected_hover_color=BLUE_HOVER,
-            unselected_color=CARD, unselected_hover_color=BORDER,
-            text_color=TEXT, text_color_disabled=MUTED,
-            command=self._show_time_mode)
-        self._time_seg.pack(padx=SPACE_M, pady=SPACE_S, anchor="w")  # type: ignore[union-attr]
+        self._time_seg = PillGroup(seg_bar, list(TIME_COURSE_MODES), command=self._show_time_mode)
+        self._time_seg.pack(padx=PAGE_PAD_X, pady=(PAGE_PAD_Y, PAGE_GAP), anchor="w")  # type: ignore[union-attr]
 
         # ── Row 2: one frame per mode ─────────────────────────────────────
+        # One card per mode (the mockup's card on the grey page); the views
+        # build inside it, 8 px in from their own SPACE_M margins.
         content = ctk.CTkFrame(t, fg_color="transparent")
-        content.grid(row=2, column=0, sticky="nsew")
+        content.grid(row=2, column=0, sticky="nsew", padx=PAGE_PAD_X, pady=(0, PAGE_PAD_Y))
         content.grid_rowconfigure(0, weight=1)
         content.grid_columnconfigure(0, weight=1)
         self._time_frames = {}
+        inner = {}
         for name in TIME_COURSE_MODES:
-            f = ctk.CTkFrame(content, fg_color="transparent")
+            f = ctk.CTkFrame(content, **card_style())
             f.grid(row=0, column=0, sticky="nsew")
             self._time_frames[name] = f
-        self._build_time_view_epochs(self._time_frames[MODE_EPOCHS])
-        self._build_time_view_sliding(self._time_frames[MODE_SLIDING])
-        self._build_time_view_autonomic(self._time_frames[MODE_AUTONOMIC])
-        self._build_time_view_event_locked(self._time_frames[MODE_EVENT_LOCKED])
+            inner[name] = ctk.CTkFrame(f, fg_color="transparent")
+            inner[name].pack(fill="both", expand=True, padx=CARD_PAD - SPACE_M,
+                             pady=CARD_PAD - SPACE_M)
+        self._build_time_view_epochs(inner[MODE_EPOCHS])
+        self._build_time_view_sliding(inner[MODE_SLIDING])
+        self._build_time_view_autonomic(inner[MODE_AUTONOMIC])
+        self._build_time_view_event_locked(inner[MODE_EVENT_LOCKED])
 
         # The mode in use before a UI rebuild (theme toggle) stays.
         self._show_time_mode(self.ui.time_course_mode)
@@ -186,16 +194,18 @@ class TabTimeCourseMixin:
 
     def _windowed_entry(self: ECGApp, bar, label: str, value: str) -> ctk.CTkEntry:
         ctk.CTkLabel(bar, text=label, font=FONT_SMALL, text_color=MUTED).pack(side="left")
-        ent = ctk.CTkEntry(bar, width=58, height=28, font=FONT_LABEL, fg_color=BG,
-                           border_color=BORDER2, text_color=TEXT)
+        ent = ctk.CTkEntry(bar, width=58, **input_style())
         ent.insert(0, value)
         ent.pack(side="left", padx=(SPACE_S, SPACE_L))
         return ent
 
     def _windowed_compute_button(self: ECGApp, bar, command) -> ctk.CTkButton:
-        btn = ctk.CTkButton(bar, text="⟳  Compute", command=command,
-                            fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
-                            font=FONT_BTN_SEC, height=28, corner_radius=5)
+        btn = ctk.CTkButton(
+            bar,
+            text="⟳  Compute",
+            command=command,
+            **button_style("primary"),
+        )
         btn.pack(side="left")
         return btn
 
@@ -237,9 +247,13 @@ class TabTimeCourseMixin:
                              border_width=0, scrollbar_button_color=BORDER,
                              scrollbar_button_hover_color=BORDER2, height=130, wrap="none")
         box.grid(row=row + 3, column=0, sticky="ew", padx=SPACE_M, pady=(0, SPACE_S))
-        btn = ctk.CTkButton(bar, text="📋  Copy for Excel", height=24, font=FONT_SMALL,
-                            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                            corner_radius=5, width=160, command=lambda: self._copy_tsv(box))
+        btn = ctk.CTkButton(
+            bar,
+            text="📋  Copy for Excel",
+            width=160,
+            command=lambda: self._copy_tsv(box),
+            **button_style("secondary"),
+        )
         btn.pack(side="right", padx=(0, SPACE_XS))
         return btn, box
 
@@ -317,8 +331,7 @@ class TabTimeCourseMixin:
         def _entry(label: str, value: float, width: int, tip: str) -> ctk.CTkEntry:
             ctk.CTkLabel(bar, text=label, font=FONT_SMALL,
                          text_color=MUTED).pack(side="left")
-            ent = ctk.CTkEntry(bar, width=width, height=28, font=FONT_LABEL,
-                               fg_color=BG, border_color=BORDER2, text_color=TEXT)
+            ent = ctk.CTkEntry(bar, width=width, **input_style())
             ent.insert(0, format_param(value))
             ent.pack(side="left", padx=(SPACE_S, SPACE_L))
             self._bind_hover_tip(ent, tip)
@@ -341,11 +354,12 @@ class TabTimeCourseMixin:
         ctk.CTkLabel(bar, text="Method:", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left")
         self.cb_auto_method = ctk.CTkComboBox(
-            bar, width=int(330 * THEME.font_scale), height=28, font=FONT_LABEL,
-            fg_color=BG, border_color=BORDER2, button_color=BORDER2,
-            text_color=TEXT, dropdown_fg_color=BG, dropdown_text_color=TEXT,
-            values=list(COV_METHODS.values()), state="readonly",
+            bar,
+            width=int(330 * THEME.font_scale),
+            values=list(COV_METHODS.values()),
+            state="readonly",
             command=self._on_autonomic_method_change,
+            **combo_style(),
         )
         self.cb_auto_method.set(COV_METHODS[p["method"]])
         self.cb_auto_method.pack(side="left", padx=(SPACE_S, SPACE_L))
@@ -380,9 +394,11 @@ class TabTimeCourseMixin:
             "Slow: about 30 s per hour of recording.")
 
         self.btn_auto_compute = ctk.CTkButton(
-            run, text="⟳  Compute", command=self._compute_autonomic,
-            fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
-            font=FONT_BTN_SEC, height=28, corner_radius=5)
+            run,
+            text="⟳  Compute",
+            command=self._compute_autonomic,
+            **button_style("primary"),
+        )
         self.btn_auto_compute.pack(side="left")
         self._bind_hover_tip(
             self.btn_auto_compute,
@@ -419,9 +435,11 @@ class TabTimeCourseMixin:
             cb.pack(side="left", padx=(SPACE_S, 0))
             self._roll_metrics[metric] = cb
         btn_lw = ctk.CTkButton(
-            article_bar, text="⟳  Compute in Sliding", command=self._compute_rolling_hrv,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            font=FONT_BTN_SEC, height=26, corner_radius=5)
+            article_bar,
+            text="⟳  Compute in Sliding",
+            command=self._compute_rolling_hrv,
+            **button_style("secondary"),
+        )
         btn_lw.pack(side="left", padx=(SPACE_M, 0))
         self._bind_hover_tip(
             btn_lw,
@@ -447,10 +465,12 @@ class TabTimeCourseMixin:
         ctk.CTkLabel(hdr, text="RECORDING-LEVEL VALUES", font=FONT_SIDEBAR_HDR,
                      text_color=MUTED).pack(side="left")
         btn_copy = ctk.CTkButton(
-            hdr, text="📋  Copy for Excel", height=24,
-            font=FONT_SMALL, fg_color=BORDER, hover_color=BORDER2,
-            text_color=MUTED, corner_radius=5, width=160,
-            command=lambda: self._copy_tsv(self.txt_autonomic))
+            hdr,
+            text="📋  Copy for Excel",
+            width=160,
+            command=lambda: self._copy_tsv(self.txt_autonomic),
+            **button_style("secondary"),
+        )
         btn_copy.pack(side="right", padx=(0, SPACE_XS))
         self._bind_hover_tip(
             btn_copy,
@@ -465,9 +485,11 @@ class TabTimeCourseMixin:
 
     def _calibrate_button(self: ECGApp, parent) -> ctk.CTkButton:
         btn = ctk.CTkButton(
-            parent, text="⚖  Calibrate ks/kp…", command=self._open_calibration,
-            fg_color=PURPLE, hover_color=PURPLE_DARK, text_color="white",
-            font=FONT_BTN_SEC, height=26, corner_radius=5)
+            parent,
+            text="⚖  Calibrate ks/kp…",
+            command=self._open_calibration,
+            **button_style("primary"),
+        )
         self._bind_hover_tip(
             btn,
             "Cohort calibration of the gains from the registry: Wilcoxon Z(k) "
@@ -495,10 +517,12 @@ class TabTimeCourseMixin:
                      text_color=MUTED).pack(side="left")
         labels = annotation_label_options(self.analysis.annotations)
         self.cb_evt_label = ctk.CTkComboBox(
-            bar, width=int(190 * THEME.font_scale), height=28, font=FONT_LABEL,
-            fg_color=BG, border_color=BORDER2, button_color=BORDER2,
-            text_color=TEXT, dropdown_fg_color=BG, dropdown_text_color=TEXT,
-            values=labels, state="readonly")
+            bar,
+            width=int(190 * THEME.font_scale),
+            values=labels,
+            state="readonly",
+            **combo_style(),
+        )
         self.cb_evt_label.set(p["label"] if p["label"] in labels else labels[0])
         self.cb_evt_label.pack(side="left", padx=(SPACE_S, SPACE_L))
         self._bind_hover_tip(
@@ -510,8 +534,7 @@ class TabTimeCourseMixin:
         def _entry(label: str, value: float, tip: str) -> ctk.CTkEntry:
             ctk.CTkLabel(bar, text=label, font=FONT_SMALL,
                          text_color=MUTED).pack(side="left")
-            ent = ctk.CTkEntry(bar, width=52, height=28, font=FONT_LABEL,
-                               fg_color=BG, border_color=BORDER2, text_color=TEXT)
+            ent = ctk.CTkEntry(bar, width=52, **input_style())
             ent.insert(0, format_param(value))
             ent.pack(side="left", padx=(SPACE_S, SPACE_L))
             self._bind_hover_tip(ent, tip)
@@ -526,9 +549,11 @@ class TabTimeCourseMixin:
             "Window after each onset, s (the onset sample belongs to it).")
 
         self.btn_evt_compute = ctk.CTkButton(
-            bar, text="⟳  Compute event-locked", command=self._compute_event_locked,
-            fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
-            font=FONT_BTN_SEC, height=28, corner_radius=5)
+            bar,
+            text="⟳  Compute event-locked",
+            command=self._compute_event_locked,
+            **button_style("primary"),
+        )
         self.btn_evt_compute.pack(side="left", padx=(0, SPACE_L))
         self._bind_hover_tip(
             self.btn_evt_compute,
@@ -592,9 +617,11 @@ class TabTimeCourseMixin:
         bar2 = ctk.CTkFrame(right, fg_color="transparent")
         bar2.grid(row=3, column=0, sticky="ew")
         btn_save = ctk.CTkButton(
-            bar2, text="💾  Save to cohort registry", command=self._save_event_locked,
-            fg_color=GREEN_DARK, hover_color=GREEN, text_color="white",
-            font=FONT_BTN_SEC, height=26, corner_radius=5)
+            bar2,
+            text="💾  Save to cohort registry",
+            command=self._save_event_locked,
+            **button_style("primary"),
+        )
         btn_save.pack(side="left", padx=(0, SPACE_S))
         self._bind_hover_tip(
             btn_save,
@@ -604,9 +631,12 @@ class TabTimeCourseMixin:
             "With the 'All' filter, this recording's earlier events of the same "
             "method and window are replaced.")
         btn_csv = ctk.CTkButton(
-            bar2, text="Export CSV…", command=self._export_event_locked_csv,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            font=FONT_BTN_SEC, height=26, corner_radius=5, width=110)
+            bar2,
+            text="Export CSV…",
+            command=self._export_event_locked_csv,
+            width=110,
+            **button_style("secondary"),
+        )
         btn_csv.pack(side="left", padx=(0, SPACE_S))
         self._bind_hover_tip(btn_csv, "Save the per-event table as CSV (one line per event)")
         bar3 = ctk.CTkFrame(right, fg_color="transparent")
@@ -615,15 +645,11 @@ class TabTimeCourseMixin:
         # Not the same calculation as the means above: two windows chosen by
         # hand, with their own block statistics and Excel export.
         btn_segments = ctk.CTkButton(
-            bar3, text="⚖  Compare Segments…", command=self._open_compare_segments,
-            # Dark mode lightens TEAL for legibility against the dark
-            # background (_adapt_for_mode in theme.py), which then leaves
-            # white label text well under WCAG contrast on the same fill --
-            # a dark label reads clearly against the lightened dark-mode
-            # TEAL instead.
-            fg_color=TEAL, hover_color=TEAL_DARK,
-            text_color=(BG if THEME.is_dark else "white"),
-            font=FONT_BTN_SEC, height=26, corner_radius=5)
+            bar3,
+            text="⚖  Compare Segments…",
+            command=self._open_compare_segments,
+            **button_style("primary"),
+        )
         btn_segments.pack(side="left")
         self._bind_hover_tip(
             btn_segments,
@@ -640,10 +666,12 @@ class TabTimeCourseMixin:
             font=FONT_BTN_SEC, height=24, corner_radius=6)
         self.btn_evt_details.pack(side="left")
         btn_copy = ctk.CTkButton(
-            hdr, text="📋  Copy for Excel", height=24,
-            font=FONT_SMALL, fg_color=BORDER, hover_color=BORDER2,
-            text_color=MUTED, corner_radius=5, width=160,
-            command=lambda: self._copy_tsv(self.txt_event_locked))
+            hdr,
+            text="📋  Copy for Excel",
+            width=160,
+            command=lambda: self._copy_tsv(self.txt_event_locked),
+            **button_style("secondary"),
+        )
         btn_copy.pack(side="right", padx=(0, SPACE_XS))
         self._bind_hover_tip(
             btn_copy,

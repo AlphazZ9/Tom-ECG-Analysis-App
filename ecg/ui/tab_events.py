@@ -18,6 +18,11 @@ from ecg.ui.theme import (
     FONT_KPI_LABEL, FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR, FONT_HINT,
     FONT_SUBSECTION,
 )
+from ecg.ui.theme import (
+    card_style, HAIRLINE, FONT_SECTION_HDR, PAGE_PAD_X, PAGE_PAD_Y, PAGE_GAP, CARD_PAD,
+)
+from ecg.ui.theme import input_style
+from ecg.ui.theme import button_style
 from ecg.ui.plots import CanvasSlot
 from ecg.ui.tab_keys import TAB_EVENTS
 
@@ -37,23 +42,26 @@ class TabEventsMixin:
     def _build_tab_arrhythmias(self: ECGApp) -> None:
         """Build the Events tab: bar and readout, ribbon, event cards (left) +
         ECG zoom (right)."""
-        t = self.tabs.tab(TAB_EVENTS)
-        t.grid_rowconfigure(3, weight=1)
+        page = self.tabs.tab(TAB_EVENTS)
+        page.grid_rowconfigure(1, weight=1)
+        page.grid_columnconfigure(0, weight=1)
+        # The mockup's cards: settings, readout and ribbon in one, then the
+        # event list and the event's ECG side by side.
+        top = ctk.CTkFrame(page, **card_style())
+        top.grid(row=0, column=0, sticky="ew", padx=PAGE_PAD_X, pady=(PAGE_PAD_Y, PAGE_GAP))
+        t = ctk.CTkFrame(top, fg_color="transparent")
+        t.pack(fill="x", padx=CARD_PAD - SPACE_S, pady=CARD_PAD - SPACE_S)
         t.grid_columnconfigure(0, weight=1)
 
         # ── Row 0 : Action bar ────────────────────────────────
         bar = ctk.CTkFrame(t, fg_color="transparent")
-        bar.grid(row=0, column=0, sticky="ew", padx=SPACE_M, pady=(SPACE_M, 0))
+        bar.grid(row=0, column=0, sticky="ew", padx=SPACE_S, pady=(0, 0))
 
         self.btn_run_arrhythmia = ctk.CTkButton(
-            bar, text="⚡  Classify events",
+            bar,
+            text="⚡  Classify events",
             command=self._run_arrhythmia_analysis,
-            # BLUE, not RED -- this only classifies/labels events, it deletes
-            # nothing, and RED is reserved for destructive actions elsewhere
-            # in the app (Clear Edits, etc.).
-            fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
-            font=FONT_BTN_PRIMARY, height=max(28, int(32 * THEME.font_scale)),
-            corner_radius=8,
+            **button_style("primary"),
         )
         self.btn_run_arrhythmia.pack(side="left")  # type: ignore[union-attr]
 
@@ -62,9 +70,7 @@ class TabEventsMixin:
         # has; a baseline before an annotation would be a new calculation.
         ctk.CTkLabel(bar, text="Baseline: first", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left", padx=(SPACE_L, SPACE_XS))
-        self.ent_arr_baseline = ctk.CTkEntry(
-            bar, width=48, height=28, font=FONT_LABEL,
-            fg_color=BG, border_color=BORDER2, text_color=TEXT)
+        self.ent_arr_baseline = ctk.CTkEntry(bar, width=48, **input_style())
         self.ent_arr_baseline.insert(0, "30")
         self.ent_arr_baseline.pack(side="left", padx=(0, SPACE_XS))
         _tip = ctk.CTkLabel(bar, text="s of the analysis window", font=FONT_SMALL,
@@ -81,18 +87,14 @@ class TabEventsMixin:
         # ── Brady/tachy threshold ──
         ctk.CTkLabel(bar, text="ΔHR threshold (%):", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left", padx=(0, SPACE_XS))
-        self.ent_arr_brady_pct = ctk.CTkEntry(
-            bar, width=44, height=28, font=FONT_LABEL,
-            fg_color=BG, border_color=BORDER2, text_color=TEXT)
+        self.ent_arr_brady_pct = ctk.CTkEntry(bar, width=44, **input_style())
         self.ent_arr_brady_pct.insert(0, "20")
         self.ent_arr_brady_pct.pack(side="left", padx=(0, SPACE_M))
 
         # ── Minimum beats ──
         ctk.CTkLabel(bar, text="Min run (beats):", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left", padx=(0, SPACE_XS))
-        self.ent_arr_min_beats = ctk.CTkEntry(
-            bar, width=44, height=28, font=FONT_LABEL,
-            fg_color=BG, border_color=BORDER2, text_color=TEXT)
+        self.ent_arr_min_beats = ctk.CTkEntry(bar, width=44, **input_style())
         self.ent_arr_min_beats.insert(0, "10")
         self.ent_arr_min_beats.pack(side="left", padx=(0, SPACE_M))
         self._bind_hover_tip(
@@ -101,15 +103,16 @@ class TabEventsMixin:
             "an event — premature beats (RR-based) and irregular runs use "
             "their own fixed thresholds and ignore this.")
 
-        ctk.CTkButton(bar, text="📋 Copy for Excel",
-                      command=self._copy_arrhythmia_tsv,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                      font=FONT_BTN_SEC, height=28, corner_radius=5,
-                      ).pack(side="right")
+        ctk.CTkButton(
+            bar,
+            text="📋 Copy for Excel",
+            command=self._copy_arrhythmia_tsv,
+            **button_style("secondary"),
+        ).pack(side="right")
 
         # ── Row 1 : What the events rest on ───────────────────
         info = ctk.CTkFrame(t, fg_color="transparent")
-        info.grid(row=1, column=0, sticky="ew", padx=SPACE_M, pady=(SPACE_XS, SPACE_XS))
+        info.grid(row=1, column=0, sticky="ew", padx=SPACE_S, pady=(SPACE_M, SPACE_S))
         self.lbl_arr_baseline = ctk.CTkLabel(
             info, text=self.analysis_ctrl.events_readout_text(self.analysis.arrhythmia_run),
             font=FONT_LABEL, text_color=TEXT, anchor="w", justify="left",
@@ -124,38 +127,40 @@ class TabEventsMixin:
             wraplength=int(1000 * THEME.font_scale), height=18)
 
         # ── Row 2 : Ribbon + RR series ────────────────────────
-        ribbon = tk.Frame(t, bg=PLOT["bg"], bd=0, highlightthickness=0,
+        ribbon = tk.Frame(t, bg=PLOT["bg"], bd=0, highlightthickness=1,
+                          highlightbackground=HAIRLINE,
                           height=int(_RIBBON_H * THEME.font_scale))
-        ribbon.grid(row=2, column=0, sticky="ew", padx=SPACE_S, pady=(0, SPACE_XS))
+        ribbon.grid(row=2, column=0, sticky="ew", padx=SPACE_S, pady=0)
         ribbon.pack_propagate(False)
         self._slots["arr_ribbon"] = CanvasSlot(ribbon, 14, 2.2, toolbar=False,
                                                placeholder="Click Classify events to display")
 
         # ── Row 3 : Split body ────────────────────────────────
-        body = tk.Frame(t, bg=BG, bd=0, highlightthickness=0)
-        body.grid(row=3, column=0, sticky="nsew", padx=SPACE_S, pady=(0, SPACE_S))
+        body = tk.Frame(page, bg=BG, bd=0, highlightthickness=0)
+        body.grid(row=1, column=0, sticky="nsew", padx=PAGE_PAD_X, pady=(0, PAGE_PAD_Y))
         body.grid_rowconfigure(0, weight=1)
         body.grid_columnconfigure(0, weight=0)   # event list — fixed
         body.grid_columnconfigure(1, weight=1)   # ECG viewer — elastic
 
         # ── Left : scrollable event list ─────────────────────
-        list_outer = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=6, width=280)
-        list_outer.grid(row=0, column=0, sticky="ns", padx=(0, SPACE_S))
+        list_outer = ctk.CTkFrame(body, width=300, **card_style())
+        list_outer.grid(row=0, column=0, sticky="ns", padx=(0, PAGE_GAP))
         list_outer.grid_propagate(False)
         list_outer.grid_rowconfigure(3, weight=1)
         list_outer.grid_columnconfigure(0, weight=1)
 
         self.lbl_arr_events_head = ctk.CTkLabel(
             list_outer, text="EVENTS",
-            font=FONT_SUBSECTION, text_color=MUTED, anchor="w")
-        self.lbl_arr_events_head.grid(row=0, column=0, sticky="ew", padx=SPACE_M, pady=(SPACE_S, SPACE_XS))
+            font=FONT_SECTION_HDR, text_color=MUTED, anchor="w")
+        self.lbl_arr_events_head.grid(row=0, column=0, sticky="ew", padx=CARD_PAD,
+                                      pady=(CARD_PAD - 4, SPACE_S))
         ctk.CTkLabel(
             list_outer,
             text=("ALERT = pause/premature run (≥3)  ·  WARNING = brady/tachy/AV-delay "
                   "run, premature couplet  ·  INFO = irregular run, isolated premature beat"),
             font=FONT_HINT, text_color=MUTED, anchor="w", justify="left",
-            wraplength=256,
-        ).grid(row=1, column=0, sticky="ew", padx=SPACE_M, pady=(0, SPACE_XS))
+            wraplength=300 - 2 * CARD_PAD,
+        ).grid(row=1, column=0, sticky="ew", padx=CARD_PAD, pady=(0, SPACE_XS))
         # Premature-beat counts / rates of the last classification
         # (AnalysisController.refresh_premature_label) -- derived from app
         # state, so a UI rebuild shows them again.
@@ -163,61 +168,70 @@ class TabEventsMixin:
             list_outer,
             text=self.analysis_ctrl.premature_summary_text(self.analysis.premature_summary),
             font=FONT_HINT, text_color=ORANGE, anchor="w", justify="left",
-            wraplength=256,
+            wraplength=300 - 2 * CARD_PAD,
         )
-        self.lbl_arr_premature.grid(row=2, column=0, sticky="ew", padx=SPACE_M, pady=(0, SPACE_XS))
+        self.lbl_arr_premature.grid(row=2, column=0, sticky="ew", padx=CARD_PAD, pady=(0, SPACE_XS))
 
         self._arr_event_scroll = ctk.CTkScrollableFrame(
             list_outer, fg_color="transparent",
             scrollbar_button_color=BORDER,
             scrollbar_button_hover_color=BORDER2,
         )
-        self._arr_event_scroll.grid(row=3, column=0, sticky="nsew", padx=SPACE_XS, pady=(0, SPACE_S))
+        self._arr_event_scroll.grid(row=3, column=0, sticky="nsew", padx=SPACE_S,
+                                    pady=(0, CARD_PAD - SPACE_S))
         self._arr_event_scroll.grid_columnconfigure(0, weight=1)
         self._arr_card_widgets = []
 
         # ── Right : ECG detail panel ──────────────────────────
-        right = tk.Frame(body, bg=BG, bd=0, highlightthickness=0)
-        right.grid(row=0, column=1, sticky="nsew")
+        right_card = ctk.CTkFrame(body, **card_style())
+        right_card.grid(row=0, column=1, sticky="nsew")
+        right = ctk.CTkFrame(right_card, fg_color="transparent")
+        right.pack(fill="both", expand=True, padx=CARD_PAD, pady=(CARD_PAD - 4, CARD_PAD))
         right.grid_rowconfigure(1, weight=1)
         right.grid_columnconfigure(0, weight=1)
 
         # Title of the event shown
-        tbar = ctk.CTkFrame(right, fg_color=PANEL, corner_radius=0)
-        tbar.grid(row=0, column=0, sticky="ew", padx=0, pady=(0, SPACE_XS))
+        tbar = ctk.CTkFrame(right, fg_color="transparent", corner_radius=0)
+        tbar.grid(row=0, column=0, sticky="ew", padx=0, pady=(0, SPACE_M))
         self.lbl_arr_event_title = ctk.CTkLabel(
             tbar, text="← Click on an event",
-            font=FONT_SIDEBAR_HDR, text_color=MUTED, anchor="w")
-        self.lbl_arr_event_title.pack(side="left", padx=SPACE_M, pady=SPACE_XS)  # type: ignore[union-attr]
+            font=FONT_SECTION_HDR, text_color=MUTED, anchor="w")
+        self.lbl_arr_event_title.pack(side="left")  # type: ignore[union-attr]
 
         # ECG canvas
-        ecg_frame = tk.Frame(right, bg=PLOT["bg"], bd=0, highlightthickness=0)
+        ecg_frame = tk.Frame(right, bg=PLOT["bg"], bd=0, highlightthickness=1,
+                             highlightbackground=HAIRLINE)
         ecg_frame.grid(row=1, column=0, sticky="nsew")
         self._slots["arr_detail"] = CanvasSlot(ecg_frame, 14, 5.0, toolbar=False,
                                                placeholder="Click on an event to zoom on its ECG")
 
         # Edit / nav controls bar
-        ebar = ctk.CTkFrame(right, fg_color=PANEL, corner_radius=0)
-        ebar.grid(row=2, column=0, sticky="ew", padx=0, pady=(SPACE_XS, 0))
+        ebar = ctk.CTkFrame(right, fg_color="transparent", corner_radius=0)
+        ebar.grid(row=2, column=0, sticky="ew", padx=0, pady=(SPACE_M, 0))
 
         self.btn_arr_prev_event = ctk.CTkButton(
-            ebar, text="Previous", width=76, height=28, font=FONT_SMALL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT, corner_radius=8,
+            ebar,
+            text="Previous",
+            width=76,
             command=lambda: self._arr_step_event(-1),
+            **button_style("secondary"),
         )
         self.btn_arr_prev_event.pack(side="left", padx=(SPACE_S, SPACE_XS), pady=SPACE_XS)
         self.btn_arr_next_event = ctk.CTkButton(
-            ebar, text="Next", width=76, height=28, font=FONT_SMALL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT, corner_radius=8,
+            ebar,
+            text="Next",
+            width=76,
             command=lambda: self._arr_step_event(+1),
+            **button_style("secondary"),
         )
         self.btn_arr_next_event.pack(side="left", padx=SPACE_XS)
 
         self.btn_arr_edit = ctk.CTkButton(
-            ebar, text="Edit peaks here", width=120, height=28, font=FONT_SMALL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-            corner_radius=8,
+            ebar,
+            text="Edit peaks here",
+            width=120,
             command=self._toggle_arr_edit_mode,
+            **button_style("secondary"),
         )
         self.btn_arr_edit.pack(side="left", padx=SPACE_XS)
 
@@ -231,22 +245,24 @@ class TabEventsMixin:
         # Pan: ← → buttons + window size
         # Packed from the right: last on screen first.
         self.btn_arr_next = ctk.CTkButton(
-            ebar, text="▶", width=32, height=26, font=FONT_SMALL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
+            ebar,
+            text="▶",
+            width=32,
             command=lambda: self._arr_navigate(+1),
+            **button_style("secondary"),
         )
         self.btn_arr_next.pack(side="right", padx=SPACE_XS)
         self.btn_arr_prev = ctk.CTkButton(
-            ebar, text="◀", width=32, height=26, font=FONT_SMALL,
-            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
+            ebar,
+            text="◀",
+            width=32,
             command=lambda: self._arr_navigate(-1),
+            **button_style("secondary"),
         )
         self.btn_arr_prev.pack(side="right", padx=SPACE_XS)
         self._bind_hover_tip(self.btn_arr_prev, "Move the ECG window back in time")
         self._bind_hover_tip(self.btn_arr_next, "Move the ECG window forward in time")
-        self.ent_arr_win = ctk.CTkEntry(
-            ebar, width=48, height=26, font=FONT_LABEL,
-            fg_color=BG, border_color=BORDER2, text_color=TEXT)
+        self.ent_arr_win = ctk.CTkEntry(ebar, width=48, **input_style())
         self.ent_arr_win.insert(0, "3")
         self.ent_arr_win.pack(side="right", padx=(0, SPACE_S))
         ctk.CTkLabel(ebar, text="Window (s):", font=FONT_SMALL,

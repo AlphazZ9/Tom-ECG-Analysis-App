@@ -27,7 +27,8 @@ from ecg.ui.freshness import COMPUTING, NOT_COMPUTED, OUT_OF_DATE, UP_TO_DATE, c
 from ecg.ui.tab_keys import TAB_DETECTION, TAB_MODULES, TAB_REPORT
 from ecg.ui.theme import (
     THEME, BG, CARD, BORDER, BORDER2, TEXT, MUTED, BLUE, ORANGE, PURPLE, PURPLE_DARK,
-    SPACE_XS, SPACE_S, SPACE_M, FONT_SMALL,
+    SPACE_XS, SPACE_S, SPACE_M, FONT_SMALL, STRIP_BG, ACCENT_TEXT, WARN_TEXT, STRIP_EDGE,
+    input_style,
 )
 
 # pyright: reportGeneralTypeIssues=false
@@ -199,12 +200,13 @@ class ContextStrip(tk.Frame):
     text (set_editor): the analysis window is edited in place."""
 
     def __init__(self, parent) -> None:
-        super().__init__(parent, bg=BG, bd=0, highlightthickness=0)
+        # The mockup's strip: pale blue, 8 px above and below, 24 px margins.
+        super().__init__(parent, bg=STRIP_BG, bd=0, highlightthickness=0)
         tk.Frame(self, height=1, bg=BORDER).pack(side="bottom", fill="x")
-        self._times = tk.Label(self, text="", bg=BG, fg=MUTED, font=_font())
-        self._times.pack(side="right", anchor="n", padx=(SPACE_S, SPACE_M), pady=2)
-        self._flow = tk.Frame(self, bg=BG, height=_ROW_H, bd=0, highlightthickness=0)
-        self._flow.pack(side="left", fill="x", expand=True, padx=(SPACE_M, 0), pady=2)
+        self._times = tk.Label(self, text="", bg=STRIP_BG, fg=MUTED, font=_font())
+        self._times.pack(side="right", anchor="n", padx=(SPACE_S, 24), pady=8)
+        self._flow = tk.Frame(self, bg=STRIP_BG, height=_ROW_H, bd=0, highlightthickness=0)
+        self._flow.pack(side="left", fill="x", expand=True, padx=(24, 0), pady=8)
         self._flow.bind("<Configure>", lambda _e: self._reflow())
         self._labels: "dict[str, tk.Label]" = {}
         self._editors: "dict[str, tk.Misc]" = {}
@@ -226,7 +228,7 @@ class ContextStrip(tk.Frame):
 
     @staticmethod
     def _color(tone: str) -> str:
-        return {TONE_HEAD: BLUE, TONE_WARN: ORANGE, TONE_MUTED: MUTED}.get(tone, TEXT)
+        return {TONE_HEAD: ACCENT_TEXT, TONE_WARN: WARN_TEXT, TONE_MUTED: MUTED}.get(tone, TEXT)
 
     def show(self, fields: "list[StripField]", times: str) -> None:
         if fields != self._fields:
@@ -240,7 +242,7 @@ class ContextStrip(tk.Frame):
                     continue
                 lbl = self._labels.get(f.key)
                 if lbl is None:
-                    lbl = self._labels[f.key] = tk.Label(self._flow, bg=BG, bd=0)
+                    lbl = self._labels[f.key] = tk.Label(self._flow, bg=STRIP_BG, bd=0)
                 lbl.configure(text=f.text, fg=self._color(f.tone), font=_font(f.tone == TONE_HEAD))
             self._reflow()
         if self._times.cget("text") != times:
@@ -264,10 +266,10 @@ class ContextStrip(tk.Frame):
             lbl = self._item(f.key)
             w = lbl.winfo_reqwidth()
             if x and x + w > width:
-                x, y = 0, y + row_h
+                x, y = 0, y + row_h + 6         # 6 px between wrapped rows
             lbl.place(x=x, y=y, height=row_h)
-            x += w + SPACE_M + SPACE_S
-        if int(self._flow.cget("height")) != y + row_h:
+            x += w + 20                     # the mockup's 20 px between fields
+        if int(self._flow.cget("height")) != y + row_h:  # noqa: SIM102
             self._flow.configure(height=y + row_h)
 
 
@@ -287,27 +289,29 @@ class ContextStripMixin:
         """The analysis window, edited where it is stated: From / To (empty =
         signal start / end), Apply, Full. Same entries and handlers as the
         sidebar's Analysis window had (ent_analysis_t0/t1, Apply / Full)."""
-        ed = tk.Frame(strip.flow, bg=BG, bd=0, highlightthickness=0)
-        tk.Label(ed, text="Window", bg=BG, fg=TEXT, font=_font()).pack(side="left",
-                                                                     padx=(0, SPACE_S))
-        entry = dict(width=58, height=24, font=FONT_SMALL, fg_color=CARD, border_color=BORDER2,
-                     text_color=TEXT, corner_radius=4)
+        ed = tk.Frame(strip.flow, bg=STRIP_BG, bd=0, highlightthickness=0)
+        tk.Label(ed, text="Window", bg=STRIP_BG, fg=TEXT, font=_font()).pack(side="left",
+                                                                           padx=(0, 6))
+        # The mockup's compact bold entries with a blue edge.
+        entry = dict(width=58, **input_style(strip=True))
         self.ent_analysis_t0 = ctk.CTkEntry(ed, placeholder_text="0", **entry)
         self.ent_analysis_t0.pack(side="left")
-        tk.Label(ed, text="–", bg=BG, fg=TEXT, font=_font()).pack(side="left", padx=SPACE_XS)
+        tk.Label(ed, text="–", bg=STRIP_BG, fg=TEXT, font=_font()).pack(side="left", padx=SPACE_XS)
         self.ent_analysis_t1 = ctk.CTkEntry(ed, placeholder_text="end", **entry)
         self.ent_analysis_t1.pack(side="left")
-        tk.Label(ed, text="s", bg=BG, fg=TEXT, font=_font()).pack(side="left", padx=(SPACE_XS, SPACE_S))
+        tk.Label(ed, text="s", bg=STRIP_BG, fg=TEXT, font=_font()).pack(side="left",
+                                                                      padx=(SPACE_XS, 6))
         for ent in (self.ent_analysis_t0, self.ent_analysis_t1):
             ent.bind("<Return>", lambda _e: self._apply_analysis_window())
             self._bind_hover_tip(ent, "Analysis window (s): empty = signal start / end. "
                                       "Enter or Apply, then Analyze.")
-        button = dict(height=24, font=FONT_SMALL, corner_radius=4)
-        ctk.CTkButton(ed, text="Apply", width=52, fg_color=PURPLE, hover_color=PURPLE_DARK,
-                      text_color="white", command=self._apply_analysis_window,
-                      **button).pack(side="left", padx=(0, SPACE_XS))
-        btn_full = ctk.CTkButton(ed, text="Full", width=44, fg_color=CARD, hover_color=BORDER,
-                                 text_color=TEXT, border_width=1, border_color=BORDER2,
+        # Apply and Full: the strip's small white buttons with blue text.
+        button = dict(height=entry["height"], font=_font(), corner_radius=4, fg_color=CARD,
+                      hover_color=STRIP_BG, text_color=ACCENT_TEXT, border_width=1,
+                      border_color=STRIP_EDGE)
+        ctk.CTkButton(ed, text="Apply", width=52, command=self._apply_analysis_window,
+                      **button).pack(side="left", padx=(0, 6))
+        btn_full = ctk.CTkButton(ed, text="Full", width=44,
                                  command=self._reset_analysis_window, **button)
         btn_full.pack(side="left")
         self._bind_hover_tip(btn_full, "Analysis window = the whole signal")

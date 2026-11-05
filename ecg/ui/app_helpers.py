@@ -19,7 +19,8 @@ from ecg.ui.theme import (
     COLOR_PRIMARY_HOVER, COLOR_SUCCESS, COLOR_SUCCESS_HOVER, COLOR_WARNING,
     COLOR_WARNING_HOVER, COLOR_DANGER, COLOR_DANGER_HOVER, COLOR_SECONDARY,
     COLOR_SECONDARY_HOVER, SPACE_XS, SPACE_S, SPACE_M, FONT_LABEL, FONT_SMALL,
-    FONT_BODY, FONT_BTN_PRIMARY, FONT_BTN_SEC,
+    FONT_BODY, FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_KPI_LABEL, CARD, button_style,
+    input_style,
 )
 
 # Mixin of ECGApp: `self: ECGApp` shows pyright the whole app surface, so a
@@ -42,10 +43,9 @@ class HelpersMixin:
 
     def _sidebar_entry(self: ECGApp, parent, label: str, attr: str, default: str, pad: dict) -> None:
         """Add a labelled entry and bind it to self.ent_<attr>."""
-        ctk.CTkLabel(parent, text=label, font=FONT_SMALL,
+        ctk.CTkLabel(parent, text=label, font=FONT_KPI_LABEL,
                      text_color=MUTED, anchor="w").pack(**pad, fill="x")
-        e = ctk.CTkEntry(parent, font=FONT_LABEL, height=30, fg_color=BG,
-                          border_color=BORDER2, text_color=TEXT)
+        e = ctk.CTkEntry(parent, **input_style())
         e.insert(0, default)
         e.pack(**pad, fill="x", pady=(SPACE_XS, SPACE_M))
         setattr(self, f"ent_{attr}", e)
@@ -58,9 +58,8 @@ class HelpersMixin:
             col = ctk.CTkFrame(row, fg_color="transparent")
             col.pack(side="left", fill="x", expand=True,
                      padx=(0, SPACE_S) if i < len(items) - 1 else 0)
-            ctk.CTkLabel(col, text=label, font=FONT_SMALL, text_color=MUTED).pack(anchor="w")
-            e = ctk.CTkEntry(col, font=FONT_LABEL, height=28, fg_color=BG,
-                              border_color=BORDER2, text_color=TEXT)
+            ctk.CTkLabel(col, text=label, font=FONT_KPI_LABEL, text_color=MUTED).pack(anchor="w")
+            e = ctk.CTkEntry(col, **input_style())
             e.insert(0, default)
             e.pack(fill="x")
             setattr(self, f"ent_{attr}", e)
@@ -68,8 +67,8 @@ class HelpersMixin:
     def _switch(self: ECGApp, parent, label: str, pad: dict, default_on: bool = False,
                 command=None) -> ctk.CTkSwitch:
         sw = ctk.CTkSwitch(parent, text=label, font=FONT_LABEL,
-                            text_color=MUTED, progress_color=BLUE,
-                            button_color=BORDER2, command=command)
+                            text_color=TEXT, progress_color=BLUE, fg_color=BORDER2,
+                            button_color=CARD, button_hover_color=BG, command=command)
         if default_on:
             sw.select()
         sw.pack(**pad, anchor="w", pady=(0, SPACE_S))
@@ -84,8 +83,10 @@ class HelpersMixin:
         toolbar button groups lost their visual grouping entirely. BG is a
         gentle enough tint to read as "one control cluster" without
         reintroducing a visible grey block."""
-        return ctk.CTkFrame(parent, fg_color=BG, corner_radius=8,
-                             border_width=1, border_color=BORDER)
+        # The mockup has no cluster backgrounds: its buttons sit 8 px apart
+        # on the bar itself, so the "chip" is now only a transparent group.
+        return ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0,
+                             border_width=0)
 
     def _btn(self: ECGApp, parent, text: str, command, pad: dict,
              variant: str = "secondary", h: int = 28, bold: bool = False) -> ctk.CTkButton:
@@ -98,22 +99,13 @@ class HelpersMixin:
         (_rebuild_ui()) always pick up the current theme's colours instead
         of whatever was active when a cached table would have been built.
         """
-        if variant == "primary":
-            fg, hover, text_color = COLOR_PRIMARY, COLOR_PRIMARY_HOVER, "white"
-        elif variant == "success":
-            fg, hover, text_color = COLOR_SUCCESS, COLOR_SUCCESS_HOVER, "white"
-        elif variant == "warning":
-            fg, hover, text_color = COLOR_WARNING, COLOR_WARNING_HOVER, "white"
-        elif variant == "danger":
-            fg, hover, text_color = COLOR_DANGER, COLOR_DANGER_HOVER, "white"
-        else:
-            fg, hover, text_color = COLOR_SECONDARY, COLOR_SECONDARY_HOVER, MUTED
-        _h = max(24, int(h * THEME.font_scale))
-        btn = ctk.CTkButton(
-            parent, text=text, command=command,
-            fg_color=fg, hover_color=hover, text_color=text_color,
-            font=FONT_BTN_PRIMARY if bold else FONT_BTN_SEC, height=_h, corner_radius=8,
-        )
+        # The mockup has two button looks: blue primary and white bordered
+        # secondary. success maps to primary, warning to secondary.
+        kind = {"primary": "primary", "success": "primary", "danger": "danger"}.get(
+            variant, "secondary")
+        btn = ctk.CTkButton(parent, text=text, command=command, **button_style(kind))
+        if h > 28:
+            btn.configure(height=max(btn.cget("height"), int(h * THEME.font_scale)))
         btn.pack(**pad, fill="x", pady=(0, SPACE_S))
         return btn
 

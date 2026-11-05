@@ -28,6 +28,8 @@ from ecg.ui.theme import (
     FONT_SMALL, FONT_KPI_LABEL, FONT_BTN_PRIMARY, FONT_BTN_SEC,
     FONT_SIDEBAR_HDR, FONT_CARD_TITLE,
 )
+from ecg.ui.theme import button_style
+from ecg.ui.theme import toggle_style
 from ecg.ui.widgets import make_sparkline
 from ecg.ui.tab_keys import TAB_REPORT
 from ecg.ui.dialogs import (
@@ -663,13 +665,11 @@ class DelegatesMixin:
         if self.ui.rrhr_strip_visible:
             self.subplot_frame.grid()
             self.plot_area.grid_rowconfigure(1, weight=3)
-            self.btn_toggle_rrhr.configure(
-                fg_color=PANEL, hover_color=BORDER2, text_color=BLUE, border_width=2)
+            self.btn_toggle_rrhr.configure(**toggle_style(True))
         else:
             self.subplot_frame.grid_remove()
             self.plot_area.grid_rowconfigure(1, weight=0)
-            self.btn_toggle_rrhr.configure(
-                fg_color=BORDER, hover_color=BORDER2, text_color=MUTED, border_width=0)
+            self.btn_toggle_rrhr.configure(**toggle_style(False))
 
     def _toggle_spike_markers(self: ECGApp) -> None:
         """Show/hide the triangular spike markers on the RR/HR tachogram.
@@ -682,11 +682,9 @@ class DelegatesMixin:
         """
         self.ui.show_spike_markers = not self.ui.show_spike_markers
         if self.ui.show_spike_markers:
-            self.btn_toggle_spikes.configure(
-                fg_color=PANEL, hover_color=BORDER2, text_color=BLUE, border_width=2)
+            self.btn_toggle_spikes.configure(**toggle_style(True))
         else:
-            self.btn_toggle_spikes.configure(
-                fg_color=BORDER, hover_color=BORDER2, text_color=MUTED, border_width=0)
+            self.btn_toggle_spikes.configure(**toggle_style(False))
         if self.analysis.results is not None:
             self.plot_ctrl.plot_rr(self.analysis.results)
 
@@ -973,10 +971,12 @@ class DelegatesMixin:
         hdr.pack(fill="x")
         ctk.CTkLabel(hdr, text="Recent recordings", font=FONT_CARD_TITLE,
                      text_color=TEXT, anchor="w").pack(side="left", padx=SPACE_L, pady=SPACE_M)
-        ctk.CTkButton(hdr, text="📈 Cohort Trends", height=28, corner_radius=6,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      font=FONT_BTN_SEC, command=self._open_cohort_trends
-                      ).pack(side="right", padx=SPACE_L, pady=SPACE_M)
+        ctk.CTkButton(
+            hdr,
+            text="📈 Cohort Trends",
+            command=self._open_cohort_trends,
+            **button_style("secondary"),
+        ).pack(side="right", padx=SPACE_L, pady=SPACE_M)
 
         scroll = ctk.CTkScrollableFrame(win, fg_color=PANEL)
         scroll.pack(fill="both", expand=True, padx=SPACE_M, pady=SPACE_M)
@@ -1307,12 +1307,13 @@ class DelegatesMixin:
 
         btn_row = ctk.CTkFrame(win, fg_color="transparent")
         btn_row.pack(fill="x", padx=SPACE_L, pady=(0, SPACE_L))
-        ctk.CTkButton(btn_row, text="✔  Save", command=_save,
-                      fg_color=GREEN, hover_color=GREEN_DARK, text_color="white",
-                      font=FONT_BTN_PRIMARY, height=30, corner_radius=6).pack(side="left")
-        ctk.CTkButton(btn_row, text="✗ Cancel", command=win.destroy,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                      font=FONT_BTN_SEC, height=30, corner_radius=6).pack(
+        ctk.CTkButton(btn_row, text="✔  Save", command=_save, **button_style("primary")).pack(side="left")
+        ctk.CTkButton(
+            btn_row,
+            text="✗ Cancel",
+            command=win.destroy,
+            **button_style("secondary"),
+        ).pack(
             side="left", padx=(SPACE_M, 0))
 
     # ════════════════════════════════════════════════════════

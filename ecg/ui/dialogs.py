@@ -35,6 +35,8 @@ from ecg.ui.theme import (
     FONT_HINT, FONT_KPI_LABEL, FONT_CARD_TITLE, FONT_SUBSECTION,
     FONT_DIALOG_TITLE, FONT_MONO,
 )
+from ecg.ui.theme import combo_style, input_style
+from ecg.ui.theme import button_style
 from ecg.core.models import MouseECG
 from ecg.core.ml_detector import (
     training_data_summary, list_training_files, delete_training_sample,
@@ -239,18 +241,27 @@ class ThemeDialog(ctk.CTkToplevel):
         bar.pack_propagate(False)
         ctk.CTkFrame(bar, height=1, fg_color=BORDER).pack(fill="x", side="top")
 
-        ctk.CTkButton(bar, text="Close",
-                      fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                      font=FONT_SMALL, width=90, height=34,
-                      command=self.destroy).pack(side="right", padx=12, pady=10)
-        ctk.CTkButton(bar, text="Save as Default",
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      font=FONT_SIDEBAR_HDR, width=130, height=34,
-                      command=self._save_default).pack(side="right", padx=(0, 6), pady=10)
-        ctk.CTkButton(bar, text="Apply",
-                      fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
-                      font=FONT_BTN_PRIMARY, width=100, height=34,
-                      command=self._apply).pack(side="right", padx=(0, 6), pady=10)
+        ctk.CTkButton(
+            bar,
+            text="Close",
+            width=90,
+            command=self.destroy,
+            **button_style("secondary"),
+        ).pack(side="right", padx=12, pady=10)
+        ctk.CTkButton(
+            bar,
+            text="Save as Default",
+            width=130,
+            command=self._save_default,
+            **button_style("secondary", font=FONT_SIDEBAR_HDR),
+        ).pack(side="right", padx=(0, 6), pady=10)
+        ctk.CTkButton(
+            bar,
+            text="Apply",
+            width=100,
+            command=self._apply,
+            **button_style("primary"),
+        ).pack(side="right", padx=(0, 6), pady=10)
 
         self._preview_lbl = ctk.CTkLabel(
             bar,
@@ -474,17 +485,19 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         btn_frame.grid_columnconfigure(1, weight=1)
 
         self.btn_keep = ctk.CTkButton(
-            btn_frame, text="✓  Keep", height=36,
-            fg_color=GREEN, hover_color=GREEN, text_color="white",
-            font=FONT_CARD_TITLE, corner_radius=5,
-            command=lambda: self._set_decision("keep"))
+            btn_frame,
+            text="✓  Keep",
+            command=lambda: self._set_decision("keep"),
+            **button_style("primary", font=FONT_CARD_TITLE),
+        )
         self.btn_keep.grid(row=0, column=0, sticky="ew", padx=(0, 4))
 
         self.btn_remove = ctk.CTkButton(
-            btn_frame, text="✕  Remove", height=36,
-            fg_color=RED_DARK, hover_color="#D32F2F", text_color="white",
-            font=FONT_CARD_TITLE, corner_radius=5,
-            command=lambda: self._set_decision("remove"))
+            btn_frame,
+            text="✕  Remove",
+            command=lambda: self._set_decision("remove"),
+            **button_style("danger", font=FONT_CARD_TITLE),
+        )
         self.btn_remove.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
         # Spacer
@@ -496,28 +509,36 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         nav.pack_propagate(False)
 
         ctk.CTkButton(
-            nav, text="◀  Prev", width=90, height=34,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            font=FONT_LABEL, corner_radius=5,
-            command=self._prev).pack(side="left", padx=10, pady=10)
+            nav,
+            text="◀  Prev",
+            width=90,
+            command=self._prev,
+            **button_style("secondary"),
+        ).pack(side="left", padx=10, pady=10)
 
         ctk.CTkButton(
-            nav, text="Next  ▶", width=90, height=34,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            font=FONT_LABEL, corner_radius=5,
-            command=self._next).pack(side="left", padx=(0, 10), pady=10)
+            nav,
+            text="Next  ▶",
+            width=90,
+            command=self._next,
+            **button_style("secondary"),
+        ).pack(side="left", padx=(0, 10), pady=10)
 
         ctk.CTkButton(
-            nav, text="⚡  Remove All", width=130, height=34,
-            fg_color="#5D4037", hover_color="#4E342E", text_color="white",
-            font=FONT_LABEL, corner_radius=5,
-            command=self._remove_all).pack(side="left", padx=(0, 6), pady=10)
+            nav,
+            text="⚡  Remove All",
+            width=130,
+            command=self._remove_all,
+            **button_style("primary"),
+        ).pack(side="left", padx=(0, 6), pady=10)
 
         ctk.CTkButton(
-            nav, text="✓  Keep All", width=110, height=34,
-            fg_color=GREEN, hover_color=GREEN, text_color="white",
-            font=FONT_LABEL, corner_radius=5,
-            command=self._keep_all).pack(side="left", padx=(0, 10), pady=10)
+            nav,
+            text="✓  Keep All",
+            width=110,
+            command=self._keep_all,
+            **button_style("primary"),
+        ).pack(side="left", padx=(0, 10), pady=10)
 
         self.lbl_summary = ctk.CTkLabel(
             nav, text="", font=FONT_SMALL, text_color=MUTED)
@@ -528,10 +549,12 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
             font=FONT_HINT, text_color=MUTED).pack(side="left", padx=10)
 
         ctk.CTkButton(
-            nav, text="✓  Apply Decisions", width=150, height=36,
-            fg_color=RED, hover_color=RED_DARK, text_color="white",
-            font=FONT_CARD_TITLE, corner_radius=5,
-            command=self._finish).pack(side="right", padx=10, pady=9)
+            nav,
+            text="✓  Apply Decisions",
+            width=150,
+            command=self._finish,
+            **button_style("danger", font=FONT_CARD_TITLE),
+        ).pack(side="right", padx=10, pady=9)
 
         # Keyboard shortcuts
         self.bind("<Left>",  lambda e: self._prev())
@@ -755,7 +778,7 @@ class AnnotationDialog(ctk.CTkToplevel):
         row = 0
         ctk.CTkLabel(self, text="Start (s):", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
-        self._ent_start = ctk.CTkEntry(self, width=110)
+        self._ent_start = ctk.CTkEntry(self, width=110, **input_style())
         start_val = (existing or {}).get("t_start", default_start)
         self._ent_start.insert(0, "" if start_val is None else f"{start_val:.3f}")
         self._ent_start.grid(row=row, column=1, sticky="w", **pad)
@@ -763,7 +786,7 @@ class AnnotationDialog(ctk.CTkToplevel):
         row += 1
         ctk.CTkLabel(self, text="End (s):", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
-        self._ent_end = ctk.CTkEntry(self, width=110)
+        self._ent_end = ctk.CTkEntry(self, width=110, **input_style())
         end_val = (existing or {}).get("t_end", default_end)
         self._ent_end.insert(0, "" if end_val is None else f"{end_val:.3f}")
         self._ent_end.grid(row=row, column=1, sticky="w", **pad)
@@ -771,7 +794,7 @@ class AnnotationDialog(ctk.CTkToplevel):
         row += 1
         ctk.CTkLabel(self, text="Label:", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
-        self._ent_label = ctk.CTkEntry(self, width=220)
+        self._ent_label = ctk.CTkEntry(self, width=220, **input_style())
         self._ent_label.insert(0, (existing or {}).get("label", ""))
         self._ent_label.grid(row=row, column=1, sticky="w", **pad)
 
@@ -793,9 +816,13 @@ class AnnotationDialog(ctk.CTkToplevel):
         btn_frame.grid(row=row, column=0, columnspan=2, pady=(4, 10))
         ctk.CTkButton(btn_frame, text="OK", width=90,
                       command=self._ok).pack(side="left", padx=6)
-        ctk.CTkButton(btn_frame, text="Cancel", width=90,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      command=self.destroy).pack(side="left", padx=6)
+        ctk.CTkButton(
+            btn_frame,
+            text="Cancel",
+            width=90,
+            command=self.destroy,
+            **button_style("secondary"),
+        ).pack(side="left", padx=6)
 
         self._ent_start.focus_set()
         self.bind("<Return>", lambda _: self._ok())
@@ -851,18 +878,27 @@ class AnnotationManagerDialog(ctk.CTkToplevel):
         # ── Toolbar ───────────────────────────────────────────────────────
         bar = ctk.CTkFrame(self, fg_color="transparent")
         bar.pack(side="top", fill="x", padx=10, pady=(8, 4))
-        ctk.CTkButton(bar, text="＋  Add annotation", width=140,
-                      fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
-                      font=FONT_BTN_SEC,
-                      command=self._add).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(bar, text="✏  Edit selected", width=130,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      font=FONT_BTN_SEC,
-                      command=self._edit).pack(side="left", padx=2)
-        ctk.CTkButton(bar, text="🗑  Delete selected", width=140,
-                      fg_color=RED, hover_color=RED_DARK, text_color="white",
-                      font=FONT_BTN_SEC,
-                      command=self._delete).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(
+            bar,
+            text="＋  Add annotation",
+            width=140,
+            command=self._add,
+            **button_style("primary"),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            bar,
+            text="✏  Edit selected",
+            width=130,
+            command=self._edit,
+            **button_style("secondary"),
+        ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            bar,
+            text="🗑  Delete selected",
+            width=140,
+            command=self._delete,
+            **button_style("danger"),
+        ).pack(side="left", padx=(6, 0))
 
         # ── Scrollable list ───────────────────────────────────────────────
         self._list_frame = ctk.CTkScrollableFrame(self, fg_color=CARD)
@@ -1005,7 +1041,7 @@ class PacingPeriodDialog(ctk.CTkToplevel):
         row = 0
         ctk.CTkLabel(self, text="Start (s):", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
-        self._ent_start = ctk.CTkEntry(self, width=110)
+        self._ent_start = ctk.CTkEntry(self, width=110, **input_style())
         start_val = (existing or {}).get("t_start", default_start)
         self._ent_start.insert(0, "" if start_val is None else f"{start_val:.3f}")
         self._ent_start.grid(row=row, column=1, sticky="w", **pad)
@@ -1013,7 +1049,7 @@ class PacingPeriodDialog(ctk.CTkToplevel):
         row += 1
         ctk.CTkLabel(self, text="End (s):", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
-        self._ent_end = ctk.CTkEntry(self, width=110)
+        self._ent_end = ctk.CTkEntry(self, width=110, **input_style())
         end_val = (existing or {}).get("t_end", default_end)
         self._ent_end.insert(0, "" if end_val is None else f"{end_val:.3f}")
         self._ent_end.grid(row=row, column=1, sticky="w", **pad)
@@ -1021,7 +1057,7 @@ class PacingPeriodDialog(ctk.CTkToplevel):
         row += 1
         ctk.CTkLabel(self, text="Note:", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
-        self._ent_note = ctk.CTkEntry(self, width=220)
+        self._ent_note = ctk.CTkEntry(self, width=220, **input_style())
         self._ent_note.insert(0, (existing or {}).get("note", ""))
         self._ent_note.grid(row=row, column=1, sticky="w", **pad)
 
@@ -1030,9 +1066,13 @@ class PacingPeriodDialog(ctk.CTkToplevel):
         btn_frame.grid(row=row, column=0, columnspan=2, pady=(4, 10))
         ctk.CTkButton(btn_frame, text="OK", width=90,
                       command=self._ok).pack(side="left", padx=6)
-        ctk.CTkButton(btn_frame, text="Cancel", width=90,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      command=self.destroy).pack(side="left", padx=6)
+        ctk.CTkButton(
+            btn_frame,
+            text="Cancel",
+            width=90,
+            command=self.destroy,
+            **button_style("secondary"),
+        ).pack(side="left", padx=6)
 
         self._ent_start.focus_set()
         self.bind("<Return>", lambda _: self._ok())
@@ -1085,18 +1125,27 @@ class PacingPeriodManagerDialog(ctk.CTkToplevel):
 
         bar = ctk.CTkFrame(self, fg_color="transparent")
         bar.pack(side="top", fill="x", padx=10, pady=(8, 4))
-        ctk.CTkButton(bar, text="＋  Add pacing period", width=150,
-                      fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
-                      font=FONT_BTN_SEC,
-                      command=self._add).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(bar, text="✏  Edit selected", width=130,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      font=FONT_BTN_SEC,
-                      command=self._edit).pack(side="left", padx=2)
-        ctk.CTkButton(bar, text="🗑  Delete selected", width=140,
-                      fg_color=RED, hover_color=RED_DARK, text_color="white",
-                      font=FONT_BTN_SEC,
-                      command=self._delete).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(
+            bar,
+            text="＋  Add pacing period",
+            width=150,
+            command=self._add,
+            **button_style("primary"),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            bar,
+            text="✏  Edit selected",
+            width=130,
+            command=self._edit,
+            **button_style("secondary"),
+        ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            bar,
+            text="🗑  Delete selected",
+            width=140,
+            command=self._delete,
+            **button_style("danger"),
+        ).pack(side="left", padx=(6, 0))
 
         self._list_frame = ctk.CTkScrollableFrame(self, fg_color=CARD)
         self._list_frame.pack(side="top", fill="both", expand=True,
@@ -1279,15 +1328,18 @@ class MLTrainingDialog(ctk.CTkToplevel):
         # Not packed yet -- _maybe_show_confusion_matrix() packs/unpacks it.
 
         self.btn_train = ctk.CTkButton(
-            self, text="▶  Train Model", command=self._train,
-            fg_color=GREEN, hover_color=GREEN_DARK, text_color="white",
-            font=FONT_BTN_PRIMARY, height=36, corner_radius=8)
+            self,
+            text="▶  Train Model",
+            command=self._train,
+            **button_style("primary"),
+        )
         self.btn_train.pack(fill="x", padx=20, pady=(0, 8))
 
         ctk.CTkButton(
-            self, text="Close", command=self.destroy,
-            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-            font=FONT_BTN_SEC, height=30, corner_radius=8,
+            self,
+            text="Close",
+            command=self.destroy,
+            **button_style("secondary"),
         ).pack(fill="x", padx=20, pady=(0, 20))
 
         self._refresh_stats()
@@ -1396,10 +1448,11 @@ class MLTrainingDialog(ctk.CTkToplevel):
                          font=FONT_HINT, text_color=MUTED, width=140,
                          anchor="e").pack(side="left", padx=4)
             ctk.CTkButton(
-                row, text="🗑", width=28, height=22,
-                fg_color=RED, hover_color=RED_DARK, text_color="white",
-                font=FONT_HINT,
+                row,
+                text="🗑",
+                width=28,
                 command=lambda fp=fp, filepath=filepath: self._remove_file(fp, filepath),
+                **button_style("danger"),
             ).pack(side="left", padx=(4, 6))
 
     def _remove_file(self, fingerprint: str, filepath: "Optional[str]") -> None:
@@ -1495,10 +1548,12 @@ class MethodAgreementDialog(ctk.CTkToplevel):
         # below so it always reserves its slice of the cavity -- packing
         # it last (side="top", default) let a tall methods/breakdown/list
         # stack squeeze it down past the window's bottom edge.
-        ctk.CTkButton(self, text="Close", command=self.destroy,
-                     fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                     font=FONT_BTN_SEC, height=32, corner_radius=8
-                     ).pack(side="bottom", fill="x", padx=16, pady=16)
+        ctk.CTkButton(
+            self,
+            text="Close",
+            command=self.destroy,
+            **button_style("secondary"),
+        ).pack(side="bottom", fill="x", padx=16, pady=16)
 
         # ── Methods compared ─────────────────────────────────────────
         methods_card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=8)
@@ -1566,10 +1621,13 @@ class MethodAgreementDialog(ctk.CTkToplevel):
                 ctk.CTkLabel(row, text=f"t = {t:.3f} s", font=FONT_SMALL,
                              text_color=TEXT, anchor="w").pack(
                                  side="left", padx=(10, 4), pady=6)
-                ctk.CTkButton(row, text="→ View", width=70, height=24,
-                             font=FONT_SMALL, fg_color=BORDER, hover_color=BORDER2,
-                             text_color=TEXT, command=lambda t=t: self._jump_to(t)
-                             ).pack(side="right", padx=(4, 10), pady=4)
+                ctk.CTkButton(
+                    row,
+                    text="→ View",
+                    width=70,
+                    command=lambda t=t: self._jump_to(t),
+                    **button_style("secondary"),
+                ).pack(side="right", padx=(4, 10), pady=4)
             if len(times) > self.MAX_ROWS:
                 ctk.CTkLabel(
                     scroll, text=f"… {len(times) - self.MAX_ROWS} more not shown "
@@ -1789,31 +1847,43 @@ class CalibrationDialog(ctk.CTkToplevel):
         bar.pack(fill="x", padx=16, pady=(0, 4))
         ctk.CTkLabel(bar, text="Label:", font=FONT_SMALL, text_color=MUTED).pack(side="left")
         self._cb_label = ctk.CTkComboBox(
-            bar, width=180, height=28, font=FONT_LABEL, fg_color=BG,
-            border_color=BORDER2, button_color=BORDER2, text_color=TEXT,
-            dropdown_fg_color=BG, dropdown_text_color=TEXT, state="readonly",
+            bar,
+            width=180,
+            state="readonly",
             values=[self.ALL] + list_event_labels(),
-            command=lambda _v: self._reload())
+            command=lambda _v: self._reload(),
+            **combo_style(),
+        )
         self._cb_label.set(self._default_label(project))
         self._cb_label.pack(side="left", padx=(6, 14))
         ctk.CTkLabel(bar, text="Project:", font=FONT_SMALL, text_color=MUTED).pack(side="left")
-        self._ent_project = ctk.CTkEntry(bar, width=160, height=28, font=FONT_LABEL,
-                                         fg_color=BG, border_color=BORDER2, text_color=TEXT,
-                                         placeholder_text="(all projects)")
+        self._ent_project = ctk.CTkEntry(
+            bar,
+            width=160,
+            placeholder_text="(all projects)",
+            **input_style(),
+        )
         if project:
             self._ent_project.insert(0, project)
         self._ent_project.pack(side="left", padx=(6, 4))
         self._ent_project.bind("<Return>", lambda _e: self._reload())
-        ctk.CTkButton(bar, text="↻ Load", width=70, height=28, font=FONT_SMALL,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      command=self._reload).pack(side="left", padx=(0, 14))
+        ctk.CTkButton(
+            bar,
+            text="↻ Load",
+            width=70,
+            command=self._reload,
+            **button_style("secondary"),
+        ).pack(side="left", padx=(0, 14))
         ctk.CTkLabel(bar, text="Configuration:", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left")
         self._cb_config = ctk.CTkComboBox(
-            bar, width=230, height=28, font=FONT_LABEL, fg_color=BG,
-            border_color=BORDER2, button_color=BORDER2, text_color=TEXT,
-            dropdown_fg_color=BG, dropdown_text_color=TEXT, state="readonly",
-            values=["—"], command=lambda _v: self._recompute())
+            bar,
+            width=230,
+            state="readonly",
+            values=["—"],
+            command=lambda _v: self._recompute(),
+            **combo_style(),
+        )
         self._cb_config.pack(side="left", padx=(6, 0))
 
         agg = ctk.CTkFrame(self, fg_color="transparent")
@@ -1838,19 +1908,31 @@ class CalibrationDialog(ctk.CTkToplevel):
         bottom = ctk.CTkFrame(self, fg_color="transparent")
         bottom.pack(side="bottom", fill="x", padx=16, pady=(4, 14))
         self._btn_apply = ctk.CTkButton(
-            bottom, text="Apply", command=self._apply, height=32,
-            fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
-            font=FONT_BTN_SEC, corner_radius=8)
+            bottom,
+            text="Apply",
+            command=self._apply,
+            **button_style("primary"),
+        )
         self._btn_apply.pack(side="left")
-        ctk.CTkButton(bottom, text="📋  Copy results", command=self._copy, height=32,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      font=FONT_BTN_SEC, corner_radius=8).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(bottom, text="Export cohort CSV…", command=self._export, height=32,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      font=FONT_BTN_SEC, corner_radius=8).pack(side="left", padx=(8, 0))
-        ctk.CTkButton(bottom, text="Close", command=self.destroy, height=32,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      font=FONT_BTN_SEC, corner_radius=8, width=90).pack(side="right")
+        ctk.CTkButton(
+            bottom,
+            text="📋  Copy results",
+            command=self._copy,
+            **button_style("secondary"),
+        ).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            bottom,
+            text="Export cohort CSV…",
+            command=self._export,
+            **button_style("secondary"),
+        ).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            bottom,
+            text="Close",
+            command=self.destroy,
+            width=90,
+            **button_style("secondary"),
+        ).pack(side="right")
         # Copy / export feedback (the Apply note below stays visible).
         self._lbl_status = ctk.CTkLabel(bottom, text="", font=FONT_HINT,
                                         text_color=GREEN, anchor="w")

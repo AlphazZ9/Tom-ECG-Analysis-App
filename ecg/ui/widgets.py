@@ -19,6 +19,7 @@ from ecg.ui.theme import (
     CARD, BORDER, TEXT, MUTED, LIGHT, BLUE,
     GREEN, GREEN_MID, AMBER, RED,
     FONT_KPI_LABEL, FONT_KPI_VALUE, FONT_KPI_HERO, FONT_MICRO, FONT_HINT,
+    button_style,
 )
 
 
@@ -119,3 +120,39 @@ def make_sparkline(
     canvas.create_line(*(c for xy in zip(xs, ys) for c in xy),
                        fill=color, width=1.4, smooth=True)
     return canvas
+
+
+class PillGroup(ctk.CTkFrame):
+    """The mockup's mode pills: one rounded button per value, 8 px apart, the
+    selected one blue. Same .set / .get as the CTkSegmentedButton it
+    replaces: .set selects without calling *command*, a click selects and
+    calls command(value)."""
+
+    def __init__(self, parent, values, command=None, **kw) -> None:
+        super().__init__(parent, fg_color="transparent", **kw)
+        self._command = command
+        self._value: "Optional[str]" = None
+        self._buttons: "dict[str, ctk.CTkButton]" = {}
+        for i, v in enumerate(values):
+            b = ctk.CTkButton(self, text=v, width=0, command=lambda v=v: self._click(v),
+                              **button_style("pill_off"))
+            b.pack(side="left", padx=(0 if i == 0 else 8, 0))
+            self._buttons[v] = b
+
+    def _click(self, value: str) -> None:
+        self.set(value)
+        if self._command is not None:
+            self._command(value)
+
+    def set(self, value: str) -> None:
+        if value not in self._buttons:
+            raise ValueError(f"no pill named {value!r}")
+        self._value = value
+        for v, b in self._buttons.items():
+            look = button_style("pill_on" if v == value else "pill_off")
+            b.configure(fg_color=look["fg_color"], hover_color=look["hover_color"],
+                        text_color=look["text_color"], border_color=look["border_color"],
+                        font=look["font"])
+
+    def get(self) -> str:
+        return self._value or ""
