@@ -123,10 +123,7 @@ def _attach(c: DelinCtx) -> DelinCtx:
     """*c* with its shared arrays mapped in (once per recording per worker)."""
     from multiprocessing import shared_memory
     if c.ctx_id not in _ATTACHED:
-        for old_handles, _ in _ATTACHED.values():   # an earlier recording's
-            for h in old_handles:
-                h.close()
-        _ATTACHED.clear()
+        _release()
         handles, arrays = [], {}
         for name, (shm_name, shape, dtype) in c.shm_specs.items():
             h = shared_memory.SharedMemory(name=shm_name)
@@ -138,11 +135,24 @@ def _attach(c: DelinCtx) -> DelinCtx:
     return c
 
 
+def _release() -> None:
+    for handles, _ in _ATTACHED.values():
+        for h in handles:
+            try:
+                h.close()
+            except Exception:
+                pass
+    _ATTACHED.clear()
+
+
 def _worker_chunk(job: "tuple[DelinCtx, int, int, int]") -> "tuple[int, dict, float]":
     """Rows i0..i1-1, the chain rebuilt from row s. Returns i0, their landmarks
     and the T peak row i0 started from."""
     c, s, i0, i1 = job
-    out = delineate_rows(_attach(c), s, i1)
+    try:
+        out = delineate_rows(_attach(c), s, i1)
+    finally:
+        _release()          # an idle worker keeps no recording mapped
     k = i0 - s
     start_t = out["T_peak"][k - 1] if k > 0 else np.nan
     return i0, {name: v[k:] for name, v in out.items()}, float(start_t)
@@ -150,8 +160,46 @@ def _worker_chunk(job: "tuple[DelinCtx, int, int, int]") -> "tuple[int, dict, fl
 
 # ── parent side ──────────────────────────────────────────────────────────
 
-def workers() -> int:
-    return max(1, min((os.cpu_count() or 1) - 2, 12))
+# A worker holds numpy, the wave template and its chunk's rows: ~250 MB with
+# the margin a busy PC needs. Workers are cut to what free memory allows (on
+# a PC with little left, worker processes died of MemoryError on hour-long
+# recordings and every row was then delineated in order anyway).
+_WORKER_MB = 250
+
+
+def _free_memory_mb() -> "Optional[float]":
+    """Free physical memory (MB), None when it cannot be read."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _MemStatus(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("sullAvailExtendedVirtual", ctypes.c_ulonglong)]
+            st = _MemStatus()
+            st.dwLength = ctypes.sizeof(_MemStatus)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                return st.ullAvailPhys / 2 ** 20
+            return None
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 2 ** 20
+    except Exception:
+        return None
+
+
+def workers(shared_mb: float = 0.0) -> int:
+    """Worker processes to use: the cores less two, at most 12, and no more
+    than free memory leaves room for (the shared arrays counted once)."""
+    n = max(1, min((os.cpu_count() or 1) - 2, 12))
+    free = _free_memory_mb()
+    if free is not None:
+        n = min(n, int((free - shared_mb - 500) // _WORKER_MB))   # 500 MB for the app
+    return max(1, n)
 
 
 def _pool(n: int):
@@ -179,7 +227,8 @@ atexit.register(shutdown_pool)
 def delineate_all(c: DelinCtx, progress: "Callable[[int], None]") -> "dict[str, np.ndarray]":
     """Every row's landmarks, as delineate_rows(c, 0, n) gives them."""
     n = len(c.valid_rp)
-    w = workers()
+    shared_mb = sum(getattr(getattr(c, name, None), "nbytes", 0) for name in _SHARED) / 2 ** 20
+    w = workers(shared_mb)
     if n < PARALLEL_MIN_ROWS or w < 2 or os.environ.get("ECG_DELIN_SERIAL"):
         return _delineate_serial(c, n, progress)
     try:

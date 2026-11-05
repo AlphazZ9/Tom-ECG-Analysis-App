@@ -1151,6 +1151,11 @@ def pr_baseline_level(
     return float(wt @ win.mean(axis=1) / wt.sum())
 
 
+# How far before its peak a P wave's start is looked for (detect_waves_on_beat:
+# the T peak is not searched past the next beat's P start).
+NEXT_P_SPAN_MS = 25.0
+
+
 def detect_waves_on_beat(
     beat:      "np.ndarray",
     beat_time: "np.ndarray",
@@ -1899,8 +1904,47 @@ def detect_waves_on_beat(
                 p_lo = min(p_lo, p_t)
     # 5. No candidate: no P wave (NaN P peak, P onset and PR).
 
+    # Reference level for P onset and T end: the PR-segment baseline, the
+    # one QRS onset and the J point are measured against.
+    pr_base = (float(np.median(mb[_idx(pr_lo):_idx(pr_hi) + 1]))
+               if np.isfinite(pr_lo) else None)
+
+    # ── P onset ───────────────────────────────────────────────────────────
+    # An interval end point like QRS onset and T end: not clamped to the
+    # P_onset template window (which capped it ~9 ms before the P peak with
+    # the defaults and cut long PRs short), NaN when it cannot be placed.
+    po_t = (_p_onset(p_t, pr_base if pr_base is not None else pre_baseline,
+                     snr_thresh)
+            if p_t is not None else float("nan"))
+
+    # ── Where the next beat's P wave starts ───────────────────────────────
+    # At mouse heart rates above ~450 bpm the template's T-peak window (to
+    # ~78 ms) reaches the next beat's P wave, and that P's first deflection
+    # was taken as the T (T peak ~70 ms, QT ~85 ms at RR 120 ms). The next P
+    # has this beat's P shape: it starts at the next R plus this beat's P
+    # start -- the first sample, within NEXT_P_SPAN_MS before the P peak,
+    # where the 2 ms average departs from the reference by a quarter of the P
+    # amplitude (a biphasic P's leading trough included). The T PEAK is not
+    # searched past it; the T end is left to the trailing-edge rules below
+    # (a T that ends after the next P has started keeps its QT).
+    t_peak_cap = float("inf")
+    if next_r_ms is not None and np.isfinite(next_r_ms) and p_t is not None:
+        dev = _moving_average(mb, max(1, int(round(2.0 / dt_ms)))) - pre_baseline
+        i_pk = _idx(p_t)
+        amp = abs(float(dev[i_pk]))
+        i0 = _idx(p_t - NEXT_P_SPAN_MS)
+        if amp > 0 and i_pk > i0:
+            over = np.flatnonzero(np.abs(dev[i0:i_pk + 1]) >= 0.25 * amp)
+            p_start = float(bt[i0 + int(over[0])]) if len(over) else float(p_t)
+            t_peak_cap = float(next_r_ms) + p_start
+
     # ── Detect T wave (starts after J, or after S + gap) ─────────────────
     # Starting after J prevents the J hump from being selected as T.
+    # A T-peak window cut short by the next P slides earlier by as much: at
+    # RR ~85 ms the T peaks before the template window even starts (~26 ms).
+    if t_peak_cap < t_hi:
+        t_lo = max(5.0, t_lo - (t_hi - t_peak_cap))
+        t_hi = t_peak_cap
     t_lo_eff = max(t_lo, (j_t + 5.0) if j_t is not None else t_lo)
     # Local extrema from there to the end of the beat window, against the
     # PR-segment reference. Extrema, not the largest sample: a T smaller than
@@ -1966,19 +2010,6 @@ def detect_waves_on_beat(
         if abs(t_amp) < t_noise_floor:
             t_t = float("nan")
 
-    # Reference level for P onset and T end: the PR-segment baseline, the
-    # one QRS onset and the J point are measured against.
-    pr_base = (float(np.median(mb[_idx(pr_lo):_idx(pr_hi) + 1]))
-               if np.isfinite(pr_lo) else None)
-
-    # ── P onset ───────────────────────────────────────────────────────────
-    # An interval end point like QRS onset and T end: not clamped to the
-    # P_onset template window (which capped it ~9 ms before the P peak with
-    # the defaults and cut long PRs short), NaN when it cannot be placed.
-    po_t = (_p_onset(p_t, pr_base if pr_base is not None else pre_baseline,
-                     snr_thresh)
-            if p_t is not None else float("nan"))
-
     # ── T offset ──────────────────────────────────────────────────────────
     # Searched up to the later of the template's and the default T-end
     # window ends (within the beat): a refined template, narrowed to one
@@ -1988,6 +2019,9 @@ def detect_waves_on_beat(
     # the beat window is still inside the T wave at high mouse heart rates,
     # so a baseline taken there moved the T end.
     t_last, t_stop_edge = t_t, None
+    # No T phase in the next beat's P wave either (t_peak_cap): its leading
+    # trough is not the T's second phase.
+    phase_hi = t_peak_cap
     biphasic = t_phase_noise is not None
     t_noise_ = max(0.0, float(t_phase_noise)) if biphasic else 0.0
     t_base = pr_base
@@ -1999,7 +2033,7 @@ def detect_waves_on_beat(
     if biphasic and t_plan is not None and t_base is not None:
         # The phase plan of the beats around: the same phase ends the T on
         # neighbouring rows, whatever the noise of the row (_t_from_plan).
-        t_t, to_t = _t_from_plan(t_plan, t_lo_eff, min(to_end, t_stop),
+        t_t, to_t = _t_from_plan(t_plan, t_lo_eff, min(to_end, t_stop, phase_hi),
                                  t_base, t_noise_)
     else:
         if biphasic and np.isfinite(t_t) and t_base is not None:
@@ -2007,7 +2041,7 @@ def detect_waves_on_beat(
             # of the last one, so that two phases of similar size do not take
             # turns at being the T (T end jumping by one phase between rows).
             t_first, t_last, t_stop_edge = _t_phases(
-                t_t, t_lo_eff, min(to_end, t_stop), t_base, t_noise_)
+                t_t, t_lo_eff, min(to_end, t_stop, phase_hi), t_base, t_noise_)
             if t_plan_out is not None:
                 t_plan_out.update(_t_plan_of(t_first, t_last, t_base))
             t_t = t_first if np.isfinite(t_first) else t_t
