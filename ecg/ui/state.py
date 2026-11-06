@@ -175,6 +175,11 @@ class AnalysisState:
     arr_edit_mode: bool = False                 # edit mode specific to arrhythmia tab
     last_seg_a: Optional[dict] = None           # last Compare A result
     last_seg_b: Optional[dict] = None           # last Compare B result
+    # The last Compare segments run (ecg.io.segment_export.ComparisonResult)
+    # and the recording state it rests on (CompareSegmentsMixin.
+    # _compare_signature): the main exports include it only while current.
+    last_comparison: Any = None
+    last_comparison_basis: Optional[tuple] = None
     # Cumulative artifact report (merge_artifact_reports): "removed_samples"
     # / "removed_types" are every removal still in effect (re-applied after
     # a session restore re-detects the peaks), "break_samples" the subset

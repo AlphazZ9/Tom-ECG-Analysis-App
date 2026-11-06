@@ -235,8 +235,11 @@ def quality_flags(segs: "Sequence[dict]", event: "Optional[tuple[float, float]]"
 
 def unique_tags(labels: "Sequence[str]") -> "list[str]":
     """Column tags of the segments: their labels, or A, B, C... when two are
-    the same or one is empty."""
+    the same, one is empty, or one is a column name of the exports ("Metric",
+    "Item", "Value", "Segment", or starting "Δ%")."""
     labels = [str(lbl).strip() for lbl in labels]
-    if all(labels) and len(set(labels)) == len(labels):
+    reserved = {"metric", "item", "value", "segment", "subject", "file", "template"}
+    if (all(labels) and len(set(labels)) == len(labels)
+            and not any(lbl.lower() in reserved or lbl.startswith("Δ%") for lbl in labels)):
         return labels
     return [chr(ord("A") + i) for i in range(len(labels))]

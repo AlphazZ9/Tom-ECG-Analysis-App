@@ -321,9 +321,17 @@ it: check the peaks before using that segment.
 **RR tachograms / Poincaré** switches the plot: the Poincaré view draws the
 segments side by side on the same square axes (identity line, centre, SD1 / SD2
 ellipse; only successive valid pairs; at 1 kHz the points are jittered ± half a
-sample for display only). **Export** writes the .xlsx (Comparison, Quality, one
-RR sheet per segment, Blocks, Summary with the template) and the tachogram and
-Poincaré PNGs (300 dpi). **➕ Add to group table…** adds this recording to an
+sample for display only). **Export** (the Results card, once ▶ Compare has run): **Excel…** writes a
+workbook (Comparison with Δ % against the first segment, Quality, Summary with
+the template, event and windows, Blocks, then the RR series and Poincaré pairs
+of each segment), or the metric table alone as **.csv**; **Prism…** a GraphPad
+file (the metric table with one column per segment, the HR block means, the RR
+series and Poincaré pairs, the windows and quality in the project notes);
+**Copy table** puts the metric table on the clipboard for Excel or Prism;
+**Figures…** saves the tachograms and the Poincaré plots (300 dpi PNG, or vector
+PDF / SVG). The Report tab's Excel, ZIP and Prism exports include the last
+comparison too ("Seg …" sheets, "Segments — …" tables), as long as the
+recording, its peaks and its events are those it was computed on. **➕ Add to group table…** adds this recording to an
 .xlsx with one row per recording (subject, file, template, then per segment its
 times, valid RR %, pairs, QC and every metric, columns named after the segment
 labels; the same recording again replaces its row): use the same template for

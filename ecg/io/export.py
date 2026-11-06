@@ -1058,8 +1058,7 @@ class PrismExporter:
         subject:         str = "",
         context_label:   str = "",
         arrhythmia_events: "Optional[list]" = None,
-        segment_a: "Optional[dict]" = None,
-        segment_b: "Optional[dict]" = None,
+        comparison: Any = None,
         fs: "Optional[float]" = None,
         recording_notes: str = "",
         qtc_formula: "Optional[str]" = None,
@@ -1077,6 +1076,11 @@ class PrismExporter:
         metrics:         Any = None,
     ) -> int:
         """Build all tables and write directly to *path*.
+
+        *comparison* (an ecg.io.segment_export.ComparisonResult, the last
+        Compare segments run when still current) adds its tables
+        (``segment_export.prism_tables``, named "Segments — …") and its
+        windows, template and quality to the project notes.
 
         *metrics* (a core.metric_table.MetricTable) adds a last table of its rows:
         value and basis n, with the unit and the state in the row title.
@@ -1393,6 +1397,12 @@ class PrismExporter:
             if not df_m.empty:
                 _add("Metrics — value and basis n", df_m, x_col=0, row_name=True)
 
+        # ── 11. Compare segments (the last run, when still current) ─────
+        if comparison is not None:
+            from ecg.io.segment_export import prism_tables
+            for name, df_s, xc, rn in prism_tables(comparison, prefix="Segments — "):
+                _add(name, df_s, x_col=xc, row_name=rn)
+
         if not tables:
             raise ValueError("No data available for Prism export. "
                              "Run the full analysis first.")
@@ -1428,6 +1438,16 @@ class PrismExporter:
                     event_params if has_events else None, hrv_window):
                 note_names.append(label)
                 note_values.append(value)
+        if comparison is not None:
+            from ecg.io.segment_export import quality_frame, summary_rows
+            for label, value in summary_rows(comparison):
+                if label in ("Subject", "File"):
+                    continue
+                note_names.append(f"Compare segments — {label}")
+                note_values.append(value)
+            for _i, q in quality_frame(comparison).iterrows():
+                note_names.append(f"Compare segments — QC {q['Segment']}")
+                note_values.append(str(q["QC"]))
         if left_out:
             note_names.append("Left out of this export")
             note_values.append(left_out)

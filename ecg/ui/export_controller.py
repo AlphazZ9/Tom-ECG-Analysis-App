@@ -611,6 +611,16 @@ class ExportController:
         if res is not None:
             ExcelExporter.add_autonomic_sheets(wb, res, spwvd, ev_table, ev_params,
                                                hrv_window=self.hrv_window())
+        comparison = getattr(app, "_current_comparison", lambda: None)()
+        if comparison is not None:
+            comparison.subject = app.ent_subject.get().strip()
+            try:
+                from ecg.io.segment_export import add_sheets
+                add_sheets(wb, comparison,
+                           exported_at=datetime.now().strftime("%Y-%m-%d %H:%M"))
+            except Exception:
+                # Additive: never lose the rest of the workbook over it.
+                log.exception("Compare segments sheets not written")
         try:
             ExcelExporter.add_metrics_sheet(wb, filter_table(self.metric_table(), data.included))
         except Exception:
@@ -1020,8 +1030,7 @@ class ExportController:
         data            = self.export_data()
         arr_events      = data.arr_events or []
         arr_summary     = data.arr_summary
-        seg_a           = app.analysis.last_seg_a
-        seg_b           = app.analysis.last_seg_b
+        comparison      = getattr(app, "_current_comparison", lambda: None)()
         notes           = app.session.recording_notes
         fs              = float(app.signal.fs) if app.signal.fs else 1000.0
         auto_res, auto_sp, auto_ev, auto_evp = data.autonomic
@@ -1034,8 +1043,7 @@ class ExportController:
                 epoch_df          = data.epoch_df,
                 subject           = sub,
                 arrhythmia_events = arr_events if arr_events else None,
-                segment_a         = seg_a,
-                segment_b         = seg_b,
+                comparison        = comparison,
                 fs                = fs,
                 recording_notes   = notes,
                 qtc_formula       = app._qtc_formula(),

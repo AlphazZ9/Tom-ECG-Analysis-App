@@ -36,6 +36,9 @@ import tkinter as tk
 from ecg.ui.theme import button_style, disabled_style, toggle_style
 from ecg.ui.poincare_figure import draw_poincare_set
 from ecg.io.group_table import append_group_row, group_row
+from ecg.io.segment_export import (
+    ComparisonResult, comparison_tsv, write_csv, write_pzfx, write_xlsx,
+)
 from ecg.core.segment_plan import (
     DEFAULT_ARTEFACT_MARGIN_S, MAX_SEGMENTS, SegmentTemplate, delete_template,
     load_templates, quality_flags, resolve, save_template, segment_quality,
@@ -119,6 +122,16 @@ class CompareSegmentsMixin:
                       for a in self.analysis.annotations),
                 len(self.analysis.arrhythmia_events))
 
+    def _current_comparison(self: ECGApp) -> "Optional[ComparisonResult]":
+        """The last Compare segments result, None when there is none or the
+        recording, its peaks or its events changed since (the main exports
+        never write a comparison of other peaks)."""
+        res = getattr(self.analysis, "last_comparison", None)
+        if res is None:
+            return None
+        basis = getattr(self.analysis, "last_comparison_basis", None)
+        return res if basis is not None and basis == self._compare_signature() else None
+
     def _refresh_compare_tab(self: ECGApp) -> None:
         """Build the tab's content for the current recording, unless it is
         already built for it (the windows typed in then stay)."""
@@ -150,6 +163,11 @@ class CompareSegmentsMixin:
         vlf, lf, hf = self._get_freq_bands()
         sub    = self.ent_subject.get().strip() if self.ent_subject else "subject"
         tip    = self._bind_hover_tip
+        built_for = self._compare_built_for     # the state rp / sig come from
+
+        def _subject() -> str:
+            """The Subject ID as it is now (it may be typed after the tab was built)."""
+            return self.ent_subject.get().strip() if self.ent_subject else ""
 
         top = ctk.CTkFrame(win, fg_color="transparent")
         top.pack(fill="x", padx=PAGE_PAD_X, pady=(PAGE_PAD_Y, PAGE_GAP))
@@ -674,6 +692,20 @@ class CompareSegmentsMixin:
                 _state.update(segs=segs, cmps=cmps, flags=flags)
                 self._last_seg_a = segs[0]
                 self._last_seg_b = segs[1] if len(segs) > 1 else None
+                # Kept for the exports here and the main ones (Report tab),
+                # with the recording state it rests on (_current_comparison).
+                self.analysis.last_comparison = ComparisonResult(
+                    segs=segs, metrics=list(_METRICS), cmps=cmps, flags=flags,
+                    template=_state["template"], subject=_subject(),
+                    filepath=self.signal.filepath or "", event=ev,
+                    artefact_margin_s=margin, block_s=block_s,
+                    lf_band=tuple(lf), hf_band=tuple(hf))
+                # The state the tab -- hence rp / sig of this run -- was
+                # built for, not the app's now (peaks may have been edited
+                # on another tab while the worker ran).
+                self.analysis.last_comparison_basis = built_for
+                for b in _export_btns:
+                    self._set_btn_enabled(b, True, "secondary")
                 errs = [s["error"] for s in segs if s.get("error")]
                 n_flag = sum(1 for f in flags if f)
                 if errs:
@@ -685,7 +717,6 @@ class CompareSegmentsMixin:
                              + (f"  ·  LF/HF withheld for {', '.join(withheld)}" if withheld else "")
                              + (f"  ·  ⚠ {n_flag} segment(s) to check" if n_flag else ""),
                         text_color=ORANGE if (withheld or n_flag) else GREEN)
-                    self._set_btn_enabled(export_btn, True, "primary")
                 from ecg.core.analysis import segment_comparison_text
                 lines = [segment_comparison_text(c, segs[0]["label"], s["label"]).split("\n")
                          for c, s in zip(cmps, segs[1:])]
@@ -697,118 +728,119 @@ class CompareSegmentsMixin:
 
             _th.Thread(target=_worker, daemon=True).start()
 
-        # ── Export ────────────────────────────────────────────────────────
-        def _export_comparison() -> None:
-            segs = _state["segs"]
-            if not segs:
+        # ── Export: Excel / CSV, Prism, clipboard, figures, group table ───
+        def _result() -> "Optional[ComparisonResult]":
+            res_ = self.analysis.last_comparison
+            if res_ is None or not _state["segs"]:
                 messagebox.showwarning("No results", "Run the comparison first.", parent=win)
+                return None
+            res_.subject = _subject()       # a subject typed after the run counts
+            return res_
+
+        def _stamp() -> str:
+            return datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        def _base_name() -> str:
+            return f"{_subject() or 'subject'}_segments_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        def _done(text: str, ok: bool = True) -> None:
+            if not lbl_exp.winfo_manager():      # shown from the first export on
+                lbl_exp.pack(fill="x", pady=(0, SPACE_XS), before=lbl_mw)
+            lbl_exp.configure(text=("✓  " if ok else "⚠  ") + text, text_color=GREEN if ok else RED)
+
+        def _export_excel() -> None:
+            res_ = _result()
+            if res_ is None:
                 return
-            sub_ = self.ent_subject.get().strip() if self.ent_subject else "subject"
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             path = filedialog.asksaveasfilename(
-                parent=win, title="Export segment comparison", defaultextension=".xlsx",
-                initialfile=f"{sub_}_comparison_{ts}.xlsx",
-                filetypes=[("Excel workbook", "*.xlsx"), ("CSV", "*.csv"), ("All files", "*.*")])
+                parent=win, title="Export the segment comparison",
+                defaultextension=".xlsx", initialfile=_base_name() + ".xlsx",
+                filetypes=[("Excel workbook", "*.xlsx"), ("CSV (metric table)", "*.csv"),
+                           ("All files", "*.*")])
             if not path:
                 return
             try:
-                _write_export(path, segs, sub_)
+                if path.lower().endswith(".csv"):
+                    write_csv(res_, path)
+                else:
+                    write_xlsx(res_, path, exported_at=_stamp())
             except Exception as exc:
                 log.exception("comparison export")
                 messagebox.showerror("Export", str(exc), parent=win)
-
-        def _write_export(path: str, segs: "list[dict]", sub_: str) -> None:
-            tags = unique_tags([s["label"] for s in segs])
-            flags = _state["flags"] or [[] for _ in segs]
-            cmps = _state["cmps"] or []
-            rows = []
-            for key, name, unit in _METRICS:
-                row: "dict[str, Any]" = {"Metric": f"{name}  ({unit})" if unit else name}
-                vals = [float(s.get(key, float("nan")) if s.get(key) is not None else float("nan"))
-                        for s in segs]
-                for tag, v in zip(tags, vals):
-                    row[tag] = v
-                for tag, v in zip(tags[1:], vals[1:]):
-                    row[f"Δ% {tags[0]}→{tag}"] = _delta(vals[0], v)
-                rows.append(row)
-            metrics_df = pd.DataFrame(rows)
-            if path.lower().endswith(".csv"):
-                metrics_df.to_csv(path, index=False, float_format="%.4f")
-                lbl_status.configure(text=f"✓  CSV saved → {os.path.basename(path)}",
-                                     text_color=GREEN)
+                _done(f"export failed: {exc}", ok=False)
                 return
-            from ecg.core.analysis import segment_comparison_text
-            qc_df = pd.DataFrame([{
-                "Segment": tag, "Start (s)": s["t_lo"], "End (s)": s["t_hi"],
-                "Duration (s)": s["duration_s"], "Beats": s["n_beats"],
-                "Valid RR (% of window)": round(segment_quality(s)["valid_pct"], 1),
-                "Excluded RR (%)": round(segment_quality(s)["excluded_pct"], 1),
-                "Poincaré pairs": segment_quality(s)["n_pairs"],
-                "Abrupt RR jumps": segment_quality(s)["n_jumps"],
-                "SD1 (ms)": s.get("sd1"),
-                "SD1 trimmed 2 % (ms)": round(segment_quality(s)["sd1_robust"], 3),
-                "QC": "; ".join(f) if f else "ok"} for tag, s, f in zip(tags, segs, flags)])
-            blocks = []
-            for tag, s in zip(tags, segs):
-                blk = s.get("blocks") or {}
-                for t0, n_rr, rr_m, hr_m in zip(blk.get("t_start", []), blk.get("n_rr", []),
-                                                blk.get("rr_mean", []), blk.get("hr_mean", [])):
-                    blocks.append({"Segment": tag, "Block start (s)": round(float(t0), 2),
-                                   "N RR": int(n_rr), "Mean RR (ms)": round(float(rr_m), 3),
-                                   "HR (bpm, 60000/mean NN)": round(float(hr_m), 2)})
-            summary = [("Subject", sub_), ("File", os.path.basename(self.signal.filepath or "")),
-                       ("Template", _state["template"] or "—"),
-                       ("Export date", datetime.now().strftime("%Y-%m-%d %H:%M")),
-                       ("LF band (Hz)", f"{lf[0]:.2f}–{lf[1]:.2f}"),
-                       ("HF band (Hz)", f"{hf[0]:.2f}–{hf[1]:.2f}")]
-            for tag, c in zip(tags[1:], cmps):
-                summary.append((f"{tags[0]} vs {tag}",
-                                segment_comparison_text(c, tags[0], tag).split("\n")[0]))
-            if cmps:
-                summary.append(("Note", cmps[0]["note"]))
-            with pd.ExcelWriter(path, engine="openpyxl") as xw:
-                metrics_df.to_excel(xw, sheet_name="Comparison", index=False)
-                qc_df.to_excel(xw, sheet_name="Quality", index=False)
-                for tag, s in zip(tags, segs):
-                    pd.DataFrame({"Time (s)": np.asarray(s["t_rr"], dtype=float),
-                                  "RR (ms)": np.asarray(s["rr_ms"], dtype=float)}).to_excel(
-                        xw, sheet_name=f"RR — {tag}"[:31], index=False)
-                pd.DataFrame(blocks).to_excel(xw, sheet_name="Blocks", index=False)
-                pd.DataFrame(summary, columns=["Item", "Value"]).to_excel(
-                    xw, sheet_name="Summary", index=False)
-                for ws in xw.book.worksheets:
-                    ws.freeze_panes = "A2"
-                    for col in ws.columns:
-                        width = max((len(str(c.value)) for c in col if c.value is not None),
-                                    default=8)
-                        ws.column_dimensions[col[0].column_letter].width = min(width + 3, 60)
-            done = [os.path.basename(path)]
-            colors = [_color(k) for k in range(len(segs))]
-            base = os.path.splitext(path)[0]
+            _done(f"saved → {os.path.basename(path)}")
+
+        def _export_prism() -> None:
+            res_ = _result()
+            if res_ is None:
+                return
+            path = filedialog.asksaveasfilename(
+                parent=win, title="Export the segment comparison to GraphPad Prism",
+                defaultextension=".pzfx", initialfile=_base_name() + ".pzfx",
+                filetypes=[("GraphPad Prism", "*.pzfx"), ("All files", "*.*")])
+            if not path:
+                return
+            try:
+                n = write_pzfx(res_, path, exported_at=_stamp())
+            except Exception as exc:
+                log.exception("comparison Prism export")
+                messagebox.showerror("Prism export", str(exc), parent=win)
+                _done(f"Prism export failed: {exc}", ok=False)
+                return
+            _done(f"Prism: {n} tables → {os.path.basename(path)}")
+
+        def _copy_table() -> None:
+            res_ = _result()
+            if res_ is None:
+                return
+            win.clipboard_clear()
+            win.clipboard_append(comparison_tsv(res_))
+            _done("metric table copied — paste it into Excel or Prism")
+
+        def _export_figures() -> None:
+            res_ = _result()
+            if res_ is None:
+                return
+            path = filedialog.asksaveasfilename(
+                parent=win, title="Save the comparison figures (tachograms and Poincaré)",
+                defaultextension=".png", initialfile=_base_name() + ".png",
+                confirmoverwrite=False,
+                filetypes=[("PNG image (300 dpi)", "*.png"), ("PDF (vector)", "*.pdf"),
+                           ("SVG (vector)", "*.svg"), ("All files", "*.*")])
+            if not path:
+                return
+            base, ext = os.path.splitext(path)
+            ext = ext.lower() if ext.lower() in (".png", ".pdf", ".svg") else ".png"
+            targets = [base + sfx + ext for sfx in ("_tachograms", "_poincare")]
+            existing = [os.path.basename(t) for t in targets if os.path.exists(t)]
+            if existing and not messagebox.askyesno(
+                    "Figures", "Replace " + " and ".join(existing) + "?", parent=win):
+                return
+            segs_ = res_.segs
+            colors = [_color(k) for k in range(len(segs_))]
+            n_rows = 1 + (len(segs_) > 4)
+            written = []
             for suffix, figsize, draw in (
-                    ("_plot.png", (10, 4), _rr_drawer(segs, colors)),
-                    ("_poincare.png", (min(4 * len(segs), 16), 4.6 * (1 + (len(segs) > 4))),
-                     lambda fig: draw_poincare_set(fig, segs, colors, title=sub_))):
+                    ("_tachograms", (10, 4), _rr_drawer(segs_, colors)),
+                    ("_poincare", (min(4 * len(segs_), 16), 4.6 * n_rows),
+                     lambda fig: draw_poincare_set(fig, segs_, colors, title=_subject()))):
+                out = base + suffix + ext
                 try:
                     fig = Figure(figsize=figsize, dpi=300, facecolor="white", layout="constrained")
                     if draw(fig) is not False:
-                        fig.savefig(base + suffix, dpi=300, facecolor="white", bbox_inches="tight")
-                        done.append(os.path.basename(base + suffix))
+                        fig.savefig(out, dpi=300, facecolor="white", bbox_inches="tight")
+                        written.append(os.path.basename(out))
                     plt.close(fig)
                 except Exception as exc:
-                    log.warning("comparison figure %s: %s", suffix, exc)
-            lbl_status.configure(text="✓  Exported → " + "  +  ".join(done), text_color=GREEN)
-
-        run_btn.configure(command=_run_compare)
-        export_btn = ctk.CTkButton(ctrl, text="📊  Export", command=_export_comparison,
-                                   state="disabled",
-                                   **{**button_style("secondary"), **disabled_style()})
-        export_btn.pack(side="left", padx=(SPACE_M, 0))
+                    log.warning("comparison figure %s: %s", out, exc)
+                    _done(f"figure {os.path.basename(out)} failed: {exc}", ok=False)
+                    return
+            _done("figures → " + "  +  ".join(written))
 
         def _add_to_group() -> None:
-            segs = _state["segs"]
-            if not segs:
-                messagebox.showwarning("No results", "Run the comparison first.", parent=win)
+            res_ = _result()
+            if res_ is None:
                 return
             path = filedialog.asksaveasfilename(
                 parent=win, title="Group table: add this recording (created if new)",
@@ -816,27 +848,46 @@ class CompareSegmentsMixin:
                 confirmoverwrite=False, filetypes=[("Excel workbook", "*.xlsx"), ("All files", "*.*")])
             if not path:
                 return
-            sub_ = self.ent_subject.get().strip() if self.ent_subject else ""
             try:
                 n, replaced = append_group_row(path, group_row(
-                    sub_, self.signal.filepath, segs, _METRICS,
-                    template=_state["template"], flags=_state["flags"]))
+                    res_.subject, res_.filepath, res_.segs, res_.metrics,
+                    template=res_.template, flags=res_.flags))
             except Exception as exc:
                 messagebox.showerror("Group table", str(exc), parent=win)
                 return
-            lbl_status.configure(
-                text=(f"✓  {sub_ or 'recording'} {'updated in' if replaced else 'added to'} "
-                      f"{os.path.basename(path)} ({n} recording{'s' if n != 1 else ''})"),
-                text_color=GREEN)
+            _done(f"{res_.subject or 'recording'} {'updated in' if replaced else 'added to'} "
+                  f"{os.path.basename(path)} ({n} recording{'s' if n != 1 else ''})")
 
-        group_btn = ctk.CTkButton(ctrl, text="➕  Add to group table…", command=_add_to_group,
-                                  **button_style("secondary"))
-        group_btn.pack(side="left", padx=(SPACE_M, 0))
-        tip(group_btn,
-            "One row per recording (subject, file, template, every metric and the "
-            "quality of each segment): the table for a paired / repeated-measures "
-            "test across animals. Columns are named after the segment labels: use "
-            "the same template for every animal. A recording already in it is replaced.")
+        run_btn.configure(command=_run_compare)
+        lbl_exp = ctk.CTkLabel(res, text="", font=FONT_SMALL, text_color=MUTED,
+                               anchor="w", justify="left")
+        _export_btns: "list[ctk.CTkButton]" = []
+        # Right to left: the header packs them from its right edge.
+        for text, cmd, tiptext in (
+                ("➕  Add to group table…", _add_to_group,
+                 "One row per recording (subject, file, template, every metric and the "
+                 "quality of each segment): the table for a paired / repeated-measures "
+                 "test across animals. Columns are named after the segment labels: use "
+                 "the same template for every animal. A recording already in it is replaced."),
+                ("Figures…", _export_figures,
+                 "The tachograms and the Poincaré plots, 300 dpi PNG or vector PDF / SVG"),
+                ("📋  Copy table", _copy_table,
+                 "The metric table as tab-separated text: paste it into Excel or Prism"),
+                ("Prism…", _export_prism,
+                 "GraphPad Prism file: the metric table (one column per segment), the "
+                 "HR block means, the RR series and the Poincaré pairs of each segment; "
+                 "the windows, template and quality in the project notes"),
+                ("📊  Excel…", _export_excel,
+                 "Workbook: Comparison (Δ % against the first segment), Quality, Summary, "
+                 "Blocks, then the RR series and Poincaré pairs of each segment. "
+                 "Choose .csv for the metric table only.")):
+            b = ctk.CTkButton(res_hdr, text=text, width=0, command=cmd, state="disabled",
+                              **{**button_style("secondary"), **disabled_style()})
+            b.pack(side="right", padx=(SPACE_S, 0))
+            tip(b, tiptext)
+            _export_btns.append(b)
+        ctk.CTkLabel(res_hdr, text="Export:", font=FONT_SMALL,
+                     text_color=MUTED).pack(side="right", padx=(0, SPACE_XS))
 
         _reload_templates()
         ctk.CTkLabel(res,
