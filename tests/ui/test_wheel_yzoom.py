@@ -78,3 +78,32 @@ def test_middle_click_restores_the_drawn_limits(root):
     assert bottom.get_ylim()[1] - bottom.get_ylim()[0] < 200
     slot.canvas.get_tk_widget().event_generate("<Button-2>", x=x, y=y)
     assert bottom.get_ylim() == pytest.approx((300, 600))
+
+
+def test_zooming_never_moves_or_shrinks_the_panels(root):
+    """constrained_layout used to re-flow the figure whenever a zoom changed
+    the tick labels' width ("140" -> "142.5"): the panels moved and shrank."""
+    slot = _slot(root)
+    w = slot.canvas.get_tk_widget()
+    start = [ax.get_window_extent().bounds for ax in slot.fig.axes]
+    for ax, y0 in zip(slot.fig.axes, (143.7, 421.3)):
+        for _ in range(30):
+            x, y = _pixel(slot, ax, min(max(y0, ax.get_ylim()[0]), ax.get_ylim()[1]))
+            _wheel(slot, x, y, 120)
+            root.update()
+            slot.canvas.draw()
+            assert [a.get_window_extent().bounds for a in slot.fig.axes] == start
+    for ax in slot.fig.axes:                      # zoom stops at 1 % of the span
+        lo, hi = ax.get_ylim()
+        h_lo, h_hi = ax._wheel_home_ylim
+        assert hi - lo >= 0.01 * (h_hi - h_lo) * 0.79
+
+
+def test_a_redraw_lays_the_figure_out_again(root):
+    slot = _slot(root)
+    top, _bottom = slot.fig.axes
+    x, y = _pixel(slot, top, 150)
+    _wheel(slot, x, y, 120)
+    assert slot.fig.get_layout_engine().__class__.__name__ != "ConstrainedLayoutEngine"
+    slot._redraw(force=True)
+    assert slot.fig.get_layout_engine().__class__.__name__ == "ConstrainedLayoutEngine"

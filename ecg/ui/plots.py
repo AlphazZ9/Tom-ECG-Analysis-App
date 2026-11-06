@@ -478,6 +478,10 @@ class CanvasSlot:
             return
         self._pending = None
         self.fig.clear()
+        if getattr(self, "_layout_frozen", False):
+            # A wheel zoom froze the layout: a full redraw lays it out again.
+            self.fig.set_layout_engine("constrained")
+            self._layout_frozen = False
         self.fig.patch.set_facecolor(PLOT["bg"])
         self._set_cl_pads()
         if self._draw_fn is None:
@@ -485,6 +489,8 @@ class CanvasSlot:
             return
         try:
             self._draw_fn(self.fig)
+            if getattr(self, "_wheel_zoom", False):
+                self._reserve_ytick_room()
         except Exception as exc:
             log.exception("CanvasSlot draw error")
             ax = self.fig.add_subplot(111)
@@ -519,6 +525,41 @@ class CanvasSlot:
 
     # ── Mouse-wheel zoom of the Y axis ────────────────────────────────────
     WHEEL_ZOOM_IN = 0.8          # Y span factor per wheel notch away from you
+    WHEEL_MIN_SPAN = 0.01        # deepest zoom: 1 % of the span as drawn
+    YTICK_ROOM = "000.00"        # the widest tick label a zoom may show
+
+    def _reserve_ytick_room(self) -> None:
+        """Lay the figure out for tick labels as wide as YTICK_ROOM, with an
+        invisible label of that width beside each Y axis: zooming then never
+        widens the labels past the room left for them, so the frozen layout
+        (enable_wheel_yzoom) needs no change and nothing overlaps the axis
+        title. Offsets ("+1.4e2") are turned off for the same reason."""
+        from matplotlib.transforms import offset_copy
+        for ax in self.fig.axes:
+            if not (ax.get_visible() and ax.yaxis.get_visible()):
+                continue
+            ticks = ax.yaxis.get_major_ticks()
+            if not ticks:
+                continue
+            try:
+                ax.ticklabel_format(axis="y", useOffset=False)
+            except (AttributeError, ValueError):
+                pass                       # not a ScalarFormatter: leave it
+            t0 = ticks[0]
+            size = t0.label1.get_fontsize()
+            shift = t0.get_tick_padding() + t0.get_pad()
+            ax.text(0.0, 0.5, self.YTICK_ROOM, fontsize=size, ha="right", va="center",
+                    alpha=0.0, transform=offset_copy(ax.transAxes, fig=self.fig,
+                                                     x=-shift, units="points"))
+            # The axis title follows the tick labels left as they widen: keep
+            # its room too, beyond the widest labels (≈0.62 em per digit).
+            label = ax.yaxis.label
+            if label.get_text():
+                x_lab = shift + 0.62 * size * len(self.YTICK_ROOM) + ax.yaxis.labelpad
+                ax.text(0.0, 0.5, label.get_text(), fontsize=label.get_fontsize(),
+                        rotation=90, ha="right", va="center", alpha=0.0,
+                        transform=offset_copy(ax.transAxes, fig=self.fig,
+                                              x=-x_lab, units="points"))
 
     def enable_wheel_yzoom(self) -> None:
         """Mouse wheel over a panel zooms its Y axis around the pointer (away
@@ -527,6 +568,9 @@ class CanvasSlot:
         event there, so the wheel does not also scroll an enclosing page
         (CTkScrollableFrame) or reach matplotlib's own wheel handler."""
         w = self.canvas.get_tk_widget()
+        self._wheel_zoom = True
+        if self._draw_fn is not None:        # already drawn: lay it out for the room
+            self._redraw()
 
         def _axes_at(x: int, y: int) -> "tuple[Any, float]":
             # Tk y runs down from the widget's top, matplotlib's display y up
@@ -537,14 +581,29 @@ class CanvasSlot:
                     return ax, float(ax.transData.inverted().transform((x, yd))[1])
             return None, float("nan")
 
+        def _freeze_layout() -> None:
+            # constrained_layout re-flows the figure on every draw: a zoom
+            # that changes the width of the tick labels ("140" -> "142.5" ->
+            # "143.25") would move and shrink the panels. The positions it
+            # last computed are kept until the next full redraw (_redraw).
+            if not getattr(self, "_layout_frozen", False):
+                engine = self.fig.get_layout_engine()
+                if engine is not None and type(engine).__name__ == "ConstrainedLayoutEngine":
+                    self.fig.set_layout_engine("none")
+                    self._layout_frozen = True
+
         def _zoom(x: int, y: int, zoom_in: bool) -> str:
             ax, yc = _axes_at(x, y)
             if ax is None or not np.isfinite(yc):
                 return ""
+            _freeze_layout()
             if not hasattr(ax, "_wheel_home_ylim"):
                 ax._wheel_home_ylim = ax.get_ylim()   # type: ignore[attr-defined]
             f = self.WHEEL_ZOOM_IN if zoom_in else 1.0 / self.WHEEL_ZOOM_IN
             lo, hi = ax.get_ylim()
+            h_lo, h_hi = ax._wheel_home_ylim       # type: ignore[attr-defined]
+            if zoom_in and (hi - lo) * f < self.WHEEL_MIN_SPAN * abs(h_hi - h_lo):
+                return "break"                    # deepest zoom reached
             ax.set_ylim(yc - (yc - lo) * f, yc + (hi - yc) * f)
             self.canvas.draw_idle()
             return "break"
