@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 
 from ecg.core.models import MouseECG
+from ecg.core.models import QT_REPORTED, reported_interval_columns
+from ecg.core.analysis import interval_definitions_text
 from ecg.core.filtering import downsample_xy_for_display
 from ecg.core.wave_template import WaveTemplate
 from ecg.core.analysis import (
@@ -46,7 +48,7 @@ from ecg.core.metric_table import (
     build_metric_table, format_metric, nonlinear_basis_text, quality_tile_texts,
     results_rr_valid, rhythm_cards, rhythm_rows,
 )
-from ecg.ui.plots import style_axes, wrap_fig_text
+from ecg.ui.plots import centered_ylim, style_axes, wrap_fig_text
 from ecg.ui.wave_editor import WaveTemplateMiniEditor
 from ecg.ui.theme import (
     THEME, PLOT, RED, AMBER, ORANGE, ORANGE_DARK,
@@ -124,11 +126,15 @@ def overview_rr(time: "np.ndarray", peaks: "Optional[np.ndarray]", fs: float,
         return None
     t, rr = time[pk[1:]], np.diff(pk) / float(fs) * 1000.0
     lo, hi = np.percentile(rr, [0.5, 99.5])
-    pad = max(0.15 * (hi - lo), 1.0)
+    # Centred on the mean RR (of the intervals inside that range).
+    core = rr[(rr >= lo) & (rr <= hi)]
+    c = float(np.mean(core)) if len(core) else float(np.mean(rr))
+    half = max(c - lo, hi - c)
+    half += max(0.15 * half, 0.5)
     if len(rr) > max_points:
         keep = np.linspace(0, len(rr) - 1, max_points).astype(int)
         t, rr = t[keep], rr[keep]
-    return t, rr, float(lo - pad), float(hi + pad)
+    return t, rr, float(c - half), float(c + half)
 
 
 def qtc_rr_fit(ivl: "pd.DataFrame") -> "Optional[dict]":
@@ -962,6 +968,11 @@ class PlotController:
             ax_q.tick_params(labelsize=7)
             ax_rr.set_xlim(t0, t1)
             ax_hr.set_xlim(t0, t1)
+            # Centred on the mean of what is in view.
+            for ax_, vals in ((ax_rr, rr_ms[in_view]), (ax_hr, hr_bpm[in_view])):
+                lim = centered_ylim(vals)
+                if lim is not None:
+                    ax_.set_ylim(*lim)
             ax_q.set_xlim(t0, t1)
 
         self.app._slots["detail_rrhr"].update(draw)
@@ -1226,17 +1237,18 @@ class PlotController:
         hr_mean = mean_hr_bpm(rr_v)          # 60000 / mean NN (app-wide)
         rr_sd_v = float(rr_v.std())
 
-        # Excluded intervals: hollow red markers at their true value, except
-        # far-off ones (a detection dropout of several seconds, a 0-ms
-        # duplicate) which are drawn at the edge of a range derived from the
-        # valid ones, so they cannot squash the valid trace into a line.
-        rr_hi_bound = float((r.get("hr") or {}).get("rr_max_ms", MouseECG.RR_MAX_MS))
-        ex_hi = max(2.0 * float(rr_v.max()), 1.5 * rr_hi_bound)
-        ex_lo = 0.5 * float(rr_v.min())
+        # Both axes centred on their mean (the dashed line), wide enough for
+        # every valid value. Excluded intervals: hollow red markers at their
+        # true value, except those outside that range (a detection dropout
+        # of several seconds, a 0-ms duplicate), drawn at its edge so they
+        # cannot squash the valid trace into a line.
+        rr_lim = centered_ylim(rr_v, rr_mean)
+        hr_lim = centered_ylim(60_000.0 / rr_v, hr_mean)
+        ex_lo, ex_hi = rr_lim
         t_ex      = t_all[excl]
         rr_ex_raw = rr_all[excl]
         rr_ex     = np.clip(rr_ex_raw, ex_lo, ex_hi)
-        hr_ex     = 60_000.0 / rr_ex
+        hr_ex     = np.clip(60_000.0 / np.clip(rr_ex_raw, 1.0, None), *hr_lim)
         n_off     = int(((rr_ex_raw > ex_hi) | (rr_ex_raw < ex_lo)).sum())
         ex_label  = f"excluded ({n_excl})"
         if n_off:
@@ -1291,6 +1303,7 @@ class PlotController:
 
             spike_note = (f"  ·  {n_spikes} spike{'s' if n_spikes != 1 else ''} detected"
                           if show_markers and n_spikes else "")
+            axes[0].set_ylim(*rr_lim)
             axes[0].set_ylabel("RR (ms)")
             axes[0].set_title(
                 f"RR Intervals  ·  mean {rr_mean:.1f} ms  ·  SD {rr_sd_v:.1f} ms{spike_note}",
@@ -1322,6 +1335,7 @@ class PlotController:
                                     zorder=5, edgecolors="white",
                                     linewidths=0.6, alpha=0.9)
 
+            axes[1].set_ylim(*hr_lim)
             axes[1].set_ylabel("HR (bpm)")
             # The page's card keeps the caption short: the long marker-legend
             # form gets clipped there.
@@ -1928,14 +1942,15 @@ class PlotController:
                 ax.set_axis_off()
             self.app._slots["intervals"].update(draw_unavailable_early)
             return
-        cols  = [c for c in ["PR_ms", "QRS_ms", "QT_ms", "QTc_ms"]
+        cols  = [c for c in reported_interval_columns(["PR_ms", "QRS_ms", "QT_ms", "QTc_ms"])
                  if c in ivl.columns and ivl[c].notna().sum() > 3]
 
         # Completion stats echoed into the plot title so an exported figure
         # still carries "measured on 17% of beats" instead of looking like
         # a clean, complete result (same PR/QRS/QT columns run_intervals()
         # grades the sidebar status by).
-        _core_cols = [c for c in ["PR_ms", "QRS_ms", "QT_ms"] if c in ivl.columns]
+        _core_cols = [c for c in reported_interval_columns(["PR_ms", "QRS_ms", "QT_ms"])
+                      if c in ivl.columns]
         n_ok_ivl    = int((~ivl[_core_cols].isna().any(axis=1)).sum()) if _core_cols else 0
         n_total_ivl = len(ivl)
         pct_ivl     = 100.0 * n_ok_ivl / n_total_ivl if n_total_ivl else 0.0
@@ -1968,7 +1983,8 @@ class PlotController:
         # as "no band to draw".
         _ref: "dict[str, tuple[float, float]]" = {}
 
-        qtrr_fit = qtc_rr_fit(ivl)
+        # No QTc-RR panel while QT is not reported (models.QT_REPORTED).
+        qtrr_fit = qtc_rr_fit(ivl) if QT_REPORTED else None
         have_qtrr = qtrr_fit is not None
 
         def draw_intervals(fig):
@@ -1985,7 +2001,7 @@ class PlotController:
             # figures narrower than ~7.6 in); the axes make room for it.
             defs_txt = wrap_fig_text(
                 "Legacy interval definitions (older session) — re-run Intervals"
-                if legacy_ivl else INTERVAL_DEFINITIONS_TEXT,
+                if legacy_ivl else interval_definitions_text(ivl),
                 0.96 * fig.get_figwidth(), 6.5)
             n_def_lines = defs_txt.count("\n") + 1
             gs = GridSpec(1, n_cols, figure=fig,

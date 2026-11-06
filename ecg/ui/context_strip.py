@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Optional
 import customtkinter as ctk  # type: ignore[import-untyped]
 
 from ecg.core.analysis import QTC_FORMULA_LABELS, normalize_qtc_formula
+from ecg.core.models import QT_REPORTED
 from ecg.core.metric_table import MISSING, MetricTable, build_metric_table
 from ecg.ui.freshness import COMPUTING, NOT_COMPUTED, OUT_OF_DATE, UP_TO_DATE, combine_states
 from ecg.ui.tab_keys import TAB_DETECTION, TAB_MODULES, TAB_REPORT
@@ -147,8 +148,8 @@ def context_fields(results: "Optional[dict]", table: "Optional[MetricTable]",
         StripField("rr", f"RR bounds {float(lo):.1f}–{float(hi):.1f} ms"),
         exclusion_field(table),
         artifact_field(artifact_table),
-        StripField("qtc", "QTc: " + QTC_FORMULA_LABELS[normalize_qtc_formula(qtc_formula)]),
-    ]
+    ] + ([StripField("qtc", "QTc: " + QTC_FORMULA_LABELS[normalize_qtc_formula(qtc_formula)])]
+         if QT_REPORTED else [])          # no QTc while QT is not reported
 
 
 def pending_window_field(results: "Optional[dict]", analysed: Any, applied: Any,

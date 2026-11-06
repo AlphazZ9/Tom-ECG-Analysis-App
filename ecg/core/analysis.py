@@ -59,6 +59,15 @@ log = logging.getLogger("ecg")
 POINCARE_MIN_PAIRS = 10
 
 
+from ecg.core.models import QT_NOT_REPORTED_TEXT  # noqa: E402
+from ecg.core import models as _models  # noqa: E402
+
+
+def MODELS_QT_REPORTED() -> bool:
+    """models.QT_REPORTED, read at call time (tests switch it)."""
+    return bool(_models.QT_REPORTED)
+
+
 def compute_poincare_metrics(
     rr_ms: np.ndarray,
     valid: "Optional[np.ndarray]" = None,
@@ -934,7 +943,7 @@ def analysis_provenance_rows(
         rows.append(("Filters", filter_text))
     rows += rr_disclosure_rows(rr_exclusion_report(r))
     rows.append(("Artifact correction", artifact_correction_text(artifact_report, r)))
-    if qtc_formula is not None:
+    if qtc_formula is not None and MODELS_QT_REPORTED():
         rows.append(("QTc formula", qtc_formula_text(qtc_formula, r.get("intervals"))))
     rows += interval_disclosure_rows(r.get("intervals"))
     return rows
@@ -2109,7 +2118,12 @@ QT_VARIABILITY_LABEL: str = (
 def interval_definitions_text(intervals: "Optional[pd.DataFrame]") -> str:
     """The definitions line matching *intervals*: standard, rolling median
     (its QTc pairing), legacy, or legacy without a recoverable QTc
-    (``recompute_qtc_column``)."""
+    (``recompute_qtc_column``). PR and QRS only while QT is not reported."""
+    if not MODELS_QT_REPORTED():
+        if intervals_use_legacy_definitions(intervals):
+            return ("legacy (saved by an older version): PR = P onset → Q nadir, "
+                    "QRS = Q nadir → S nadir — re-run Intervals for the standard definitions")
+        return "; ".join(f"{k} = {v}" for k, v in INTERVAL_DEFINITIONS[:2])
     if not intervals_use_legacy_definitions(intervals):
         if ensemble_info(intervals) is not None:
             return ENSEMBLE_INTERVAL_DEFINITIONS_TEXT
@@ -2616,7 +2630,8 @@ def ensemble_disclosure(intervals: "Optional[pd.DataFrame]") -> str:
             + (f"T peak and T end of each row are those of the row with the median T end "
                f"among the {int(info['t_rows'])} rows around it (which share most of their "
                "beats), so that the T end does not flip between two candidates of the "
-               "median beat from row to row; " if int(info.get("t_rows", 0)) > 1 else "")
+               "median beat from row to row; "
+               if int(info.get("t_rows", 0)) > 1 and MODELS_QT_REPORTED() else "")
             + ("a biphasic P (a trough the other way less than 8 ms before its peak) "
                "starts where the trace comes back up through the PR baseline after that "
                "trough, not at the foot of the trough (rows measured on their own beat "
@@ -2627,9 +2642,10 @@ def ensemble_disclosure(intervals: "Optional[pd.DataFrame]") -> str:
             + (_qrs_onset_disclosure(info.get("qrs_plans"), n)
                if info.get("qrs_onset") == "initial wave" else "")
             + (_t_end_disclosure(info.get("t_plans"), n)
-               if info.get("t_end") == "end of the last phase" else "")
-            + "QTc pairs each median QT with the mean preceding RR of the same ensemble "
-              "(RR_ensemble_ms), RR_ms stays the row's own; "
+               if info.get("t_end") == "end of the last phase" and MODELS_QT_REPORTED()
+               else "")
+            + ("QTc pairs each median QT with the mean preceding RR of the same ensemble "
+               "(RR_ensemble_ms), RR_ms stays the row's own; " if MODELS_QT_REPORTED() else "")
             + ensemble_window_limit(n, window)
             + f"; the AV-delay check reads this PR and, neighbouring rows sharing most of "
               f"their beats, only reports a run of at least {n} rows, so a shorter episode "
@@ -2702,7 +2718,9 @@ def interval_disclosure_rows(intervals: "Optional[pd.DataFrame]") -> "list[tuple
     rows = [("Interval definitions", interval_definitions_text(intervals)),
             ("Delineation", ensemble_disclosure(intervals))]
     n_ens = ensemble_beats_used(intervals)
-    if n_ens > 1:
+    if not MODELS_QT_REPORTED():
+        rows.append(("QT / QTc", QT_NOT_REPORTED_TEXT))
+    elif n_ens > 1:
         # The spread of a rolling median says nothing beat to beat: withheld.
         rows.append(("QT variability",
                      f"not reported — each row is a rolling median of {n_ens} beats, so "

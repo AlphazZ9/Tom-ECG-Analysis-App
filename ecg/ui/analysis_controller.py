@@ -22,6 +22,7 @@ from ecg.core.models import (
     MouseECG, ArrhythmiaEvent, QTC_FORMULA_LABELS, normalize_qtc_formula,
     PREMATURE_KINDS, event_kind_label,
 )
+from ecg.core.models import reported_interval_columns
 from ecg.core.detection import (
     active_removed_samples, arrhythmia_baseline_info, classify_arrhythmias,
     correct_rr_artifacts, drop_removed_peaks, merge_artifact_reports,
@@ -60,12 +61,18 @@ from ecg.ui.theme import (
 from ecg.ui.theme import toggle_style
 from ecg.ui.freshness import recorded_rr_bounds
 from ecg.ui.plots import style_axes
+from ecg.ui.plots import centered_ylim
 from ecg.ui.tab_keys import MODE_EPOCHS, MODE_SLIDING, TAB_EVENTS, TAB_TIME_COURSE
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
+
+
+# The per-window columns of heart rate / RR, whose axes are centred on their
+# mean (the other metrics keep their autoscale).
+_CENTRED_COLUMNS = ("HR", "HR_mean", "MeanNN", "HRV_MeanNN", "RR_mean", "MeanRR")
 
 
 def draw_windowed_panels(fig: Any, t: np.ndarray, df: pd.DataFrame,
@@ -100,6 +107,10 @@ def draw_windowed_panels(fig: Any, t: np.ndarray, df: pd.DataFrame,
         if (~low_n).any():
             ax.plot(t[~low_n], y[~low_n], "o", ms=3.0, color=color, zorder=4)
         ax.set_ylabel(ylabel, fontsize=8)
+        if col in _CENTRED_COLUMNS:          # HR / RR: centred on their mean
+            lim = centered_ylim(y)
+            if lim is not None:
+                ax.set_ylim(*lim)
         ax.set_title(title, loc="left", fontsize=8)
         if ax is not axes[-1]:
             ax.tick_params(labelbottom=False)
@@ -950,6 +961,12 @@ class AnalysisController:
                            ls=":", alpha=0.65, zorder=4,
                            label=f"Tachy threshold +{bpct:.0f}%")
 
+            # Centred on the mean RR, the baseline and threshold lines kept in view.
+            lim = centered_ylim(np.concatenate([np.asarray(ln.get_ydata(), dtype=float)
+                                                for ln in ax.lines]),
+                                float(np.nanmean(rr_ms)) if len(rr_ms) else None)
+            if lim is not None:
+                ax.set_ylim(*lim)
             ax.set_title(
                 "RR series — click an event or the ribbon to zoom",
                 loc="left", fontsize=9)
@@ -2354,7 +2371,8 @@ class AnalysisController:
     def _measured_note(ivl: "pd.DataFrame", provenance: str) -> "tuple[str, str, int, int]":
         """The Morphology status line of measured intervals: (text, colour,
         beats measured, beats)."""
-        interval_cols = [c for c in ["PR_ms", "QRS_ms", "QT_ms"] if c in ivl.columns]
+        interval_cols = [c for c in reported_interval_columns(["PR_ms", "QRS_ms", "QT_ms"])
+                         if c in ivl.columns]
         n_ok    = int((~ivl[interval_cols].isna().any(axis=1)).sum()) if interval_cols else 0  # type: ignore[arg-type]
         n_total = len(ivl)
         pct     = 100.0 * n_ok / n_total if n_total else 0.0

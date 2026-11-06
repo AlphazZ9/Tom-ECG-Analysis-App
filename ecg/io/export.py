@@ -24,6 +24,7 @@ from openpyxl.utils import get_column_letter
 from ecg.core.models import (
     AnalysisResults, MouseECG, PREMATURE_DEFINITION_TEXT, event_kind_label,
 )
+from ecg.core.models import QT_REPORTED, reported_intervals
 from ecg.core.detection import premature_summary_rows
 from ecg.core.analysis import (
     HR_RANGE_TEXT, LEGACY_SPECTRAL_TEXT, SPECTRAL_METHOD_TEXT,
@@ -555,7 +556,7 @@ class ExcelExporter:
             # HRV_PI / HRV_GI of the HRV_NonLinear sheet (NeuroKit's, same
             # conventions as the text report's RR-asymmetry block).
             cover_rows.append(("HR asymmetry (HRV_PI, HRV_GI)", RR_ASYMMETRY_TEXT))
-        if qtc_formula is not None:
+        if qtc_formula is not None and QT_REPORTED:
             cover_rows.append(("QTc formula", qtc_formula_text(qtc_formula, results.get("intervals"))))
         # PR / QRS / QT landmarks and the beat-to-beat QT variability of the
         # ECG_Intervals sheet (single lead -- not classical QT dispersion).
@@ -651,7 +652,7 @@ class ExcelExporter:
             ("HRV_Time",      results.get("hrv_time"),    "1565C0"),
             ("HRV_Frequency", hrv_freq_sheet_frame(cast(dict, results)), "6A1B9A"),
             ("HRV_NonLinear", results.get("hrv_nonlin"),  "00695C"),
-            ("ECG_Intervals", results.get("intervals"),   "AD1457"),
+            ("ECG_Intervals", reported_intervals(results.get("intervals")), "AD1457"),
         ]
         for name, df, color in sheet_specs:
             if df is None or df.empty:
@@ -1250,7 +1251,7 @@ class PrismExporter:
                 _add("HRV — Non-Linear", df, x_col=0, row_name=True)
 
         # ── 5. ECG intervals per beat (OneWay — distributions) ───────────
-        ivl = results.get("intervals")
+        ivl = reported_intervals(results.get("intervals"))
         if ivl is not None and not ivl.empty:
             col_map = [
                 ("PR_ms",  "PR (ms)"),

@@ -33,7 +33,7 @@ from ecg.core.analysis import (
     rr_asymmetry_indices, rr_exclusion_report, rr_valid_mask,
     successive_valid_pairs, LEGACY_SPECTRAL_TEXT,
 )
-from ecg.core.models import MouseECG
+from ecg.core.models import MouseECG, QT_REPORTED, reported_interval_columns
 
 MISSING = "—"
 
@@ -61,8 +61,16 @@ AUTO_ASYMMETRY: Any = object()
 MIN_PAIRS_ASYMMETRY = 8     # below this no asymmetry block is shown
 BEAT_CORR_THRESHOLD = 0.90  # Poor-shape-match threshold of the quality tiles
 
-INTERVAL_COLUMNS = (("PR_ms", "PR"), ("QRS_ms", "QRS"), ("QT_ms", "QT"), ("QTc_ms", "QTc"))
-_MEASURED_COLUMNS = ("PR_ms", "QRS_ms", "QT_ms")   # the "n/N beats measured" of Intervals
+# QT and QTc are left out while models.QT_REPORTED is False (see there).
+INTERVAL_COLUMNS = tuple(
+    (c, n) for c, n in (("PR_ms", "PR"), ("QRS_ms", "QRS"), ("QT_ms", "QT"), ("QTc_ms", "QTc"))
+    if c in reported_interval_columns((c,)))
+# the "n/N beats measured" of Intervals
+_MEASURED_COLUMNS = tuple(reported_interval_columns(("PR_ms", "QRS_ms", "QT_ms")))
+_MEASURED_NAMES = " and ".join(
+    [", ".join(n for c, n in INTERVAL_COLUMNS if c in _MEASURED_COLUMNS[:-1]),
+     dict(INTERVAL_COLUMNS)[_MEASURED_COLUMNS[-1]]])     # "PR and QRS" / "PR, QRS and QT"
+MEASURED_NAMES = _MEASURED_NAMES
 
 # column -> (label, unit, decimals); listed = curated tier, the rest = "all"
 _TIME_CURATED = {
@@ -229,7 +237,8 @@ def results_asymmetry(r: dict) -> "Optional[dict]":
 
 
 def intervals_measured(ivl: "Optional[pd.DataFrame]") -> "tuple[int, int]":
-    """(beats with PR, QRS and QT all measured, beats delineated): the
+    """(beats with PR, QRS and QT all measured -- PR and QRS while QT is not
+    reported --, beats delineated): the
     "n/N beats measured" of the Intervals status line."""
     if ivl is None or ivl.empty:
         return 0, 0
@@ -377,7 +386,7 @@ def interval_rows(ivl: "Optional[pd.DataFrame]") -> "list[MetricRow]":
         return []
     rows = []
     n_ok, total = intervals_measured(ivl)
-    both = f"{n_ok} of {total} beats measured on PR, QRS and QT together"
+    both = f"{n_ok} of {total} beats measured on {_MEASURED_NAMES} together"
     # A rolling median: the spread across rows is not across beats.
     smoothed = ensemble_short_text(ivl)
     across = "across rows" if smoothed else "across beats"
@@ -386,7 +395,7 @@ def interval_rows(ivl: "Optional[pd.DataFrame]") -> "list[MetricRow]":
     legacy = "legacy definitions: re-run Intervals" if intervals_use_legacy_definitions(ivl) else ""
     if any(c in ivl.columns for c in _MEASURED_COLUMNS):
         rows.append(MetricRow("intervals.beats_measured", "intervals", "Intervals",
-                              "Beats measured (PR, QRS and QT)", n_ok, "beats", n_ok, total,
+                              f"Beats measured ({_MEASURED_NAMES})", n_ok, "beats", n_ok, total,
                               both, decimals=0, note=legacy))
     for col, label in INTERVAL_COLUMNS:
         if col not in ivl.columns:
@@ -406,7 +415,7 @@ def interval_rows(ivl: "Optional[pd.DataFrame]") -> "list[MetricRow]":
                                   f"{label} {name.upper()} {across}",
                                   float(np.percentile(d, q)) if n else float("nan"), "ms", n, total,
                                   text, tier=TIER_ALL, decimals=1))
-    if "QT_ms" in ivl.columns and not smoothed:
+    if QT_REPORTED and "QT_ms" in ivl.columns and not smoothed:
         q = qt_beat_variability(ivl["QT_ms"].to_numpy(dtype=float))
         rows.append(MetricRow("intervals.QT_iqr", "intervals", "Intervals",
                               "QT IQR (beat-to-beat)", q["iqr_ms"], "ms", q["n"], total,
@@ -539,7 +548,7 @@ def _status_rows(r: dict, rep: dict, epoch_df: Any, rolling_df: Any, autonomic: 
     ivl = r.get("intervals")
     if _nonempty(ivl) and any(c in ivl.columns for c in _MEASURED_COLUMNS):
         n_ok, total = intervals_measured(ivl)
-        basis["intervals"] = (n_ok, total, f"{n_ok} of {total} beats measured on PR, QRS and QT together")
+        basis["intervals"] = (n_ok, total, f"{n_ok} of {total} beats measured on {_MEASURED_NAMES} together")
     if _nonempty(epoch_df):
         basis["epochs"] = (len(epoch_df), None, f"{len(epoch_df)} epochs")
     if _nonempty(rolling_df):

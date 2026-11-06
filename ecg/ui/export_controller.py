@@ -43,6 +43,8 @@ from ecg.core.filtering import filter_description, recorded_filter_text
 from ecg.core.models import (
     MouseECG, QTC_FORMULA_LABELS, event_kind_label, normalize_qtc_formula,
 )
+from ecg.core.models import QT_REPORTED, QT_NOT_REPORTED_TEXT
+from ecg.ui.plots import centered_ylim
 from ecg.ui.event_locked_view import event_table_frame, export_event_params
 from ecg.ui.report_view import (
     ReportLine, autonomic_method_text, events_baseline_text, include_choices, left_out_labels,
@@ -72,8 +74,9 @@ def pdf_interval_footer(ivl: "Optional[object]") -> str:
     # A rolling median has no QT IQR row: ensemble_disclosure says why.
     return ("Intervals: " + interval_definitions_text(ivl)  # type: ignore[arg-type]
             + "   |   Delineation: " + ensemble_disclosure(ivl)  # type: ignore[arg-type]
-            + ("" if ensemble_short_text(ivl)  # type: ignore[arg-type]
+            + ("" if ensemble_short_text(ivl) or not QT_REPORTED  # type: ignore[arg-type]
                else "   |   QT IQR = beat-to-beat, single lead (not QT dispersion)")
+            + ("" if QT_REPORTED else "   |   " + QT_NOT_REPORTED_TEXT)
             + "   |   Wave template: " + wave_template_disclosure(ivl))  # type: ignore[arg-type]
 
 
@@ -449,11 +452,12 @@ class ExportController:
             rr_v = rr_all[valid]
             rr_mean = float(rr_v.mean()); rr_sd = float(rr_v.std())
             hr_mean = mean_hr_bpm(rr_v)          # 60000 / mean NN (app-wide)
-            # Same display range as plot_rr: a far-off excluded interval is
-            # drawn at the edge instead of squashing the valid trace.
-            rr_hi_b = float((r.get("hr") or {}).get("rr_max_ms", MouseECG.RR_MAX_MS))
-            rr_ex = np.clip(rr_all[excl], 0.5 * float(rr_v.min()),
-                            max(2.0 * float(rr_v.max()), 1.5 * rr_hi_b))
+            # Same display range as plot_rr: both axes centred on their mean;
+            # a far-off excluded interval is drawn at the edge instead of
+            # squashing the valid trace.
+            rr_lim = centered_ylim(rr_v, rr_mean)
+            hr_lim = centered_ylim(60_000.0 / rr_v, hr_mean)
+            rr_ex = np.clip(rr_all[excl], *rr_lim)
             t_ex  = t_all[excl]
             from matplotlib.gridspec import GridSpec as _GS
             _gs = _GS(2, 1, figure=fig, left=0.08, right=0.98,
@@ -472,6 +476,7 @@ class ExportController:
                              label=f"excluded ({int((~valid).sum())})")
                 axes[0].legend(loc="upper right", fontsize=7, framealpha=0,
                                labelcolor=PLOT.get("text", GRAY_LIGHT))
+            axes[0].set_ylim(*rr_lim)
             axes[0].set_ylabel("RR (ms)")
             axes[0].set_title(
                 f"RR Intervals  ·  mean {rr_mean:.1f} ms  ·  SD {rr_sd:.1f} ms",
@@ -479,8 +484,9 @@ class ExportController:
             axes[1].plot(t_ds_hr, hr_ds, color=ORANGE_DARK, lw=0.9, zorder=2)
             axes[1].axhline(hr_mean, color=ORANGE_DARK, ls="--", lw=0.9, alpha=0.5)
             if len(t_ex):
-                axes[1].plot(t_ex, 60_000.0 / rr_ex, "o", ls="none", ms=4.0,
-                             mfc="none", mec=RED, mew=1.0, zorder=4)
+                axes[1].plot(t_ex, np.clip(60_000.0 / np.clip(rr_ex, 1.0, None), *hr_lim),
+                             "o", ls="none", ms=4.0, mfc="none", mec=RED, mew=1.0, zorder=4)
+            axes[1].set_ylim(*hr_lim)
             axes[1].set_ylabel("HR (bpm)")
             axes[1].set_xlabel("Time (s)")
             axes[1].set_title(f"Instantaneous HR  ·  mean {hr_mean:.0f} bpm",

@@ -20,7 +20,9 @@ from ecg.core.analysis import (
 from ecg.core.metric_table import (
     INTERVAL_COLUMNS, MISSING, MetricTable, interval_rows, intervals_measured,
 )
-from ecg.core.models import QTC_FORMULA_LABELS, normalize_qtc_formula
+from ecg.core.metric_table import MEASURED_NAMES
+from ecg.core.models import (QT_NOT_REPORTED_TEXT, QT_REPORTED, QTC_FORMULA_LABELS,
+                             normalize_qtc_formula)
 from ecg.core.wave_template import WaveTemplate
 from ecg.ui.freshness import NOT_COMPUTED, UP_TO_DATE, ModuleFreshness, stale_banner_text
 from ecg.ui.tabbar import STATE_GLYPHS, state_color
@@ -106,7 +108,7 @@ def measured_headline(ivl: Any) -> "tuple[str, str]":
     tier = "good" if pct >= 90 else "partial" if pct >= 50 else "low"
     smoothed = ensemble_short_text(ivl)
     tail = f" · {smoothed}" if smoothed else ""
-    return f"{n_ok}/{total} beats measured ({pct:.0f}%) on PR, QRS and QT{tail}", tier
+    return f"{n_ok}/{total} beats measured ({pct:.0f}%) on {MEASURED_NAMES}{tail}", tier
 
 
 def interval_lines(ivl: Any) -> "list[IntervalLine]":
@@ -300,13 +302,16 @@ class TabMorphologyMixin:
 
         bar = ctk.CTkFrame(col, fg_color="transparent")
         bar.grid(row=0, column=0, sticky="ew")
-        ctk.CTkLabel(bar, text="QTc formula", font=FONT_SMALL,
+        # No QTc formula while QT is not reported (models.QT_REPORTED): the
+        # formula in effect stays in app state for when it is.
+        qtc_bar = bar if QT_REPORTED else ctk.CTkFrame(col, fg_color="transparent")
+        ctk.CTkLabel(qtc_bar, text="QTc formula", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left", padx=(0, SPACE_S))
         # Values come from QTC_FORMULA_LABELS (single source shared with
         # normalize_qtc_formula, session save/restore and the exports);
         # wide enough for the longest label ("Fridericia (QT/∛RR, human)").
         self.cb_qtc_formula = ctk.CTkComboBox(
-            bar,
+            qtc_bar,
             width=int(215 * THEME.font_scale),
             values=list(QTC_FORMULA_LABELS.values()),
             command=self._on_qtc_formula_change,
@@ -320,7 +325,8 @@ class TabMorphologyMixin:
             getattr(getattr(self, "analysis", None), "qtc_formula", "mitchell"))])
         self.cb_qtc_formula.pack(side="left")
         ctk.CTkLabel(bar, text="Rolling median (beats)", font=FONT_SMALL,
-                     text_color=MUTED).pack(side="left", padx=(SPACE_L, SPACE_S))
+                     text_color=MUTED).pack(side="left",
+                                            padx=(SPACE_L if QT_REPORTED else 0, SPACE_S))
         # As the formula: the value lives in app state, a rebuild keeps it.
         ens_var = ctk.StringVar(master=bar, value=str(getattr(
             getattr(self, "analysis", None), "ensemble_beats", ENSEMBLE_BEATS_DEFAULT)))
@@ -416,6 +422,15 @@ class TabMorphologyMixin:
                                 padx=(SPACE_S, SPACE_M if c == 3 else 0))
             self._ivl_cells.append(cells)
 
+        if not QT_REPORTED:
+            # No QTc-RR diagnostic while QT is not reported: what it shows is
+            # the QTc (models.QT_REPORTED). Its slot is absent: every caller
+            # reads it with .get().
+            self.lbl_qtc_rr = None
+            ctk.CTkLabel(col, text=QT_NOT_REPORTED_TEXT + ".", font=FONT_HINT, text_color=MUTED,
+                         anchor="w", justify="left", wraplength=int(420 * THEME.font_scale),
+                         ).grid(row=7, column=0, sticky="ew", pady=(SPACE_S, 0))
+            return
         ctk.CTkLabel(col, text="QTc vs RR  ·  a flat line means the correction removed "
                                "the rate dependence",
                      font=FONT_HINT, text_color=MUTED, anchor="w", justify="left",

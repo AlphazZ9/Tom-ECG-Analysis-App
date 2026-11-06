@@ -27,7 +27,8 @@ from ecg.core.metric_table import (
     MISSING, REPORT_AUTONOMIC, REPORT_EVENTS, REPORT_MODULES, REPORT_QUALITY, REPORT_RHYTHM,
     REPORT_TIME_COURSE, REPORT_INTERVALS, MetricTable, build_metric_table, report_key_results,
 )
-from ecg.core.models import MouseECG, QTC_FORMULA_LABELS, event_kind_label, normalize_qtc_formula
+from ecg.core.models import (MouseECG, QT_REPORTED, QTC_FORMULA_LABELS, event_kind_label,
+                             normalize_qtc_formula)
 from ecg.ui.context_strip import artifact_field, exclusion_field, window_text
 from ecg.ui.freshness import COMPUTING, NOT_COMPUTED, UP_TO_DATE, combine_states
 
@@ -143,7 +144,7 @@ def provenance_rows(t: MetricTable, results: "Optional[dict]", filepath: "Option
         lo, hi = current_rr
         n = n_peaks
     excluded = exclusion_field(t if results is not None else None).text
-    return [
+    rows = [
         ("File", os.path.basename(filepath or "") or MISSING),
         ("Subject", subject or MISSING),
         ("Analysis window", span + (f" · {n} beats" if n is not None else "")),
@@ -155,6 +156,8 @@ def provenance_rows(t: MetricTable, results: "Optional[dict]", filepath: "Option
         ("QTc formula", QTC_FORMULA_LABELS[normalize_qtc_formula(qtc_formula)]),
         ("Autonomic", autonomic_method or NOT_COMPUTED),
     ]
+    # No QTc formula while QT is not reported (models.QT_REPORTED).
+    return [r for r in rows if QT_REPORTED or r[0] != "QTc formula"]
 
 
 def report_text(

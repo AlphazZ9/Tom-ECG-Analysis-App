@@ -209,6 +209,41 @@ _LEGACY_QTC_FORMULAS = {
 }
 
 
+# QT and QTc are not reported -- no view, table, plot or export shows them,
+# nor the T peak / T end they rest on -- until the T end is validated on
+# annotated beats: on recordings of D:/Data above ~450 bpm the next beat's P
+# was taken for the T, and the T end is not found on half the rows of many
+# recordings. They are still computed (sessions keep them), so switching
+# this back to True shows them again everywhere.
+QT_REPORTED: bool = False
+QT_NOT_REPORTED_TEXT: str = (
+    "QT and QTc not reported: the T end is not yet validated against annotated "
+    "beats (unreliable above ~450 bpm and often not found)")
+# The interval-frame columns that belong to the QT: left out of every table,
+# plot and export while QT_REPORTED is False. RR_ensemble_ms is the RR the
+# QTc of a rolling-median row was corrected with.
+QT_COLUMNS: "tuple[str, ...]" = ("QT_ms", "QTc_ms", "T_peak_s", "T_peak_ms", "T_offset_s",
+                                 "T_offset_ms", "RR_ensemble_ms", "RR_prev_ms")
+
+
+def reported_interval_columns(columns) -> "list[str]":
+    """*columns* without the QT ones while QT is not reported."""
+    return [c for c in columns if QT_REPORTED or c not in QT_COLUMNS]
+
+
+def reported_intervals(df):
+    """The interval frame as views and exports show it (no QT columns while
+    QT is not reported); *df* itself is unchanged."""
+    if df is None or QT_REPORTED:
+        return df
+    drop = [c for c in QT_COLUMNS if c in getattr(df, "columns", ())]
+    if not drop:
+        return df
+    out = df.drop(columns=drop)
+    out.attrs = dict(getattr(df, "attrs", {}))
+    return out
+
+
 def normalize_qtc_formula(value: object) -> str:
     """Return a supported QTc formula key from a key, a current or legacy
     selector label; old/unknown values default to Mitchell."""

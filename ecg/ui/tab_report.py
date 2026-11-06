@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 import customtkinter as ctk  # type: ignore[import-untyped]
 
 from ecg.core.metric_table import REPORT_MODULES
+from ecg.core.models import QT_REPORTED
 from ecg.ui.freshness import NOT_COMPUTED
 from ecg.ui.popover import Popover, menu_button
 from ecg.ui.tab_keys import TAB_REPORT
@@ -41,8 +42,10 @@ log = logging.getLogger("ecg")
 
 _TEXT_OPEN = "▾  Text report"
 _TEXT_CLOSED = "▸  Text report"
-_PROVENANCE_LABELS = ("File", "Subject", "Analysis window", "Filters", "RR bounds", "Excluded RR",
-                      "Artifact correction", "HRV bands", "QTc formula", "Autonomic")
+_PROVENANCE_LABELS = tuple(
+    lb for lb in ("File", "Subject", "Analysis window", "Filters", "RR bounds", "Excluded RR",
+                  "Artifact correction", "HRV bands", "QTc formula", "Autonomic")
+    if QT_REPORTED or lb != "QTc formula")        # no QTc while QT is not reported
 _NOTE = ("This screen, the text report, the PDF and the Metrics tables of Excel and Prism "
          "read one table: each value with its unit, its basis n and its state. The other "
          "Excel sheets and Prism tables hold the series those values come from.")

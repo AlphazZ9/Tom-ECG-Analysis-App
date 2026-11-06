@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Optional, Any
 
+import numpy as np
 import matplotlib
 import matplotlib.figure
 from matplotlib.figure import Figure
@@ -149,6 +150,24 @@ def wrap_fig_text(text: str, width_in: float, fontsize: float) -> str:
     if cur:
         lines.append(cur)
     return "\n".join(lines)
+
+
+def centered_ylim(values, center: "Optional[float]" = None,
+                  pad: float = 0.08) -> "Optional[tuple[float, float]]":
+    """Y limits centred on *center* (default: the mean of *values*), wide
+    enough for every finite value plus *pad* of the half-range: RR and HR
+    plots put their mean on the middle of the axis. None without a finite
+    value."""
+    v = np.asarray(values, dtype=float).ravel()
+    v = v[np.isfinite(v)]
+    if not len(v):
+        return None
+    c = float(np.mean(v)) if center is None or not np.isfinite(center) else float(center)
+    half = float(np.max(np.abs(v - c)))
+    if half <= 0:
+        half = max(abs(c) * 0.05, 1.0)
+    half *= 1.0 + pad
+    return c - half, c + half
 
 
 def style_axes(ax) -> None:
