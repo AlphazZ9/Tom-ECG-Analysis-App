@@ -42,7 +42,8 @@ The app has five analysis tabs and a report, organised by question:
 |-----|--------------|-------|
 | **Signal & Detection** | Is the signal good and are the peaks right? | Signal, peak editing, quality panel |
 | **Rhythm & HRV** | What are the rhythm and its variability over the window? | RR / HR, time domain, frequency, non-linear, RR asymmetry |
-| **Time course** | How do they change over time? | Epochs, Sliding, Autonomic, Event-locked (one selector) |
+| **Time course** | How do they change over time? | Epochs, Sliding, Autonomic with Event-locked below (one selector) |
+| **Compare segments** | Is window B different from window A? | Two windows: metric table, RR tachograms or Poincaré, export, group table |
 | **Morphology & Intervals** | What does a beat look like and how long are its intervals? | Steps: mean beat, landmarks, intervals |
 | **Events** | What happened that should not have? | Event ribbon, event list, ECG zoom |
 | **Report** | What goes out? | Provenance, module states, Include, exports |
@@ -172,9 +173,11 @@ Frequency and Non-linear are still running, Rhythm & HRV and the Report tab say
 **computing**, and an export first asks whether to wait: if you go on, the Excel
 Cover, the Prism notes, the PDF footer and the text report name what is missing.
 
-**Rhythm & HRV** is one scrolling page. **Time course** holds Epochs, Sliding (the
-former Rolling), Autonomic and Event-locked, under one selector; the last two have a
-section of their own below.
+**Rhythm & HRV** is one scrolling page: the tachogram has the full width, the
+Poincaré diagram and the multiscale entropy have their own card below it.
+**Time course** holds Epochs, Sliding (the former Rolling) and Autonomic under one
+selector; Autonomic is a scrolling page with the **Event-locked** means (computed
+from the Autonomic indices) below the indices. Both have a section of their own below.
 
 ### Rhythm & HRV: key values, tachogram and Poincaré
 
@@ -285,9 +288,21 @@ mode — see
   (Sliding) and the Autonomic methods are named variants with other
   covariance estimators.
 
-### Compare Segments (Ctrl+M)
+### Compare segments (Ctrl+M)
 
-Opens from Ctrl+M or from **⚖ Compare Segments…** in Time course > Event-locked.
+A tab of its own, after Time course; Ctrl+M or **⚖ Compare segments →** (Time
+course > Autonomic, Event-locked part) opens it. It is built for the recording and
+its peaks: the windows you typed stay while they do not change, and it is rebuilt
+when a new file is opened or the peaks are edited.
+
+**RR tachograms / Poincaré** switches the plot: the Poincaré view draws both
+segments side by side on the same square axes (identity line, centre, SD1 / SD2
+ellipse; only successive valid pairs; at 1 kHz the points are jittered ± half a
+sample for display only). **Export** also writes `<name>_poincare.png` (300 dpi).
+**➕ Add to group table…** adds this recording to an .xlsx with one row per
+recording (subject, file, every metric of A and of B; the same recording again
+replaces its row): the table for a paired test across animals (Prism paired
+column table, Wilcoxon matched-pairs or paired t).
 
 Pick two time ranges (or fill them around an event) and click **▶ Compare**:
 the table shows every metric for both segments, with the same definitions

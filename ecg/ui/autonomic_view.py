@@ -65,7 +65,7 @@ MIN_PAIRS_NOTE = (
 CALIBRATION_WARNING = (
     "ks = 3, kp = 12 are the rat (SHR) calibration of Candia-Rivera et al. "
     "2025 — not validated in mice. Calibrate on your own cohort "
-    "(Event-locked > Calibrate).")
+    "(⚖ Calibrate ks/kp…).")
 
 # The SPWVD band powers are unnormalised (core.spwvd, "Units and scale").
 SPWVD_NOTE = (

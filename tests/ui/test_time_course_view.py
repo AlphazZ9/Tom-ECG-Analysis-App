@@ -42,7 +42,7 @@ def test_tab_sits_right_after_rhythm_and_hrv():
 
 
 def test_modules_moved_from_rhythm_to_time_course():
-    assert set(TAB_MODULES[TAB_TIME_COURSE]) == set(MODE_MODULES.values())
+    assert set(TAB_MODULES[TAB_TIME_COURSE]) == {m for ms in MODE_MODULES.values() for m in ms}
     assert not set(TAB_MODULES[TAB_HRV]) & set(MODE_MODULES.values())
 
 
@@ -61,8 +61,8 @@ def test_selector_left_rhythm_and_hrv():
     ("Epochs", "Event-locked", MODE_EPOCHS),        # the toggle was not the view shown
     ("Rolling", "Time series", MODE_SLIDING),
     ("Autonomic", "Time series", MODE_AUTONOMIC),
-    ("Autonomic", "Event-locked", MODE_EVENT_LOCKED),
-    (None, "Event-locked", MODE_EVENT_LOCKED),
+    ("Autonomic", "Event-locked", MODE_AUTONOMIC),   # Event-locked is within Autonomic now
+    (None, "Event-locked", MODE_AUTONOMIC),
     (None, "Time series", MODE_AUTONOMIC),
     ("Overview", "Time series", None),              # lives on Rhythm & HRV now
     ("RR / HR", "Event-locked", None),
@@ -77,6 +77,8 @@ def test_a_stored_mode_wins_and_former_names_are_understood():
         assert time_course_mode(m, "Rolling", "Event-locked") == m
     assert time_course_mode("Rolling") == MODE_SLIDING
     assert time_course_mode("Time series") == MODE_AUTONOMIC
+    assert time_course_mode(MODE_EVENT_LOCKED) == MODE_AUTONOMIC
+    assert MODE_EVENT_LOCKED not in TIME_COURSE_MODES
     assert time_course_mode("nonsense") is None
 
 
@@ -135,10 +137,12 @@ def test_banner_gives_the_reasons_when_the_times_are_unknown_or_not_the_cause():
 
 # ── Recompute runs the mode shown ─────────────────────────────────────────
 
-def _recompute(mode: str, autonomic_state: str = UP_TO_DATE) -> "list[str]":
+def _recompute(mode: str, autonomic_state: str = UP_TO_DATE,
+               had_event_locked: bool = False) -> "list[str]":
     calls: "list[str]" = []
     app = SimpleNamespace(
         ui=UIState(time_course_mode=mode),
+        analysis=SimpleNamespace(event_locked=object() if had_event_locked else None),
         _compute_epochs=lambda: calls.append("epochs"),
         _compute_rolling_hrv=lambda: calls.append("rolling"),
         _compute_autonomic=lambda: calls.append("autonomic"),
@@ -154,13 +158,15 @@ def _recompute(mode: str, autonomic_state: str = UP_TO_DATE) -> "list[str]":
 def test_recompute_runs_the_mode_shown():
     assert _recompute(MODE_EPOCHS) == ["epochs"]
     assert _recompute(MODE_SLIDING) == ["rolling"]
-    assert _recompute(MODE_AUTONOMIC) == ["autonomic"]
-    assert _recompute(MODE_EVENT_LOCKED) == ["event_locked"]
+    # Autonomic current: only the event-locked means can be what is stale.
+    assert _recompute(MODE_AUTONOMIC) == ["event_locked"]
+    assert _recompute(MODE_AUTONOMIC, OUT_OF_DATE) == ["autonomic"]
 
 
 def test_recompute_of_event_locked_first_renews_a_stale_autonomic_result():
     for state in (OUT_OF_DATE, NOT_COMPUTED):
-        assert _recompute(MODE_EVENT_LOCKED, state) == ["autonomic", "event_locked"]
+        assert _recompute(MODE_AUTONOMIC, state, had_event_locked=True) == [
+            "autonomic", "event_locked"]
 
 
 # ── one figure, one confidence rule ───────────────────────────────────────
@@ -219,7 +225,10 @@ def test_caveat_and_calibration_stay_with_autonomic():
     auto = inspect.getsource(TabTimeCourseMixin._build_time_view_autonomic)
     assert "CALIBRATION_WARNING" in auto and "_calibrate_button" in auto
     ev = inspect.getsource(TabTimeCourseMixin._build_time_view_event_locked)
-    assert "_open_compare_segments" in ev and "_calibrate_button" in ev
+    # One Calibrate button, on the Autonomic part the Event-locked section sits under.
+    assert "_open_compare_segments" in ev and "_calibrate_button" not in ev
+    tab = inspect.getsource(TabTimeCourseMixin._build_tab_time_course)
+    assert tab.index("_build_time_view_autonomic(") < tab.index("_build_time_view_event_locked(")
 
 
 # ── stubs for the two jobs ────────────────────────────────────────────────

@@ -25,7 +25,7 @@ from ecg.core.analysis import QTC_FORMULA_LABELS, normalize_qtc_formula
 from ecg.core.models import QT_REPORTED
 from ecg.core.metric_table import MISSING, MetricTable, build_metric_table
 from ecg.ui.freshness import COMPUTING, NOT_COMPUTED, OUT_OF_DATE, UP_TO_DATE, combine_states
-from ecg.ui.tab_keys import TAB_DETECTION, TAB_MODULES, TAB_REPORT
+from ecg.ui.tab_keys import TAB_COMPARE, TAB_DETECTION, TAB_MODULES, TAB_REPORT
 from ecg.ui.theme import (
     THEME, BG, CARD, BORDER, BORDER2, TEXT, MUTED, BLUE, ORANGE, PURPLE, PURPLE_DARK,
     SPACE_XS, SPACE_S, SPACE_M, FONT_SMALL, STRIP_BG, ACCENT_TEXT, WARN_TEXT, STRIP_EDGE,
@@ -187,6 +187,8 @@ def tab_states(states: "dict[str, str]", has_peaks: bool,
     them all, so it is computing as soon as one of them is."""
     running = set(running)
     out = {TAB_DETECTION: UP_TO_DATE if has_peaks else NOT_COMPUTED}
+    # Compare segments computes on demand from the peaks: their state.
+    out[TAB_COMPARE] = out[TAB_DETECTION]
     for tab, modules in TAB_MODULES.items():
         out[tab] = (COMPUTING if running.intersection(modules)
                     else combine_states(states[m] for m in modules))
@@ -392,6 +394,9 @@ class ContextStripMixin:
             self._update_topbar_filename()
             self._refresh_rhythm_stale()
             self._refresh_report()
+            if self.tabs.get() == TAB_COMPARE:
+                # A new file or new peaks while the tab is open: rebuilt for them.
+                self._refresh_compare_tab()
         except Exception as exc:
             log.debug("shell refresh skipped: %s", exc, exc_info=True)
 

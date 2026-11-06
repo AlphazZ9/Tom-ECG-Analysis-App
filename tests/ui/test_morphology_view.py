@@ -40,7 +40,7 @@ def _frame(n=20, measured=8):
 
 def test_only_the_two_former_morphology_tabs_are_gone():
     assert TAB_ORDER == ("Signal & Detection", "Rhythm & HRV", "Time course",
-                         "Morphology & Intervals", "Events", "Report")
+                         "Compare segments", "Morphology & Intervals", "Events", "Report")
 
 
 @pytest.mark.parametrize("saved, tab", [

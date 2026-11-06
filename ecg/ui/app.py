@@ -186,6 +186,7 @@ class ECGApp(
         self._build_tab_detection()
         self._build_tab_hrv_unified()
         self._build_tab_time_course()
+        self._build_tab_compare()
         self._build_tab_morphology()
         self._build_tab_arrhythmias()
         self._build_tab_report()

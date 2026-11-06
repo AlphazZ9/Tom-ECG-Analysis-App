@@ -1785,7 +1785,7 @@ class CohortTrendsDialog(ctk.CTkToplevel):
 
 class CalibrationDialog(ctk.CTkToplevel):
     """Cohort calibration of the CSI / CPI gains ks / kp (Time course >
-    Event-locked > Calibrate ks/kp...), after Candia-Rivera et al.,
+    Autonomic > Calibrate ks/kp...), after Candia-Rivera et al.,
     J Physiol 2025.
 
     Reads the event-locked rows saved to the cohort registry (label and
@@ -2017,7 +2017,7 @@ class CalibrationDialog(ctk.CTkToplevel):
             filt = " matching the filters" if (label or project) else ""
             self._set_text(
                 f"  No valid event-locked row in the cohort registry{filt}.\n\n"
-                "  For each recording: Time course > Autonomic > ⟳ Compute, then Event-locked > "
+                "  For each recording: Time course > Autonomic > ⟳ Compute, then below it "
                 "⟳ Compute event-locked, then 💾 Save to cohort registry (with the "
                 "Subject ID and Project set in the Recording sheet: click the file name in the header).")
         else:

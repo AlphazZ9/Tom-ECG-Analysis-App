@@ -114,6 +114,7 @@ def test_current_names_pass_through_the_session_map():
 
 
 def test_every_tab_but_detection_lists_known_modules():
-    assert set(TAB_MODULES) == set(TAB_ORDER) - {TAB_DETECTION}
+    # Compare segments, computed on demand from the peaks, shares their state.
+    assert set(TAB_MODULES) == set(TAB_ORDER) - {TAB_DETECTION, "Compare segments"}
     for modules in TAB_MODULES.values():
         assert set(modules) <= set(MODULES)

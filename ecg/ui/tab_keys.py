@@ -12,16 +12,18 @@ from __future__ import annotations
 TAB_DETECTION     = "Signal & Detection"
 TAB_HRV           = "Rhythm & HRV"
 TAB_TIME_COURSE   = "Time course"
+TAB_COMPARE       = "Compare segments"
 TAB_MORPHOLOGY    = "Morphology & Intervals"
 TAB_EVENTS        = "Events"
 TAB_REPORT        = "Report"
 
 # Left-to-right order in the tab bar.
-TAB_ORDER = (TAB_DETECTION, TAB_HRV, TAB_TIME_COURSE, TAB_MORPHOLOGY,
+TAB_ORDER = (TAB_DETECTION, TAB_HRV, TAB_TIME_COURSE, TAB_COMPARE, TAB_MORPHOLOGY,
              TAB_EVENTS, TAB_REPORT)
 
 # The modules (ecg.ui.freshness) behind each tab's state. Signal & Detection is
-# not listed: its state is that of the peaks (ecg.ui.context_strip.tab_states).
+# not listed: its state is that of the peaks (ecg.ui.context_strip.tab_states),
+# nor is Compare segments, computed on demand from the peaks (the same state).
 # Morphology & Intervals is the state of its measure: Analyze gives the mean beat,
 # not the intervals, and its step chips say the state of each step.
 TAB_MODULES = {
@@ -32,23 +34,24 @@ TAB_MODULES = {
     TAB_REPORT:        ("core",),
 }
 
-# The modes of the Time course tab, and the module (ecg.ui.freshness) behind each.
+# The modes of the Time course tab, and the modules (ecg.ui.freshness) behind
+# each. Event-locked is a section of the Autonomic mode (it locks the Autonomic
+# result to the annotations); its former mode name opens Autonomic.
 MODE_EPOCHS       = "Epochs"
 MODE_SLIDING      = "Sliding"
 MODE_AUTONOMIC    = "Autonomic"
-MODE_EVENT_LOCKED = "Event-locked"
-TIME_COURSE_MODES = (MODE_EPOCHS, MODE_SLIDING, MODE_AUTONOMIC, MODE_EVENT_LOCKED)
+MODE_EVENT_LOCKED = "Event-locked"        # former mode: now within Autonomic
+TIME_COURSE_MODES = (MODE_EPOCHS, MODE_SLIDING, MODE_AUTONOMIC)
 MODE_MODULES = {
-    MODE_EPOCHS:       "epochs",
-    MODE_SLIDING:      "rolling",
-    MODE_AUTONOMIC:    "autonomic",
-    MODE_EVENT_LOCKED: "event_locked",
+    MODE_EPOCHS:       ("epochs",),
+    MODE_SLIDING:      ("rolling",),
+    MODE_AUTONOMIC:    ("autonomic", "event_locked"),
 }
 
 # Values of the former ui.hrv_current_view and ui.autonomic_subview. The other
 # former HRV views (Overview, RR / HR...) live on Rhythm & HRV: no mode.
 _FORMER_VIEW_MODES = {"Epochs": MODE_EPOCHS, "Rolling": MODE_SLIDING, "Autonomic": MODE_AUTONOMIC}
-_FORMER_SUBVIEW_MODES = {"Time series": MODE_AUTONOMIC, "Event-locked": MODE_EVENT_LOCKED}
+_FORMER_SUBVIEW_MODES = {"Time series": MODE_AUTONOMIC, MODE_EVENT_LOCKED: MODE_AUTONOMIC}
 
 
 def time_course_mode(mode=None, hrv_view=None, autonomic_subview=None):

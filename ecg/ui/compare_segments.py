@@ -2,15 +2,17 @@
 """
 ecg.ui.compare_segments
 -----------------------
-ECGApp Compare Segments dialog.
-Mixin of ECGApp (see ecg/ui/app.py).
+ECGApp Compare Segments tab: two windows A / B of the recording, their
+metric table, RR tachograms or Poincaré plots, the export and the group
+table. Built in the tab when it opens, rebuilt when the recording or its
+peaks have changed since. Mixin of ECGApp (see ecg/ui/app.py).
 """
 from __future__ import annotations
 
 import logging
 import os
 from datetime import datetime
-from typing import Any, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 import customtkinter as ctk  # type: ignore[import-untyped]
 from tkinter import filedialog, messagebox
 from matplotlib.figure import Figure
@@ -30,6 +32,7 @@ from ecg.ui.theme import button_style, disabled_style, toggle_style
 from ecg.ui.poincare_figure import draw_poincare_pair
 from ecg.io.group_table import append_group_row, group_row
 from ecg.ui.plots import CanvasSlot, style_axes
+from ecg.ui.tab_keys import TAB_COMPARE
 
 # Mixin of ECGApp: `self: ECGApp` shows pyright the whole app surface, so a
 # typo in self.xxx is reported. It is deliberately not a supertype of this
@@ -42,7 +45,7 @@ log = logging.getLogger("ecg")
 
 
 class CompareSegmentsMixin:
-    """ECGApp Compare Segments dialog."""
+    """ECGApp Compare Segments tab."""
 
     # ════════════════════════════════════════════════════════
     #  COMPARE SEGMENTS
@@ -79,27 +82,59 @@ class CompareSegmentsMixin:
     ]
 
     def _open_compare_segments(self: ECGApp) -> None:
-        """Open the Segment Comparison window (Time course > Event-locked, Ctrl+M).
+        """Show the Compare Segments tab (Ctrl+M, Time course > Autonomic)."""
+        self.tabs.set(TAB_COMPARE)
+        self._refresh_compare_tab()
 
-        Two configurable time windows (A / B) → side-by-side metric table
-        + superimposed RR tachogram.  All stats run on a background thread.
-        """
+    def _build_tab_compare(self: ECGApp) -> None:
+        page = self.tabs.tab(TAB_COMPARE)
+        page.grid_rowconfigure(0, weight=1)
+        page.grid_columnconfigure(0, weight=1)
+        self._compare_holder = ctk.CTkFrame(page, fg_color=PANEL, corner_radius=0)
+        self._compare_holder.grid(row=0, column=0, sticky="nsew")
+        self._compare_built_for = None
+        self._refresh_compare_tab()
+
+    def _compare_signature(self: ECGApp) -> "Optional[tuple]":
+        """What the tab was built from: the recording, its peaks and the
+        events it offers. None without peaks."""
         if self._signal_flt is None or self._rpeaks_ok is None or self._fs is None:
-            messagebox.showwarning("No data", "Open a file and click Detect Peaks first.")
-            return
+            return None
+        rp = self._rpeaks_ok
+        return (id(self._signal_flt), len(self._signal_flt), float(self._fs),
+                len(rp), int(np.sum(rp)) if len(rp) else 0,
+                tuple((a.get("label"), a.get("t_start"), a.get("t_end"))
+                      for a in self.analysis.annotations),
+                len(self.analysis.arrhythmia_events))
 
+    def _refresh_compare_tab(self: ECGApp) -> None:
+        """Build the tab's content for the current recording, unless it is
+        already built for it (the windows typed in then stay)."""
+        holder = getattr(self, "_compare_holder", None)
+        if holder is None:
+            return
+        sig = self._compare_signature()
+        if sig is not None and sig == self._compare_built_for:
+            return
+        for child in holder.winfo_children():
+            child.destroy()
+        self._compare_built_for = sig
+        if sig is None:
+            ctk.CTkLabel(holder, text="Open a file and detect the peaks to compare two segments.",
+                         font=FONT_LABEL, text_color=MUTED).pack(expand=True)
+            return
+        self._build_compare_segments(holder)
+
+    def _build_compare_segments(self: ECGApp, win) -> None:
+        """The comparison inside *win* (the tab's frame): two configurable
+        time windows (A / B) → side-by-side metric table + superimposed RR
+        tachogram or Poincaré plots. All stats run on a background thread."""
         sig    = self._signal_flt
         rp     = self._rpeaks_ok.copy()
         fs     = self._fs
         dur    = float(len(sig)) / fs
         vlf, lf, hf = self._get_freq_bands()
         sub    = self.ent_subject.get().strip() if self.ent_subject else "subject"
-
-        win = ctk.CTkToplevel(self)
-        win.title("Compare Segments")
-        win.geometry("1060x720")
-        win.configure(fg_color=PANEL)
-        win.resizable(True, True)
 
         hdr = ctk.CTkFrame(win, fg_color=PANEL, corner_radius=0)
         hdr.pack(fill="x")
@@ -109,13 +144,6 @@ class CompareSegmentsMixin:
         ctk.CTkLabel(hdr,
                      text=f"{sub}  ·  {dur:.1f} s  ·  {len(rp)} peaks",
                      font=FONT_SMALL, text_color=MUTED).pack(side="left", padx=(0, SPACE_L))
-        ctk.CTkButton(
-            hdr,
-            text="✗  Close",
-            command=win.destroy,
-            **button_style("secondary"),
-        ).pack(
-            side="right", padx=SPACE_L, pady=SPACE_M)
 
         # ── Quick fill: before / after an event ─────────────────────────
         # Packed above the two segment cards now, populated with widgets

@@ -2,10 +2,11 @@
 """
 ecg.ui.tab_time_course
 ----------------------
-ECGApp Time course tab: how the numbers evolve over the recording, in four modes
-on one tab (Epochs, Sliding, Autonomic, Event-locked), under one out-of-date
-banner. Logic in AnalysisController and EventLockedController; the Compare
-Segments dialog opens from Event-locked. Mixin of ECGApp (see ecg/ui/app.py).
+ECGApp Time course tab: how the numbers evolve over the recording, in three
+modes on one tab (Epochs, Sliding, Autonomic -- with its Event-locked section
+below), under one out-of-date banner. Logic in AnalysisController and
+EventLockedController; the Compare segments tab opens from Event-locked.
+Mixin of ECGApp (see ecg/ui/app.py).
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ from ecg.ui.freshness import UP_TO_DATE, stale_banner_text
 from ecg.ui.plots import CanvasSlot
 from ecg.ui.tab_keys import (
     MODE_AUTONOMIC, MODE_EPOCHS, MODE_EVENT_LOCKED, MODE_MODULES, MODE_SLIDING,
-    TAB_REPORT, TAB_TIME_COURSE, TIME_COURSE_MODES, time_course_mode,
+    TAB_COMPARE, TAB_REPORT, TAB_TIME_COURSE, TIME_COURSE_MODES, time_course_mode,
 )
 from ecg.ui.theme import (
     THEME, BG, PANEL, CARD, BORDER, BORDER2, TEXT, MUTED, BLUE, GREEN, ORANGE,
@@ -61,7 +62,7 @@ _EVT_DETAILS_OPEN = "▾  Every series and the within-recording test"
 
 
 class TabTimeCourseMixin:
-    """ECGApp Time course tab: the four modes and the out-of-date banner."""
+    """ECGApp Time course tab: the three modes and the out-of-date banner."""
 
     def _build_tab_time_course(self: ECGApp) -> None:
         t = self.tabs.tab(TAB_TIME_COURSE)
@@ -109,13 +110,31 @@ class TabTimeCourseMixin:
             f = ctk.CTkFrame(content, **card_style())
             f.grid(row=0, column=0, sticky="nsew")
             self._time_frames[name] = f
-            inner[name] = ctk.CTkFrame(f, fg_color="transparent")
+            if name == MODE_AUTONOMIC:
+                # The indices, then the event-locked means computed from them,
+                # one below the other on a scrolling page.
+                inner[name] = ctk.CTkScrollableFrame(
+                    f, fg_color="transparent", scrollbar_button_color=BORDER,
+                    scrollbar_button_hover_color=BORDER2)
+            else:
+                inner[name] = ctk.CTkFrame(f, fg_color="transparent")
             inner[name].pack(fill="both", expand=True, padx=CARD_PAD - SPACE_M,
                              pady=CARD_PAD - SPACE_M)
         self._build_time_view_epochs(inner[MODE_EPOCHS])
         self._build_time_view_sliding(inner[MODE_SLIDING])
-        self._build_time_view_autonomic(inner[MODE_AUTONOMIC])
-        self._build_time_view_event_locked(inner[MODE_EVENT_LOCKED])
+        auto_page = inner[MODE_AUTONOMIC]
+        auto_page.grid_columnconfigure(0, weight=1)
+        auto_part = ctk.CTkFrame(auto_page, fg_color="transparent")
+        auto_part.grid(row=0, column=0, sticky="ew")
+        self._build_time_view_autonomic(auto_part)
+        ctk.CTkFrame(auto_page, height=1, fg_color=BORDER).grid(
+            row=1, column=0, sticky="ew", padx=SPACE_M, pady=(SPACE_M, SPACE_M))
+        ctk.CTkLabel(auto_page, text="EVENT-LOCKED  ·  pre / post each annotation",
+                     font=FONT_SIDEBAR_HDR, text_color=MUTED, anchor="w").grid(
+            row=2, column=0, sticky="ew", padx=SPACE_M, pady=(0, SPACE_XS))
+        evt_part = ctk.CTkFrame(auto_page, fg_color="transparent")
+        evt_part.grid(row=3, column=0, sticky="ew")
+        self._build_time_view_event_locked(evt_part)
 
         # The mode in use before a UI rebuild (theme toggle) stays.
         self._show_time_mode(self.ui.time_course_mode)
@@ -126,6 +145,8 @@ class TabTimeCourseMixin:
         brought up to date the moment it opens."""
         if self.tabs.get() == TAB_TIME_COURSE:
             self._show_time_mode(self.ui.time_course_mode)
+        elif self.tabs.get() == TAB_COMPARE:
+            self._refresh_compare_tab()
         elif self.tabs.get() == TAB_REPORT:
             self._refresh_report()
 
@@ -147,7 +168,7 @@ class TabTimeCourseMixin:
             # Surface a too-short-recording warning as soon as the mode is
             # shown, rather than only after a failed Compute click.
             self._refresh_epoch_feasibility()
-        elif mode == MODE_EVENT_LOCKED:
+        elif mode == MODE_AUTONOMIC:
             # The annotations may have been replaced without an edit (new
             # file, session restore): list their current labels.
             self.event_ctrl.refresh_label_choices()
@@ -159,13 +180,21 @@ class TabTimeCourseMixin:
         if self._time_banner is None:
             return
         mode = self.ui.time_course_mode
-        module = MODE_MODULES[mode]
         a = self.analysis
-        result = {MODE_EPOCHS: a.epoch_df, MODE_SLIDING: a.rolling_hrv_df,
-                  MODE_AUTONOMIC: a.autonomic_result, MODE_EVENT_LOCKED: a.event_locked}[mode]
-        text = stale_banner_text(mode, self.freshness.status(module),
-                                 self.ui.module_computed_at.get(module),
-                                 self.ui.peaks_edited_at, has_values=result is not None)
+        results = {"epochs": a.epoch_df, "rolling": a.rolling_hrv_df,
+                   "autonomic": a.autonomic_result, "event_locked": a.event_locked}
+        names = {"event_locked": MODE_EVENT_LOCKED}
+        text = ""
+        # Autonomic shows two results: the first one out of date is said.
+        for module in MODE_MODULES[mode]:
+            if module == "event_locked" and results[module] is None:
+                continue                      # never computed: nothing to warn about
+            text = stale_banner_text(names.get(module, mode), self.freshness.status(module),
+                                     self.ui.module_computed_at.get(module),
+                                     self.ui.peaks_edited_at,
+                                     has_values=results[module] is not None)
+            if text:
+                break
         if text:
             if self._time_banner_text.cget("text") != text:
                 self._time_banner_text.configure(text=text)
@@ -176,19 +205,20 @@ class TabTimeCourseMixin:
 
     def _recompute_time_mode(self: ECGApp) -> None:
         """The banner's Recompute: the mode shown, with the parameters on
-        screen. Event-locked derives from the Autonomic result: that one first
-        when it is not current."""
+        screen. On Autonomic: the indices when they are not current, then the
+        event-locked means when they had been computed (they derive from the
+        indices); the means alone when only they are out of date."""
         mode = self.ui.time_course_mode
         if mode == MODE_EPOCHS:
             self._compute_epochs()
         elif mode == MODE_SLIDING:
             self._compute_rolling_hrv()
-        elif mode == MODE_AUTONOMIC:
-            self._compute_autonomic()
         elif self.freshness.status("autonomic").state == UP_TO_DATE:
             self._compute_event_locked()
-        else:
+        elif getattr(self.analysis, "event_locked", None) is not None:
             self.analysis_ctrl.compute_autonomic(then=self._compute_event_locked)
+        else:
+            self._compute_autonomic()
 
     # ── Epochs and Sliding: one layout, one set of metrics, one legend ────
 
@@ -451,7 +481,9 @@ class TabTimeCourseMixin:
         ).pack(side="left", padx=(SPACE_S, 0))
 
         # ── Row 5: stacked plot ──
-        plot_frame = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=0)
+        # A fixed height: the mode is a scrolling page (Event-locked below).
+        plot_frame = ctk.CTkFrame(parent, fg_color=PANEL, corner_radius=0, height=640)
+        plot_frame.pack_propagate(False)
         plot_frame.grid(row=5, column=0, sticky="nsew", padx=SPACE_M, pady=(0, SPACE_S))
         plot_frame.grid_rowconfigure(0, weight=1)
         plot_frame.grid_columnconfigure(0, weight=1)
@@ -502,7 +534,8 @@ class TabTimeCourseMixin:
     def _build_time_view_event_locked(self: ECGApp, parent: ctk.CTkFrame) -> None:
         """Per-event 30 s pre / post means of CSI, CPI, HR, D, SD1, SD2 (and LF /
         HF) around the annotations, the median ± MAD traces, the cohort registry
-        and the ks / kp calibration, and the way to the Compare Segments dialog.
+        and the way to the Compare segments tab; the ks / kp calibration is on
+        the Autonomic part above.
         Logic in EventLockedController, pure helpers in
         ecg.ui.event_locked_view. The parameters shown are app state
         (analysis.event_locked_params), so a rebuild keeps them."""
@@ -582,7 +615,8 @@ class TabTimeCourseMixin:
         self.lbl_evt_status.grid(row=1, column=0, sticky="ew", padx=SPACE_M)
 
         # ── Row 2: traces next to the per-event table ──
-        body = ctk.CTkFrame(parent, fg_color="transparent")
+        body = ctk.CTkFrame(parent, fg_color="transparent", height=560)
+        body.grid_propagate(False)            # fixed: below Autonomic on a scrolling page
         body.grid(row=2, column=0, sticky="nsew", padx=SPACE_M, pady=(0, SPACE_S))
         body.grid_rowconfigure(0, weight=1)
         body.grid_columnconfigure(0, weight=3, uniform="evt")
@@ -641,20 +675,19 @@ class TabTimeCourseMixin:
         self._bind_hover_tip(btn_csv, "Save the per-event table as CSV (one line per event)")
         bar3 = ctk.CTkFrame(right, fg_color="transparent")
         bar3.grid(row=4, column=0, sticky="ew", pady=(SPACE_XS, 0))
-        self._calibrate_button(bar3).pack(side="left", padx=(0, SPACE_S))
         # Not the same calculation as the means above: two windows chosen by
         # hand, with their own block statistics and Excel export.
         btn_segments = ctk.CTkButton(
             bar3,
-            text="⚖  Compare Segments…",
+            text="⚖  Compare segments →",
             command=self._open_compare_segments,
             **button_style("primary"),
         )
         btn_segments.pack(side="left")
         self._bind_hover_tip(
             btn_segments,
-            "Two time windows A and B chosen by hand: block statistics and tachogram, "
-            "no annotation needed (Ctrl+M). Other comparisons: Check Agreement "
+            "Open the Compare segments tab: two time windows A and B chosen by hand, "
+            "block statistics, tachograms and Poincaré, no annotation needed (Ctrl+M). Other comparisons: Check Agreement "
             "(Detection section) · Cohort Trends (Recent recordings).")
 
         # ── Rows 3-4: every series and the within-recording test, behind a disclosure ──

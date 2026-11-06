@@ -43,7 +43,7 @@ log = logging.getLogger("ecg")
 
 
 class EventLockedController:
-    IDLE_TEXT = ("  Compute the Autonomic mode, add annotations "
+    IDLE_TEXT = ("  Compute the Autonomic indices above, add annotations "
                  "(onset = their start), then ⟳ Compute event-locked")
     # invalidate() reasons -> label text (None: the idle hint)
     _STALE_TEXT = {
