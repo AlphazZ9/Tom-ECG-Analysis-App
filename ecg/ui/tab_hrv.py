@@ -78,7 +78,7 @@ class TabHrvMixin:
         return card
 
     def _build_hrv_view_overview(self: ECGApp, parent: ctk.CTkFrame) -> None:
-        """Rhythm & HRV: KPI cards, tachogram next to Poincaré, metric table next
+        """Rhythm & HRV: KPI cards, tachogram, Poincaré and multiscale entropy, metric table next
         to the spectrum, non-linear details, RR distribution, and the raw
         NeuroKit tables behind Show all. Numbers come from the shared table
         (PlotController.plot_rhythm_view)."""
@@ -125,7 +125,7 @@ class TabHrvMixin:
             self._rhythm_cards[key] = {"value": value, "unit": unit, "note": note}
 
     def _build_rhythm_plots(self: ECGApp, page, row: int) -> None:
-        hdr, sec = self._rhythm_section(page, row, "Tachogram and Poincaré")
+        hdr, sec = self._rhythm_section(page, row, "Tachogram")
         self._rhythm_labels["excluded"] = ctk.CTkLabel(
             hdr, text="", font=FONT_SMALL, text_color=MUTED)
         self._rhythm_labels["excluded"].pack(side="left", padx=(SPACE_M, 0))
@@ -156,21 +156,21 @@ class TabHrvMixin:
             "Jump to the next flagged beat (▲/▼) — press again to step "
             "through the rest")
 
-        body = ctk.CTkFrame(sec, fg_color="transparent")
-        body.grid(row=1, column=0, sticky="ew")
-        body.grid_columnconfigure(0, weight=3, uniform="plots")
-        body.grid_columnconfigure(1, weight=2, uniform="plots")
-        left = ctk.CTkFrame(body, fg_color="transparent")
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, CARD_PAD))
-        self._rhythm_plot_card(left, 440, "rr", 8.0).pack(fill="x")
+        # The tachogram has the full width; the Poincaré diagram and the
+        # multiscale entropy have their own card below (row + 1).
+        left = ctk.CTkFrame(sec, fg_color="transparent")
+        left.grid(row=1, column=0, sticky="ew")
+        self._rhythm_plot_card(left, 440, "rr", 12.0).pack(fill="x")
         ctk.CTkLabel(
             left, text=("Left-click: go to time  ·  right-click: next spike  ·  ▲ sudden "
                         "acceleration  ▼ sudden deceleration  ·  amber >2.5 SD  ·  red >3.5 SD"),
             font=FONT_HINT, text_color=MUTED, anchor="w",
         ).pack(fill="x", pady=(SPACE_XS, 0))
-        right = ctk.CTkFrame(body, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="nsew")
-        self._rhythm_plot_card(right, 440, "poincare", 5.0).pack(fill="x")
+
+        _hdr, sec2 = self._rhythm_section(page, row + 1, "Poincaré and multiscale entropy")
+        right = ctk.CTkFrame(sec2, fg_color="transparent")
+        right.grid(row=1, column=0, sticky="ew")
+        self._rhythm_plot_card(right, 420, "poincare", 12.0).pack(fill="x")
         ctk.CTkLabel(
             right, text="Successive valid pairs only: no pair crosses an excluded interval.",
             font=FONT_HINT, text_color=MUTED, anchor="w",

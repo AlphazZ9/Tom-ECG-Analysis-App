@@ -1877,16 +1877,33 @@ class PlotController:
                 fig.set_layout_engine(None)
             except Exception as exc:
                 log.debug("draw_poincare: set_layout_engine(None) failed: %s", exc)
-            if fig.get_figheight() < _SHORT_FIG_IN:
-                # The page's card: room for the axis label between the two plots.
+            wide = fig.get_figwidth() >= 2.0 * fig.get_figheight()
+            if wide:
+                # The page's full-width card: the Poincaré diagram (about
+                # square) on the left, the entropy curve on the right.
+                gs = GridSpec(1, 2, figure=fig, width_ratios=[1, 2.2], wspace=0.18,
+                              left=0.06, right=0.985, top=0.92, bottom=0.13)
+                mse_cell = gs[0, 1]
+            elif fig.get_figheight() < _SHORT_FIG_IN:
+                # A short stacked figure: room for the axis label between the plots.
                 gs = GridSpec(2, 1, figure=fig, height_ratios=[5, 2], hspace=0.62,
                               left=0.13, right=0.96, top=0.93, bottom=0.11)
+                mse_cell = gs[1, 0]
             else:
                 gs = GridSpec(2, 1, figure=fig, height_ratios=[5, 2], hspace=0.35,
                              left=0.13, right=0.96, top=0.93, bottom=0.09)
+                mse_cell = gs[1, 0]
             ax = fig.add_subplot(gs[0, 0])
             style_axes(ax)
-            ax.scatter(rr_a, rr_b, s=3, alpha=0.25, color=BLUE, rasterized=True)
+            # RR on the 1 ms sampling grid stack on a few spots: spread them by
+            # ±half a step for display only (SD1/SD2 and the ellipse unchanged).
+            from ecg.ui.poincare_figure import jitter_for_display
+            jx, jy, step = jitter_for_display(rr_a, rr_b)
+            ax.scatter(jx, jy, s=3, alpha=0.25, color=BLUE, rasterized=True)
+            if step:
+                ax.text(0.99, 0.01, f"points jittered ±{step / 2:.2g} ms (sampling grid)",
+                        transform=ax.transAxes, ha="right", va="bottom", fontsize=7,
+                        color=PLOT["muted"])
             ax.plot(lim, lim, color=BORDER2, lw=1, ls="--", alpha=0.7)
             if have_ellipse:
                 ax.add_patch(matplotlib.patches.Ellipse(
@@ -1895,7 +1912,10 @@ class PlotController:
                     alpha=0.8, zorder=4))
             ax.set_xlim(lim)
             ax.set_ylim(lim)
-            # Don't use set_aspect("equal") — it creates dead whitespace when
+            if wide:
+                # Its own cell: an exactly square box keeps the ellipse at 45°.
+                ax.set_aspect("equal", adjustable="box")
+            # Stacked: don't use set_aspect("equal") — it creates dead whitespace when
             # the container isn't square. Force equal axes via xlim/ylim instead.
             ax.set_xlabel(r"$RR_n$ (ms)")
             ax.set_ylabel(r"$RR_{n+1}$ (ms)")
@@ -1905,13 +1925,14 @@ class PlotController:
             # Multiscale entropy curve -- see analyse_hrv_nonlinear() for why
             # this needs materially more beats than a single SampEn value and
             # is skipped (not fabricated) below a minimum beat count.
-            ax_mse = fig.add_subplot(gs[1, 0])
+            ax_mse = fig.add_subplot(mse_cell)
             style_axes(ax_mse)
             if have_mse:
                 ax_mse.plot(mse_scales, mse_values, color=PURPLE, lw=1.3,
                            marker="o", ms=3, zorder=2)
                 pt_txt = f"  ·  Σ={mse_point:.2f}" if mse_point is not None else ""
-                ax_mse.set_title(f"Multiscale entropy{pt_txt}{mse_note}", loc="left", fontsize=8)
+                ax_mse.set_title(f"Multiscale entropy{pt_txt}{mse_note}", loc="left",
+                                 fontsize=9 if wide else 8)
                 ax_mse.set_xlabel("Scale factor", fontsize=8)
                 ax_mse.set_ylabel("SampEn", fontsize=8)
                 ax_mse.set_xticks(mse_scales)

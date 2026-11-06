@@ -44,7 +44,7 @@ def grid_step(v: np.ndarray) -> float:
     return float(np.min(np.diff(u)))
 
 
-def _jitter(x: np.ndarray, y: np.ndarray) -> "tuple[np.ndarray, np.ndarray, float]":
+def jitter_for_display(x: np.ndarray, y: np.ndarray) -> "tuple[np.ndarray, np.ndarray, float]":
     """Display only: spread the points that the sampling grid stacks on one
     spot by a uniform ±half step (fixed seed, so a figure redraws the same).
     The ellipse, the centre and SD1 / SD2 use the measured values."""
@@ -67,7 +67,7 @@ def draw_poincare_panel(ax, seg: dict, color: str, lim: "tuple[float, float]",
     ax.plot(lim, lim, color=PLOT.get("muted", "#888"), lw=0.8, ls="--", zorder=1)
     step = 0.0
     if len(x):
-        jx, jy, step = _jitter(x, y)
+        jx, jy, step = jitter_for_display(x, y)
         ax.scatter(jx, jy, s=point_size, color=color, alpha=0.35, linewidths=0, zorder=2)
         cx, cy = float(x.mean()), float(y.mean())
         sd1, sd2 = float(seg.get("sd1", np.nan)), float(seg.get("sd2", np.nan))
@@ -85,7 +85,7 @@ def draw_poincare_panel(ax, seg: dict, color: str, lim: "tuple[float, float]",
     ax.set_xlabel("RR$_n$ (ms)", fontsize=9)
     ax.set_ylabel("RR$_{n+1}$ (ms)", fontsize=9)
     if step:
-        ax.text(0.99, 0.01, f"points jittered ±{step / 2:g} ms (sampling grid)",
+        ax.text(0.99, 0.01, f"points jittered ±{step / 2:.2g} ms (sampling grid)",
                 transform=ax.transAxes, ha="right", va="bottom", fontsize=7,
                 color=PLOT.get("muted", "#888"))
     sd1_t = f"{seg['sd1']:.2f}" if np.isfinite(seg.get("sd1", np.nan)) else "—"
