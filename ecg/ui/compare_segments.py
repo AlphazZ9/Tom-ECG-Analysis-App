@@ -26,7 +26,9 @@ from ecg.ui.theme import (
     FONT_SUBSECTION,
 )
 from ecg.ui.theme import combo_style, input_style
-from ecg.ui.theme import button_style, disabled_style
+from ecg.ui.theme import button_style, disabled_style, toggle_style
+from ecg.ui.poincare_figure import draw_poincare_pair
+from ecg.io.group_table import append_group_row, group_row
 from ecg.ui.plots import CanvasSlot, style_axes
 
 # Mixin of ECGApp: `self: ECGApp` shows pyright the whole app surface, so a
@@ -333,9 +335,25 @@ class CompareSegmentsMixin:
 
         plot_card = ctk.CTkFrame(results_frame, fg_color=PANEL, corner_radius=8)
         plot_card.pack(side="right", fill="both", expand=True)
-        ctk.CTkLabel(plot_card, text="RR tachograms (superimposed)",
-                     font=FONT_SUBSECTION, text_color=MUTED,
-                     anchor="w").pack(padx=SPACE_M, pady=(SPACE_M, SPACE_XS), fill="x")
+        # Two views of the same two segments: the RR tachograms superimposed,
+        # or their Poincaré plots side by side on the same axes.
+        view_bar = ctk.CTkFrame(plot_card, fg_color="transparent")
+        view_bar.pack(padx=SPACE_M, pady=(SPACE_M, SPACE_XS), fill="x")
+        _view = {"mode": "rr", "sa": None, "sb": None}
+        _view_btns: "dict[str, ctk.CTkButton]" = {}
+
+        def _set_view(mode: str) -> None:
+            _view["mode"] = mode
+            for m, b in _view_btns.items():
+                b.configure(**toggle_style(m == mode))
+            if _view["sa"] is not None:
+                _redraw_plot()
+
+        for mode, text in (("rr", "RR tachograms"), ("poincare", "Poincaré")):
+            b = ctk.CTkButton(view_bar, text=text, width=0, command=lambda m=mode: _set_view(m),
+                              **{**button_style("secondary"), **toggle_style(mode == "rr")})
+            b.pack(side="left", padx=(0, SPACE_S))
+            _view_btns[mode] = b
         from ecg.ui.plots import CanvasSlot as _CS
         plot_slot = _CS(plot_card, 8, 4, toolbar=False, yscale_bar=True,
                          placeholder="Click ▶ Compare to overlay tachograms")
@@ -384,6 +402,14 @@ class CompareSegmentsMixin:
                                  anchor="e").grid(row=ri, column=3, sticky="ew", padx=SPACE_S, pady=SPACE_XS)
 
         def _populate_plot(sa: dict, sb: dict) -> None:
+            _view["sa"], _view["sb"] = sa, sb
+            _redraw_plot()
+
+        def _redraw_plot() -> None:
+            sa, sb = _view["sa"], _view["sb"]
+            if _view["mode"] == "poincare":
+                plot_slot.update(lambda fig: draw_poincare_pair(fig, sa, sb, _colors))
+                return
             _t_a, _r_a, _la, _ca = sa["t_rr"], sa["rr_ms"], sa["label"], _colors[0]
             _t_b, _r_b, _lb, _cb = sb["t_rr"], sb["rr_ms"], sb["label"], _colors[1]
             def _draw(fig):
@@ -712,6 +738,19 @@ class CompareSegmentsMixin:
                         text_color=GREEN)
             except Exception as exc:
                 log.debug("comparison PNG export: %s", exc)
+            try:
+                poin_path = os.path.splitext(path)[0] + "_poincare.png"
+                poin_fig = Figure(figsize=(10, 5), dpi=300, facecolor="white",
+                                  layout="constrained")
+                if draw_poincare_pair(poin_fig, sa, sb, _colors, title=sub):
+                    poin_fig.savefig(poin_path, dpi=300, facecolor="white",
+                                     bbox_inches="tight")
+                    lbl_status.configure(
+                        text=lbl_status.cget("text") + f"  +  {os.path.basename(poin_path)}",
+                        text_color=GREEN)
+                plt.close(poin_fig)
+            except Exception as exc:
+                log.warning("Poincaré PNG export: %s", exc)
 
         run_btn.configure(command=_run_compare)
 
@@ -727,6 +766,38 @@ class CompareSegmentsMixin:
             **{**button_style("secondary"), **disabled_style()},
         )
         export_btn.pack(side="left", padx=(SPACE_M, 0))
+
+        def _add_to_group() -> None:
+            sa, sb = self._last_seg_a, self._last_seg_b
+            if sa is None or sb is None:
+                messagebox.showwarning("No results", "Run the comparison first.", parent=win)
+                return
+            path = filedialog.asksaveasfilename(
+                parent=win, title="Group table: add this recording (created if new)",
+                defaultextension=".xlsx", initialfile="group_before_after.xlsx",
+                confirmoverwrite=False, filetypes=[("Excel workbook", "*.xlsx"), ("All files", "*.*")])
+            if not path:
+                return
+            sub = self.ent_subject.get().strip() if self.ent_subject else ""
+            try:
+                n, replaced = append_group_row(path, group_row(
+                    sub, self.signal.filepath, sa, sb, self._SEGMENT_TABLE_METRICS))
+            except Exception as exc:
+                messagebox.showerror("Group table", str(exc), parent=win)
+                return
+            lbl_status.configure(
+                text=(f"✓  {sub or 'recording'} {'updated in' if replaced else 'added to'} "
+                      f"{os.path.basename(path)} ({n} recording{'s' if n != 1 else ''})"),
+                text_color=GREEN)
+
+        group_btn = ctk.CTkButton(ctrl, text="➕  Add to group table…", command=_add_to_group,
+                                  **button_style("secondary"))
+        group_btn.pack(side="left", padx=(SPACE_M, 0))
+        self._bind_hover_tip(
+            group_btn,
+            "One row per recording (subject, file, every metric of both segments): "
+            "the table for a paired test across mice. A recording already in it is "
+            "replaced.")
 
         ctk.CTkLabel(win,
                      text=f"Tip: equal durations give a fair comparison  ·  "

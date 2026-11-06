@@ -3403,6 +3403,9 @@ def compute_segment_stats(
         "sd1":      _NAN, "sd2":      _NAN, "sd_ratio": _NAN,
         "rpeaks_seg": np.array([], dtype=int),
         "rr_ms":      np.array([], dtype=float),
+        # The Poincaré pairs (RR_n, RR_n+1): successive valid intervals only.
+        "pairs_x":    np.array([], dtype=float),
+        "pairs_y":    np.array([], dtype=float),
         "t_rr":       np.array([], dtype=float),
         "blocks":     segment_blocks(np.array([]), np.array([]), t_lo, t_hi, block_s),
         "error":      None,
@@ -3483,6 +3486,8 @@ def compute_segment_stats(
         "sd_ratio": float(pc["sd1_sd2"]),
         "rpeaks_seg": rp,
         "rr_ms":      rr_ok,
+        "pairs_x":    np.asarray(rr_a, dtype=float),
+        "pairs_y":    np.asarray(rr_b, dtype=float),
         "t_rr":       t_ok,
         "blocks":     segment_blocks(t_ok, rr_ok, t_lo, t_hi, block_s),
         "error":      None,
