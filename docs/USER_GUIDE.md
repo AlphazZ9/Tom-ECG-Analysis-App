@@ -338,6 +338,28 @@ labels; the same recording again replaces its row): use the same template for
 every animal and the columns line up for a paired test (2 segments: Wilcoxon
 matched-pairs or paired t) or a repeated-measures one (Friedman / RM ANOVA).
 
+**Window (s)** next to the template gives every window that length (e.g. 60):
+a window before the event keeps its end, one after it keeps its start, so the
+gap left after the event stays. The **Artefact margin** is a quality check
+only: it does not move the windows.
+
+**Group — all animals** (the last card, also without a recording open): open a
+group table, choose the two segments, **▶ Run**. Each row is checked (missing
+segment, quality alert, a subject on several rows, another template or
+duration among the rows of this comparison) and, with *Leave out rows to
+check*, left out. Per metric: n animals, n with a non-zero difference (the
+Wilcoxon's own n), medians, median difference B − A, up / down, the two-sided
+Wilcoxon signed-rank p (exact for small n), Holm-adjusted over the metrics, and
+the paired t p. By default one metric per question is tested (HR, SDNN, SD1,
+SD2, LF/HF: RMSSD ≈ SD1·√2 and LF n.u. / HF n.u. ≡ LF/HF would make Holm
+stricter for nothing); *All metrics* tests every column. The status says the
+smallest p the test can reach (2 / 2ⁿ: 0.031 at n = 6, nothing below 0.05 at
+n ≤ 5). **Statistics…** saves the Excel report (Statistics, About, Rows
+checked, Paired values); **Figure…** the group figure: one Poincaré ellipse per
+animal (centre = mean RR, half-axes SD2 / SD1) and the group mean ellipse
+thick, for each segment, then HR, SD1 and SD2 before-after (one line per
+animal, the median thick).
+
 Click **▶ Compare**: the table shows every metric for every segment, with the same definitions
 as the main panels. Each segment is also cut into **non-overlapping blocks**
 of **Block (s)** seconds (default 10 s; a block is used when valid RR

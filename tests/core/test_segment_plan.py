@@ -119,3 +119,15 @@ def test_sd1_driven_by_a_few_outliers_is_flagged():
     (flags,) = sp.quality_flags([s2])
     assert any("outlier pairs drive it" in f for f in flags)
     assert not any("abrupt RR jumps" in f for f in flags)
+
+
+def test_a_window_length_shortens_the_windows_from_the_event_side():
+    t = next(t for t in sp.BUILTIN_TEMPLATES if t.name == "Before / after, 5 min")
+    before, after = sp.resolve(t, 1800.0, 1810.0, 3600.0, window_s=60.0)
+    assert (before.lo, before.hi) == (1740.0, 1800.0)        # ends at the event
+    assert (after.lo, after.hi) == (1840.0, 1900.0)          # still 30 s after it
+    rec = next(t for t in sp.BUILTIN_TEMPLATES if t.name.startswith("Recovery"))
+    w = sp.resolve(rec, 1000.0, 1000.0, 5000.0, window_s=120.0)
+    assert [(x.lo, x.hi) for x in w] == [(880.0, 1000.0), (1030.0, 1150.0),
+                                         (1600.0, 1720.0), (2500.0, 2620.0)]
+    assert sp.resolve(t, 1800.0, 1810.0, 3600.0, window_s=None) == sp.resolve(t, 1800.0, 1810.0, 3600.0)

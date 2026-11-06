@@ -79,15 +79,25 @@ BUILTIN_TEMPLATES: "tuple[SegmentTemplate, ...]" = (
 
 
 def resolve(template: SegmentTemplate, evt_start: float, evt_end: "Optional[float]",
-            duration: float) -> "list[ResolvedWindow]":
+            duration: float, window_s: "Optional[float]" = None) -> "list[ResolvedWindow]":
     """The windows of *template* in recording time, for an event at
     *evt_start* .. *evt_end* (a point event when *evt_end* is None), clamped
-    to [0, *duration*]."""
+    to [0, *duration*].
+
+    *window_s* gives every window that length instead of the template's,
+    keeping the edge nearest the event: a window before it keeps its end
+    (Before −300..0 → −60..0 for 60 s), a window after it keeps its start
+    (After +30..+330 → +30..+90)."""
     evt_end = evt_start if evt_end is None else evt_end
     out = []
     for w in template.windows:
         t0 = evt_start if w.ref == "start" else evt_end
         lo, hi = t0 + w.lo, t0 + w.hi
+        if window_s is not None and window_s > 0:
+            if w.ref == "start" and w.hi <= 0:      # before the event: keep its end
+                lo = hi - window_s
+            else:                                   # during / after: keep its start
+                hi = lo + window_s
         clo, chi = min(max(lo, 0.0), duration), min(max(hi, 0.0), duration)
         out.append(ResolvedWindow(w.label, clo, chi, (clo, chi) != (lo, hi)))
     return out

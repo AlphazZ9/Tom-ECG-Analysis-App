@@ -36,6 +36,12 @@ import tkinter as tk
 from ecg.ui.theme import button_style, disabled_style, toggle_style
 from ecg.ui.poincare_figure import draw_poincare_set
 from ecg.io.group_table import append_group_row, group_row
+from ecg.io.group_stats import (
+    DEFAULT_METRICS_NOTE, check_rows, paired_stats, read_group_table, segment_tags,
+    smallest_wilcoxon_p,
+    write_group_report,
+)
+from ecg.ui.group_figure import draw_group_figure
 from ecg.io.segment_export import (
     ComparisonResult, comparison_tsv, write_csv, write_pzfx, write_xlsx,
 )
@@ -145,10 +151,12 @@ class CompareSegmentsMixin:
             child.destroy()
         self._compare_built_for = sig
         if sig is None:
-            ctk.CTkLabel(holder, text="Open a file and detect the peaks to compare segments.",
-                         font=FONT_LABEL, text_color=MUTED).pack(pady=80)
-            return
-        self._build_compare_segments(holder)
+            ctk.CTkLabel(holder, text="Open a file and detect the peaks to compare segments "
+                                      "(the group card below works without one).",
+                         font=FONT_LABEL, text_color=MUTED).pack(pady=(60, 40))
+        else:
+            self._build_compare_segments(holder)
+        self._build_group_card(holder)
 
     def _build_compare_segments(self: ECGApp, win) -> None:
         """The comparison inside *win* (the tab's frame): 1 to MAX_SEGMENTS
@@ -242,7 +250,8 @@ class CompareSegmentsMixin:
         ent_margin = ctk.CTkEntry(qrow2, width=48, **input_style())
         ent_margin.insert(0, f"{DEFAULT_ARTEFACT_MARGIN_S:g}")
         ent_margin.pack(side="left", padx=(4, SPACE_M))
-        tip(ent_margin, "Quality check only: a window overlapping the event or this "
+        tip(ent_margin, "Quality check only (it does not move the windows): a window overlapping "
+                        "the event or this "
                         "many seconds after it is flagged (shock / movement artefact).")
 
         trow = ctk.CTkFrame(tcard, fg_color="transparent")
@@ -251,6 +260,12 @@ class CompareSegmentsMixin:
         _templates: "dict[str, SegmentTemplate]" = {}
         cb_tpl = ctk.CTkComboBox(trow, width=300, values=[""], state="readonly", **combo_style())
         cb_tpl.pack(side="left", padx=(4, SPACE_S))
+        ctk.CTkLabel(trow, text="Window (s):", font=FONT_SMALL, text_color=MUTED).pack(side="left")
+        ent_win = ctk.CTkEntry(trow, width=56, placeholder_text="tpl", **input_style())
+        ent_win.pack(side="left", padx=(4, SPACE_S))
+        tip(ent_win, "Length of every window, in seconds (e.g. 60 for 1 min). Empty: the "
+                     "template's own. A window before the event keeps its end, one after it "
+                     "keeps its start (so the gap left after the event stays).")
 
         def _reload_templates(select: "Optional[str]" = None) -> None:
             _templates.clear()
@@ -283,7 +298,15 @@ class CompareSegmentsMixin:
             if t is None or ev is None:
                 lbl_tpl_status.configure(text="⚠  pick an event (or type its start) and a template",
                                          text_color=RED); return
-            wins = resolve(t, ev[0], ev[1], dur)
+            win_txt = ent_win.get().strip()
+            try:
+                win_s = float(win_txt) if win_txt else None
+                if win_s is not None and not (np.isfinite(win_s) and win_s > 0):
+                    raise ValueError
+            except ValueError:
+                lbl_tpl_status.configure(text="⚠  Window (s) must be a positive number of seconds",
+                                         text_color=RED); return
+            wins = resolve(t, ev[0], ev[1], dur, window_s=win_s)
             _set_rows([(w.label, w.lo, w.hi) for w in wins])
             _state["template"] = t.name
             clamped = [w.label for w in wins if w.clamped]
@@ -895,3 +918,284 @@ class CompareSegmentsMixin:
                           f"HF {hf[0]:.2f}–{hf[1]:.2f} Hz  ·  wheel: zoom Y  ·  middle-click: reset Y",
                      font=FONT_HINT, text_color=MUTED, anchor="w").pack(
             fill="x", pady=(SPACE_XS, 0))
+
+    # ── Group: the group table across animals ────────────────────────────
+
+    def _build_group_card(self: ECGApp, win) -> None:
+        """GROUP card: open a group table (one row per recording), choose two
+        segments, check the rows, run the paired tests across animals and
+        draw the group figure; save both. Independent of the recording open
+        (its choices survive a rebuild of the tab, in _group_state)."""
+        st = getattr(self, "_group_state", None)
+        if st is None:
+            st = self._group_state = {"path": "", "a": "", "b": "", "exclude": True,
+                                      "name_a": "", "name_b": ""}
+        tip = self._bind_hover_tip
+        card = ctk.CTkFrame(win, **card_style())
+        card.pack(fill="x", padx=PAGE_PAD_X, pady=(0, PAGE_GAP))
+        body = ctk.CTkFrame(card, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=CARD_PAD, pady=(CARD_PAD - 4, CARD_PAD))
+        hdr = ctk.CTkFrame(body, fg_color="transparent")
+        hdr.pack(fill="x", pady=(0, SPACE_M))
+        ctk.CTkLabel(hdr, text="GROUP — ALL ANIMALS", font=FONT_SECTION_HDR,
+                     text_color=MUTED).pack(side="left")
+        ctk.CTkLabel(hdr, text="paired tests across animals on a group table",
+                     font=FONT_SMALL, text_color=MUTED).pack(side="left", padx=(SPACE_M, 0))
+
+        row1 = ctk.CTkFrame(body, fg_color="transparent")
+        row1.pack(fill="x", pady=(0, SPACE_S))
+        lbl_file = ctk.CTkLabel(row1, text="", font=FONT_SMALL, text_color=MUTED, anchor="w")
+        row2 = ctk.CTkFrame(body, fg_color="transparent")
+        row2.pack(fill="x", pady=(0, SPACE_S))
+        ctk.CTkLabel(row2, text="Compare:", font=FONT_SMALL, text_color=MUTED).pack(side="left")
+        cb_a = ctk.CTkComboBox(row2, width=170, values=[""], state="readonly", **combo_style())
+        cb_a.pack(side="left", padx=(4, SPACE_S))
+        ctk.CTkLabel(row2, text="vs", font=FONT_SMALL, text_color=MUTED).pack(side="left")
+        cb_b = ctk.CTkComboBox(row2, width=170, values=[""], state="readonly", **combo_style())
+        cb_b.pack(side="left", padx=(4, SPACE_M))
+        ctk.CTkLabel(row2, text="Names on the figure:", font=FONT_SMALL,
+                     text_color=MUTED).pack(side="left")
+        ent_na = ctk.CTkEntry(row2, width=110, placeholder_text="A", **input_style())
+        ent_na.pack(side="left", padx=(4, SPACE_XS))
+        ent_nb = ctk.CTkEntry(row2, width=110, placeholder_text="B", **input_style())
+        ent_nb.pack(side="left", padx=(0, SPACE_M))
+        for e, k in ((ent_na, "name_a"), (ent_nb, "name_b")):
+            if st[k]:
+                e.insert(0, st[k])
+        chk_ex = ctk.CTkCheckBox(row2, text="Leave out rows to check", font=FONT_SMALL,
+                                 text_color=MUTED, fg_color=BLUE, checkmark_color="white",
+                                 border_color=BORDER2, width=16)
+        if st["exclude"]:
+            chk_ex.select()
+        chk_ex.pack(side="left", padx=(0, SPACE_M))
+        tip(chk_ex, "Rows with a quality alert, a missing segment, a subject on several rows, "
+                    "another template or another duration are left out of the tests and the "
+                    "figure (they stay listed below).")
+        chk_all = ctk.CTkCheckBox(row2, text="All metrics", font=FONT_SMALL,
+                                  text_color=MUTED, fg_color=BLUE, checkmark_color="white",
+                                  border_color=BORDER2, width=16)
+        if st.get("all"):
+            chk_all.select()
+        chk_all.pack(side="left", padx=(0, SPACE_M))
+        tip(chk_all, "Off: one metric per question (HR, SDNN, SD1, SD2, LF/HF), so Holm is not "
+                     "made stricter by equivalent tests. " + DEFAULT_METRICS_NOTE + ".")
+        run_btn = ctk.CTkButton(row2, text="▶  Run", width=0, **button_style("primary"))
+        run_btn.pack(side="left")
+
+        lbl_status = ctk.CTkLabel(body, text="", font=FONT_SMALL, text_color=MUTED,
+                                  anchor="w", justify="left")
+        lbl_status.pack(fill="x")
+        body.bind("<Configure>", lambda e: lbl_status.configure(wraplength=max(200, e.width - 8)))
+        _scale = THEME.font_scale
+        _fsize = -int(round(12 * _scale))
+        txt = tk.Text(body, bg=CARD, fg=TEXT, bd=0, highlightthickness=0, wrap="none",
+                      font=(THEME.font_family, _fsize), height=1, cursor="arrow",
+                      padx=SPACE_S, spacing1=2, spacing3=2)
+        txt.tag_configure("head", font=(THEME.font_family, _fsize, "bold"), foreground=MUTED)
+        txt.tag_configure("stripe", background=BG)
+        txt.tag_configure("sig", foreground=GREEN, font=(THEME.font_family, _fsize, "bold"))
+        txt.tag_configure("warn", foreground=ORANGE)
+        txt.tag_configure("muted", foreground=MUTED)
+        txt.configure(state="disabled")
+        plot_card = ctk.CTkFrame(body, fg_color=CARD, corner_radius=0, height=430)
+        plot_card.pack_propagate(False)
+        slot = CanvasSlot(plot_card, 14, 4.3, toolbar=False,
+                          placeholder="Open a group table and click Run")
+        res_state: "dict[str, Any]" = {"df": None, "used": None, "stats": None, "checks": None,
+                                      "left_out": []}
+
+        def _load(path: str, quiet: bool = False) -> bool:
+            def fail(msg: str) -> bool:
+                if quiet:            # a remembered table: say it, no dialog
+                    lbl_status.configure(text=f"⚠  {msg}", text_color=ORANGE)
+                else:
+                    messagebox.showerror("Group table", msg, parent=win)
+                return False
+            try:
+                df = read_group_table(path)
+            except Exception as exc:
+                return fail(f"{os.path.basename(path)}: {exc}")
+            tags = segment_tags(df)
+            if len(tags) < 2:
+                return fail(f"{os.path.basename(path)} holds fewer than two segments.")
+            res_state["df"] = df
+            st["path"] = path
+            cb_a.configure(values=tags)
+            cb_b.configure(values=tags)
+            # The two most filled segments by default, or the ones chosen before.
+            filled = sorted(tags, key=lambda t: -int(df[f"start (s) {t}"].notna().sum()))
+            a = st["a"] if st["a"] in tags else filled[0]
+            b = st["b"] if st["b"] in tags and st["b"] != a else next(t for t in filled if t != a)
+            cb_a.set(a)
+            cb_b.set(b)
+            lbl_file.configure(text=f"{os.path.basename(path)}  ·  {len(df)} rows  ·  "
+                                    f"segments: {', '.join(tags)}")
+            return True
+
+        def _open() -> None:
+            path = filedialog.askopenfilename(
+                parent=win, title="Open a group table (Add to group table…)",
+                filetypes=[("Excel workbook", "*.xlsx"), ("All files", "*.*")],
+                initialdir=os.path.dirname(st["path"]) if st["path"] else None)
+            if path and _load(path):
+                _run()
+
+        open_btn = ctk.CTkButton(row1, text="📂  Open group table…", width=0, command=_open,
+                                 **button_style("secondary"))
+        open_btn.pack(side="left", padx=(0, SPACE_M))
+        lbl_file.pack(side="left", fill="x", expand=True)
+
+        def _show(stats, checks, a: str, b: str, left_out: "list[str]") -> None:
+            txt.configure(state="normal")
+            txt.delete("1.0", "end")
+            x = int(260 * _scale)
+            stops = []
+            for w in (50, 150, 150, 110, 80, 100, 90, 90):
+                x += int(w * _scale)
+                stops += [x, "right"]
+            txt.configure(tabs=stops)
+            heads = ["Metric", "n (≠0)", f"Median {a}", f"Median {b}", "Median Δ", "up/down",
+                     "Wilcoxon p", "p (Holm)", "paired t p"]
+            txt.insert("end", "\t".join(heads), "head")
+
+            def fmt(v: float, p: bool = False) -> str:
+                if v is None or not np.isfinite(v):
+                    return "—"
+                if p:
+                    return f"{v:.3f}" if v >= 0.001 else f"{v:.1e}"
+                return f"{v:.3g}" if abs(v) < 1000 else f"{v:.0f}"
+            for i, r in stats.reset_index(drop=True).iterrows():
+                line = ("stripe",) if i % 2 == 0 else ()
+                txt.insert("end", "\n" + str(r["Metric"]), line)
+                for v in (f"{int(r['n'])} ({int(r['n tested (Δ ≠ 0)'])})",
+                          fmt(r[f"Median {a}"]), fmt(r[f"Median {b}"]),
+                          fmt(r["Median Δ (B − A)"]), str(r["n up / down"])):
+                    txt.insert("end", "\t" + v, line)
+                ph = r["Wilcoxon p (Holm)"]
+                txt.insert("end", "\t" + fmt(r["Wilcoxon p"], True), line)
+                txt.insert("end", "\t" + fmt(ph, True),
+                           ("sig",) + line if np.isfinite(ph) and ph < 0.05 else line)
+                txt.insert("end", "\t" + fmt(r["Paired t p"], True), line)
+            bad = [c for c in checks if not c.ok]
+            if bad:
+                txt.insert("end", "\n\nRows to check", "head")
+                kept = dict(zip(map(id, checks), res_state.get("keep") or [True] * len(checks)))
+                for c in bad:
+                    tag = "kept" if kept.get(id(c), True) else "left out"
+                    txt.insert("end", f"\n[{tag}] {c.subject or '—'} · {c.file}: "
+                               + "; ".join(c.problems), "warn")
+            n_lines = int(txt.index("end-1c").split(".")[0])
+            txt.configure(height=n_lines, state="disabled")
+            if not txt.winfo_manager():
+                txt.pack(fill="x", pady=(SPACE_S, SPACE_M))
+                plot_card.pack(fill="x")
+
+        def _run() -> None:
+            # Read again: rows added since (Add to group table…) count.
+            if st["path"] and os.path.exists(st["path"]):
+                a0, b0 = cb_a.get(), cb_b.get()
+                if not _load(st["path"]):
+                    return
+                if a0 in cb_a.cget("values") and b0 in cb_b.cget("values") and a0 != b0:
+                    cb_a.set(a0)
+                    cb_b.set(b0)
+            df = res_state["df"]
+            if df is None:
+                _open()
+                return
+            a, b = cb_a.get(), cb_b.get()
+            if not a or not b or a == b:
+                lbl_status.configure(text="⚠  choose two different segments", text_color=RED)
+                return
+            st.update(a=a, b=b, exclude=bool(chk_ex.get()), all=bool(chk_all.get()),
+                      name_a=ent_na.get().strip(), name_b=ent_nb.get().strip())
+            checks = check_rows(df, a, b)
+            keep = [c.ok or not st["exclude"] for c in checks]
+            # A row without both segments can never be tested.
+            keep = [k and not any(p.startswith("no segment") for p in c.problems)
+                    for k, c in zip(keep, checks)]
+            used = df.loc[keep].reset_index(drop=True)
+            left_out = [c.subject or c.file for c, k in zip(checks, keep) if not k]
+            stats = paired_stats(used, a, b, "all" if st["all"] else None)
+            res_state.update(used=used, stats=stats, checks=checks, left_out=left_out, keep=keep)
+            n = len(used)
+            n_test = int(stats["n tested (Δ ≠ 0)"].max()) if len(stats) else 0
+            names = (st["name_a"] or a, st["name_b"] or b)
+            p_min = smallest_wilcoxon_p(n_test) if n_test else float("nan")
+            weak = not (p_min < 0.05)          # also NaN: nothing testable
+            msg = (f"{n} animal{'s' if n != 1 else ''} tested"
+                   + (f"  ·  left out: {', '.join(left_out)}" if left_out else "")
+                   + (f"  ·  with n = {n_test} non-zero differences the smallest possible "
+                      f"Wilcoxon p is {p_min:.3g}" if n_test else "")
+                   + ("  ·  no metric can reach p < 0.05" if weak and n_test else ""))
+            lbl_status.configure(text=("⚠  " if left_out or weak else "✓  ") + msg,
+                                 text_color=ORANGE if left_out or weak else GREEN)
+            _show(stats, checks, a, b, left_out)
+            slot.update(lambda fig: draw_group_figure(fig, used, a, b, names))
+            for btn_ in (btn_xlsx, btn_fig):
+                self._set_btn_enabled(btn_, True, "secondary")
+
+        run_btn.configure(command=_run)
+
+        def _save_stats() -> None:
+            if res_state["stats"] is None:
+                return
+            a, b = st["a"], st["b"]
+            path = filedialog.asksaveasfilename(
+                parent=win, title="Save the group statistics",
+                defaultextension=".xlsx", initialfile=f"group_stats_{a}_vs_{b}.xlsx",
+                initialdir=os.path.dirname(st["path"]) or None,
+                filetypes=[("Excel workbook", "*.xlsx"), ("All files", "*.*")])
+            if not path:
+                return
+            try:
+                write_group_report(path, res_state["used"], a, b, res_state["stats"],
+                                   res_state["checks"], excluded=res_state["left_out"],
+                                   note=f"group table: {os.path.basename(st['path'])}")
+            except Exception as exc:
+                messagebox.showerror("Group statistics", str(exc), parent=win)
+                return
+            lbl_status.configure(text=f"✓  statistics → {os.path.basename(path)}", text_color=GREEN)
+
+        def _save_figure() -> None:
+            used = res_state["used"]
+            if used is None:
+                return
+            a, b = st["a"], st["b"]
+            path = filedialog.asksaveasfilename(
+                parent=win, title="Save the group figure",
+                defaultextension=".png", initialfile=f"group_poincare_{a}_vs_{b}.png",
+                initialdir=os.path.dirname(st["path"]) or None,
+                filetypes=[("PNG image (300 dpi)", "*.png"), ("PDF (vector)", "*.pdf"),
+                           ("SVG (vector)", "*.svg"), ("All files", "*.*")])
+            if not path:
+                return
+            st.update(name_a=ent_na.get().strip(), name_b=ent_nb.get().strip())
+            fig = Figure(figsize=(14, 4.6), dpi=300, facecolor="white", layout="constrained")
+            try:
+                draw_group_figure(fig, used, a, b, (st["name_a"] or a, st["name_b"] or b))
+                fig.savefig(path, dpi=300, facecolor="white", bbox_inches="tight")
+            except Exception as exc:
+                messagebox.showerror("Group figure", str(exc), parent=win)
+                return
+            finally:
+                plt.close(fig)
+            lbl_status.configure(text=f"✓  figure → {os.path.basename(path)}", text_color=GREEN)
+
+        btn_fig = ctk.CTkButton(hdr, text="Figure…", width=0, command=_save_figure,
+                                state="disabled", **{**button_style("secondary"), **disabled_style()})
+        btn_fig.pack(side="right", padx=(SPACE_S, 0))
+        tip(btn_fig, "The group Poincaré (one ellipse per animal, the group mean thick) and "
+                     "the before-after panels: 300 dpi PNG or vector PDF / SVG")
+        btn_xlsx = ctk.CTkButton(hdr, text="📊  Statistics…", width=0, command=_save_stats,
+                                 state="disabled", **{**button_style("secondary"), **disabled_style()})
+        btn_xlsx.pack(side="right", padx=(SPACE_S, 0))
+        tip(btn_xlsx, "Excel: the paired tests (Wilcoxon, paired t, Holm), the rows checked "
+                      "and the paired values of every metric, one row per animal")
+        ctk.CTkLabel(body, text=(
+            "One row per animal: the test unit is the animal. Use the same template and labels for "
+            "every animal. Holm corrects the Wilcoxon p over the metrics listed; pick your primary "
+            "metric in advance."), font=FONT_HINT, text_color=MUTED, anchor="w",
+            justify="left").pack(fill="x", side="bottom", pady=(SPACE_S, 0))
+        if st["path"] and os.path.exists(st["path"]) and _load(st["path"], quiet=True):
+            _run()
