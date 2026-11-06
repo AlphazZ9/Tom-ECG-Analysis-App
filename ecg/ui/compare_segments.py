@@ -28,6 +28,11 @@ from ecg.ui.theme import (
     FONT_SUBSECTION,
 )
 from ecg.ui.theme import combo_style, input_style
+from ecg.ui.theme import (
+    THEME, CARD_PAD, FONT_HINT, FONT_SECTION_HDR, PAGE_GAP, PAGE_PAD_X, PAGE_PAD_Y,
+    card_style,
+)
+import tkinter as tk
 from ecg.ui.theme import button_style, disabled_style, toggle_style
 from ecg.ui.poincare_figure import draw_poincare_set
 from ecg.io.group_table import append_group_row, group_row
@@ -95,7 +100,9 @@ class CompareSegmentsMixin:
         page = self.tabs.tab(TAB_COMPARE)
         page.grid_rowconfigure(0, weight=1)
         page.grid_columnconfigure(0, weight=1)
-        self._compare_holder = ctk.CTkFrame(page, fg_color=PANEL, corner_radius=0)
+        self._compare_holder = ctk.CTkScrollableFrame(
+            page, fg_color=BG, corner_radius=0, scrollbar_button_color=BORDER,
+            scrollbar_button_hover_color=BORDER2)
         self._compare_holder.grid(row=0, column=0, sticky="nsew")
         self._compare_built_for = None
         self._refresh_compare_tab()
@@ -125,8 +132,8 @@ class CompareSegmentsMixin:
             child.destroy()
         self._compare_built_for = sig
         if sig is None:
-            ctk.CTkLabel(holder, text="Open a file and detect the peaks to compare two segments.",
-                         font=FONT_LABEL, text_color=MUTED).pack(expand=True)
+            ctk.CTkLabel(holder, text="Open a file and detect the peaks to compare segments.",
+                         font=FONT_LABEL, text_color=MUTED).pack(pady=80)
             return
         self._build_compare_segments(holder)
 
@@ -144,24 +151,42 @@ class CompareSegmentsMixin:
         sub    = self.ent_subject.get().strip() if self.ent_subject else "subject"
         tip    = self._bind_hover_tip
 
-        hdr = ctk.CTkFrame(win, fg_color=PANEL, corner_radius=0)
-        hdr.pack(fill="x")
-        ctk.CTkLabel(hdr, text="⚖  Segment Comparison",
-                     font=FONT_KPI_VALUE, text_color=TEXT,
-                     anchor="w").pack(side="left", padx=SPACE_L, pady=SPACE_M)
-        ctk.CTkLabel(hdr,
-                     text=f"{sub}  ·  {dur:.1f} s  ·  {len(rp)} peaks",
-                     font=FONT_SMALL, text_color=MUTED).pack(side="left", padx=(0, SPACE_L))
+        top = ctk.CTkFrame(win, fg_color="transparent")
+        top.pack(fill="x", padx=PAGE_PAD_X, pady=(PAGE_PAD_Y, PAGE_GAP))
+        top.grid_columnconfigure((0, 1), weight=1, uniform="setup")
+
+        def _section(title: str, note: str = "", column: "Optional[int]" = None
+                     ) -> "tuple[ctk.CTkFrame, ctk.CTkFrame]":
+            """A white card titled *title* (the pages' card: 1 px border,
+            16 px inside), in column *column* of the top row, or across the
+            page when None; returns its header, for what sits by the title,
+            and its body."""
+            if column is None:
+                card = ctk.CTkFrame(win, **card_style())
+                card.pack(fill="x", padx=PAGE_PAD_X, pady=(0, PAGE_GAP))
+            else:
+                card = ctk.CTkFrame(top, **card_style())
+                card.grid(row=0, column=column, sticky="nsew",
+                          padx=(0, PAGE_GAP // 2) if column == 0 else (PAGE_GAP // 2, 0))
+            body = ctk.CTkFrame(card, fg_color="transparent")
+            body.pack(fill="both", expand=True, padx=CARD_PAD, pady=(CARD_PAD - 4, CARD_PAD))
+            hdr_ = ctk.CTkFrame(body, fg_color="transparent")
+            hdr_.pack(fill="x", pady=(0, SPACE_M))
+            ctk.CTkLabel(hdr_, text=title.upper(), font=FONT_SECTION_HDR,
+                         text_color=MUTED).pack(side="left")
+            if note:
+                ctk.CTkLabel(hdr_, text=note, font=FONT_SMALL,
+                             text_color=MUTED).pack(side="left", padx=(SPACE_M, 0))
+            return hdr_, body
 
         # ── Event and template ────────────────────────────────────────────
-        tcard = ctk.CTkFrame(win, fg_color=CARD, corner_radius=8)
-        tcard.pack(fill="x", padx=SPACE_L, pady=(SPACE_M, 0))
-        ctk.CTkLabel(tcard, text="⚡  Windows around an event — the same template for every animal",
-                     font=FONT_SUBSECTION, text_color=TEAL, anchor="w"
-                     ).pack(padx=SPACE_L, pady=(SPACE_S, 2), anchor="w")
+        _h, tcard = _section("Windows around an event", "the same template for every animal",
+                             column=0)
         qrow = ctk.CTkFrame(tcard, fg_color="transparent")
-        qrow.pack(fill="x", padx=SPACE_L, pady=(0, SPACE_XS))
+        qrow.pack(fill="x", pady=(0, SPACE_S))
 
+        qrow2 = ctk.CTkFrame(tcard, fg_color="transparent")
+        qrow2.pack(fill="x", pady=(0, SPACE_S))
         _event_opts: "dict[str, tuple[float, float]]" = {}
         for _ann in self.analysis.annotations:
             _lbl = _ann.get("label") or "Annotation"
@@ -194,16 +219,16 @@ class CompareSegmentsMixin:
         ctk.CTkLabel(qrow, text="End (s):", font=FONT_SMALL, text_color=MUTED).pack(side="left")
         q_evt_end = ctk.CTkEntry(qrow, width=70, placeholder_text="= start", **input_style())
         q_evt_end.pack(side="left", padx=(4, SPACE_M))
-        ctk.CTkLabel(qrow, text="Artefact margin (s):", font=FONT_SMALL,
+        ctk.CTkLabel(qrow2, text="Artefact margin (s):", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left")
-        ent_margin = ctk.CTkEntry(qrow, width=48, **input_style())
+        ent_margin = ctk.CTkEntry(qrow2, width=48, **input_style())
         ent_margin.insert(0, f"{DEFAULT_ARTEFACT_MARGIN_S:g}")
         ent_margin.pack(side="left", padx=(4, SPACE_M))
         tip(ent_margin, "Quality check only: a window overlapping the event or this "
                         "many seconds after it is flagged (shock / movement artefact).")
 
         trow = ctk.CTkFrame(tcard, fg_color="transparent")
-        trow.pack(fill="x", padx=SPACE_L, pady=(0, SPACE_XS))
+        trow.pack(fill="x", pady=(0, SPACE_XS))
         ctk.CTkLabel(trow, text="Template:", font=FONT_SMALL, text_color=MUTED).pack(side="left")
         _templates: "dict[str, SegmentTemplate]" = {}
         cb_tpl = ctk.CTkComboBox(trow, width=300, values=[""], state="readonly", **combo_style())
@@ -297,13 +322,13 @@ class CompareSegmentsMixin:
             b = ctk.CTkButton(trow, text=text, width=0, command=cmd, **button_style(style))
             b.pack(side="left", padx=(0, SPACE_S))
             tip(b, tiptext)
-        lbl_tpl_status.pack(padx=SPACE_L, pady=(0, SPACE_S), anchor="w", fill="x")
+        lbl_tpl_status.pack(anchor="w", fill="x")
 
         # ── Segments: 1 to MAX_SEGMENTS rows ──────────────────────────────
-        seg_card = ctk.CTkFrame(win, fg_color=CARD, corner_radius=8)
-        seg_card.pack(fill="x", padx=SPACE_L, pady=(SPACE_S, SPACE_S))
+        _h, seg_card = _section("Segments", f"the first is the reference  ·  {sub}  ·  "
+                                            f"{dur:.1f} s  ·  {len(rp)} peaks", column=1)
         rows_frame = ctk.CTkFrame(seg_card, fg_color="transparent")
-        rows_frame.pack(fill="x", padx=SPACE_L, pady=(SPACE_S, 0))
+        rows_frame.pack(fill="x")
         seg_rows: "list[dict]" = []
         _state: "dict[str, Any]" = {"template": "", "segs": None, "cmps": None, "flags": None}
 
@@ -378,7 +403,7 @@ class CompareSegmentsMixin:
             seg_rows.append(r)
 
         add_bar = ctk.CTkFrame(seg_card, fg_color="transparent")
-        add_bar.pack(fill="x", padx=SPACE_L, pady=(SPACE_XS, SPACE_S))
+        add_bar.pack(fill="x", pady=(SPACE_XS, 0))
 
         def _add_segment() -> None:
             if len(seg_rows) >= MAX_SEGMENTS:
@@ -395,8 +420,7 @@ class CompareSegmentsMixin:
         add_btn = ctk.CTkButton(add_bar, text="＋  Add segment", width=0, command=_add_segment,
                                 **button_style("secondary"))
         add_btn.pack(side="left")
-        ctk.CTkLabel(add_bar, text=(f"Up to {MAX_SEGMENTS}; Δ % and the block comparison are "
-                                    "against the first segment (the reference)."),
+        ctk.CTkLabel(add_bar, text=f"up to {MAX_SEGMENTS}",
                      font=FONT_MICRO, text_color=MUTED).pack(side="left", padx=(SPACE_M, 0))
 
         def _refresh_add_btn() -> None:
@@ -406,10 +430,12 @@ class CompareSegmentsMixin:
                    ("Segment B", float(int(dur / 2)), float(int(dur)))])
 
         # ── Run / export bar ──────────────────────────────────────────────
-        ctrl = ctk.CTkFrame(win, fg_color="transparent")
-        ctrl.pack(fill="x", padx=SPACE_L, pady=(0, SPACE_S))
-        lbl_status = ctk.CTkLabel(ctrl, text="", font=FONT_SMALL, text_color=MUTED)
-        lbl_status.pack(side="right", padx=(SPACE_M, 0))
+        ctk.CTkFrame(seg_card, height=1, fg_color=BORDER).pack(fill="x", pady=SPACE_M)
+        ctrl = ctk.CTkFrame(seg_card, fg_color="transparent")
+        ctrl.pack(fill="x")
+        lbl_status = ctk.CTkLabel(seg_card, text="", font=FONT_SMALL, text_color=MUTED,
+                                  anchor="w", justify="left")
+        lbl_status.pack(fill="x", pady=(SPACE_S, 0))
         progress_bar = ctk.CTkProgressBar(ctrl, height=8, mode="indeterminate",
                                           progress_color=TEAL)
         progress_bar.pack(side="right", padx=(SPACE_M, 0))
@@ -424,28 +450,43 @@ class CompareSegmentsMixin:
         ent_block.insert(0, f"{MouseECG.SEGMENT_BLOCK_S:g}")
         ent_block.pack(side="left")
 
-        # ── Results: table | plot ─────────────────────────────────────────
-        results_frame = ctk.CTkFrame(win, fg_color="transparent")
-        results_frame.pack(fill="both", expand=True, padx=SPACE_L, pady=(0, SPACE_M))
-        table_card = ctk.CTkFrame(results_frame, fg_color=PANEL, corner_radius=8)
-        table_card.pack(side="left", fill="both", expand=True, padx=(0, SPACE_M))
-        ctk.CTkLabel(table_card, text="Metric comparison",
-                     font=FONT_SUBSECTION, text_color=MUTED,
-                     anchor="w").pack(padx=SPACE_M, pady=(SPACE_M, SPACE_S), fill="x")
-        lbl_mw = ctk.CTkLabel(table_card, text="", font=FONT_MICRO,
-                              text_color=MUTED, anchor="w", justify="left", wraplength=520)
-        lbl_mw.pack(padx=SPACE_M, pady=(0, SPACE_XS), fill="x")
-        tbl = ctk.CTkScrollableFrame(table_card, fg_color=BG, height=380,
-                                     scrollbar_button_color=BORDER)
-        tbl.pack(fill="both", expand=True, padx=SPACE_S, pady=(0, SPACE_M))
-        ctk.CTkLabel(tbl, text="Set the segments above, then click ▶ Compare",
-                     font=FONT_SMALL, text_color=MUTED, anchor="w").grid(
-            row=0, column=0, sticky="ew", padx=SPACE_S, pady=SPACE_M)
+        # ── Results: block summary, table, then the plot across the page ──
+        res_hdr, res = _section("Results")
+        lbl_mw = ctk.CTkLabel(res, text="Set the segments above, then click ▶ Compare.",
+                              font=FONT_SMALL, text_color=MUTED, anchor="w", justify="left")
+        lbl_mw.pack(fill="x", pady=(0, SPACE_S))
+        res.bind("<Configure>", lambda e: lbl_mw.configure(wraplength=max(200, e.width - 8)))
 
-        plot_card = ctk.CTkFrame(results_frame, fg_color=PANEL, corner_radius=8)
-        plot_card.pack(side="right", fill="both", expand=True)
-        view_bar = ctk.CTkFrame(plot_card, fg_color="transparent")
-        view_bar.pack(padx=SPACE_M, pady=(SPACE_M, SPACE_XS), fill="x")
+        # One text widget with tab stops, like the Rhythm & HRV metric table:
+        # the values line up under their segment, a row per metric.
+        _scale = THEME.font_scale
+        _fsize = -int(round(12 * _scale))
+        tbl = tk.Text(res, bg=CARD, fg=TEXT, bd=0, highlightthickness=0, wrap="none",
+                      font=(THEME.font_family, _fsize), height=2, cursor="arrow",
+                      padx=SPACE_S, spacing1=2, spacing3=2)
+        tbl.tag_configure("head", font=(THEME.font_family, _fsize, "bold"), foreground=MUTED)
+        tbl.tag_configure("stripe", background=BG)
+        tbl.tag_configure("unit", foreground=MUTED)
+        tbl.tag_configure("delta", foreground=MUTED,
+                          font=(THEME.font_family, -int(round(11 * _scale))))
+        tbl.configure(state="disabled")
+        grid = ctk.CTkFrame(res, fg_color="transparent")
+        grid.pack(fill="x")
+        grid.grid_columnconfigure(1, weight=1)
+        tbl.lift(grid)
+        plot_box = ctk.CTkFrame(grid, fg_color="transparent")
+
+        def _place(n_segs: int) -> None:
+            """Table and plot side by side, the plot under the table when the
+            table needs the width (more than 3 segments)."""
+            tbl.grid_forget(); plot_box.grid_forget()
+            tbl.grid(in_=grid, row=0, column=0, sticky="nw")
+            if n_segs <= 3:
+                plot_box.grid(row=0, column=1, sticky="nsew", padx=(CARD_PAD, 0))
+            else:
+                plot_box.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(SPACE_M, 0))
+        view_bar = ctk.CTkFrame(plot_box, fg_color="transparent")
+        view_bar.pack(fill="x", pady=(0, SPACE_S))
         _view = {"mode": "rr"}
         _view_btns: "dict[str, ctk.CTkButton]" = {}
 
@@ -461,8 +502,13 @@ class CompareSegmentsMixin:
                               **{**button_style("secondary"), **toggle_style(mode == "rr")})
             b.pack(side="left", padx=(0, SPACE_S))
             _view_btns[mode] = b
-        plot_slot = CanvasSlot(plot_card, 8, 4, toolbar=False, yscale_bar=True,
+        plot_card = ctk.CTkFrame(plot_box, fg_color=CARD, corner_radius=0, height=460)
+        plot_card.pack(fill="x")
+        plot_card.pack_propagate(False)        # a scrolling page gives no height to fit
+        plot_slot = CanvasSlot(plot_card, 14, 4.6, toolbar=False, yscale_bar=True,
                                placeholder="Click ▶ Compare to overlay tachograms")
+        plot_slot.enable_wheel_yzoom()
+        _place(2)
 
         _METRICS: "list[tuple[str, str, str]]" = list(self._SEGMENT_TABLE_METRICS)
 
@@ -481,34 +527,59 @@ class CompareSegmentsMixin:
             return (100.0 * (vb - va) / abs(va)
                     if np.isfinite(va) and np.isfinite(vb) and abs(va) > 1e-9 else float("nan"))
 
+        _COUNT_KEYS = {"n_beats", "n_blocks", "duration_s"}
+
+        def _fmt_cell(key: str, v: float) -> str:
+            if key in _COUNT_KEYS and np.isfinite(v) and float(v).is_integer():
+                return f"{v:.0f}"
+            return _fmt(v)
+
         def _populate_table(segs: "list[dict]") -> None:
-            for w in tbl.winfo_children():
-                w.destroy()
-            ncol = 1 + len(segs)
-            for ci in range(ncol):
-                tbl.grid_columnconfigure(ci, weight=1)
-            ctk.CTkLabel(tbl, text="Metric", font=FONT_BADGE, text_color=TEXT, anchor="w").grid(
-                row=0, column=0, sticky="ew", padx=SPACE_S, pady=(SPACE_XS, SPACE_S))
-            for k, s in enumerate(segs):
-                ctk.CTkLabel(tbl, text=s["label"], font=FONT_BADGE, text_color=_color(k),
-                             anchor="e").grid(row=0, column=1 + k, sticky="ew", padx=SPACE_S,
-                                              pady=(SPACE_XS, SPACE_S))
+            val_w, d_w = int(110 * _scale), int(80 * _scale)
+            x = int(270 * _scale)
+            stops = []
+            for k in range(len(segs)):
+                x += val_w
+                stops += [x, "right"]
+                if k:
+                    x += d_w
+                    stops += [x, "right"]
+            # Text width is in characters: from the font's own "0".
+            import tkinter.font as tkfont
+            char_px = max(1, tkfont.Font(font=tbl.cget("font")).measure("0"))
+            tbl.configure(state="normal", tabs=stops, width=int(x / char_px) + 3)
+            _place(len(segs))
+            tbl.delete("1.0", "end")
+            for k, s_ in enumerate(segs):
+                tbl.tag_configure(f"seg{k}", font=(THEME.font_family, _fsize, "bold"),
+                                  foreground=_color(k))
+            tbl.insert("end", "Metric", "head")
+            for k, s_ in enumerate(segs):
+                tbl.insert("end", "\t")
+                tbl.insert("end", s_["label"], f"seg{k}")
+                if k:
+                    tbl.insert("end", "\tΔ %", "head")
             ref = segs[0]
-            for ri, (key, name, unit) in enumerate(_METRICS, start=1):
-                bg = CARD if ri % 2 == 0 else BG
-                ctk.CTkLabel(tbl, text=f"{name}  {unit}" if unit else name, font=FONT_KPI_LABEL,
-                             text_color=MUTED, fg_color=bg, anchor="w").grid(
-                    row=ri, column=0, sticky="ew", padx=SPACE_S, pady=SPACE_XS)
+            for ri, (key, name, unit) in enumerate(_METRICS):
+                line = ("stripe",) if ri % 2 == 0 else ()
+                tbl.insert("end", "\n" + name, line)
+                if unit:
+                    tbl.insert("end", f"  {unit}", ("unit",) + line)
                 va = float(ref.get(key, float("nan")))
-                for k, s in enumerate(segs):
-                    v = float(s.get(key, float("nan")))
-                    txt = _fmt(v)
-                    d = _delta(va, v) if k else float("nan")
-                    if np.isfinite(d):
-                        txt += f"  {'▲' if d > 0 else '▼'}{abs(d):.1f}%"
-                    ctk.CTkLabel(tbl, text=txt, font=FONT_KPI_LABEL, text_color=TEXT,
-                                 fg_color=bg, anchor="e").grid(
-                        row=ri, column=1 + k, sticky="ew", padx=SPACE_S, pady=SPACE_XS)
+                for k, s_ in enumerate(segs):
+                    v = float(s_.get(key, float("nan")))
+                    tbl.insert("end", "\t" + _fmt_cell(key, v), line)
+                    if not k:
+                        continue
+                    d = _delta(va, v)
+                    if not np.isfinite(d):
+                        txt = "—"
+                    elif abs(d) < 0.05:
+                        txt = "0.0 %"
+                    else:
+                        txt = f"{'▲' if d > 0 else '▼'} {abs(d):.1f} %"
+                    tbl.insert("end", "\t" + txt, ("delta",) + line)
+            tbl.configure(height=len(_METRICS) + 1, state="disabled")
 
         def _rr_drawer(segs: "list[dict]", colors: "list[str]"):
             """The superimposed RR tachograms of *segs*, as a draw function."""
@@ -768,8 +839,8 @@ class CompareSegmentsMixin:
             "the same template for every animal. A recording already in it is replaced.")
 
         _reload_templates()
-        ctk.CTkLabel(win,
-                     text=f"Tip: equal durations give a fair comparison  ·  "
-                          f"LF {lf[0]:.2f}–{lf[1]:.2f} Hz  HF {hf[0]:.2f}–{hf[1]:.2f} Hz",
-                     font=FONT_MICRO, text_color=LIGHT, anchor="w").pack(
-            fill="x", padx=SPACE_L, pady=(0, SPACE_S))
+        ctk.CTkLabel(res,
+                     text=f"Equal durations give a fair comparison  ·  LF {lf[0]:.2f}–{lf[1]:.2f} Hz  "
+                          f"HF {hf[0]:.2f}–{hf[1]:.2f} Hz  ·  wheel: zoom Y  ·  middle-click: reset Y",
+                     font=FONT_HINT, text_color=MUTED, anchor="w").pack(
+            fill="x", pady=(SPACE_XS, 0))

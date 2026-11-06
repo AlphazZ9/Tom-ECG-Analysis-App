@@ -161,8 +161,10 @@ class TabHrvMixin:
         left = ctk.CTkFrame(sec, fg_color="transparent")
         left.grid(row=1, column=0, sticky="ew")
         self._rhythm_plot_card(left, 440, "rr", 12.0).pack(fill="x")
+        self._slots["rr"].enable_wheel_yzoom()
         ctk.CTkLabel(
-            left, text=("Left-click: go to time  ·  right-click: next spike  ·  ▲ sudden "
+            left, text=("Left-click: go to time  ·  right-click: next spike  ·  wheel: zoom Y  ·  "
+                        "middle-click: reset Y  ·  ▲ sudden "
                         "acceleration  ▼ sudden deceleration  ·  amber >2.5 SD  ·  red >3.5 SD"),
             font=FONT_HINT, text_color=MUTED, anchor="w",
         ).pack(fill="x", pady=(SPACE_XS, 0))

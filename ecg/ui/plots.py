@@ -517,6 +517,56 @@ class CanvasSlot:
             sp.set_color(PLOT["border"])
         self.canvas.draw_idle()
 
+    # ── Mouse-wheel zoom of the Y axis ────────────────────────────────────
+    WHEEL_ZOOM_IN = 0.8          # Y span factor per wheel notch away from you
+
+    def enable_wheel_yzoom(self) -> None:
+        """Mouse wheel over a panel zooms its Y axis around the pointer (away
+        from you: in, towards you: out); the middle button restores the
+        panel's limits as drawn. Bound on the canvas widget and ending the
+        event there, so the wheel does not also scroll an enclosing page
+        (CTkScrollableFrame) or reach matplotlib's own wheel handler."""
+        w = self.canvas.get_tk_widget()
+
+        def _axes_at(x: int, y: int) -> "tuple[Any, float]":
+            # Tk y runs down from the widget's top, matplotlib's display y up
+            # from the figure's bottom.
+            yd = w.winfo_height() - y
+            for ax in self.fig.axes:
+                if ax.get_visible() and ax.bbox.contains(x, yd):
+                    return ax, float(ax.transData.inverted().transform((x, yd))[1])
+            return None, float("nan")
+
+        def _zoom(x: int, y: int, zoom_in: bool) -> str:
+            ax, yc = _axes_at(x, y)
+            if ax is None or not np.isfinite(yc):
+                return ""
+            if not hasattr(ax, "_wheel_home_ylim"):
+                ax._wheel_home_ylim = ax.get_ylim()   # type: ignore[attr-defined]
+            f = self.WHEEL_ZOOM_IN if zoom_in else 1.0 / self.WHEEL_ZOOM_IN
+            lo, hi = ax.get_ylim()
+            ax.set_ylim(yc - (yc - lo) * f, yc + (hi - yc) * f)
+            self.canvas.draw_idle()
+            return "break"
+
+        def _on_wheel(e: Any) -> str:          # Windows / macOS
+            # Outside a panel ("" = carry on) the page scrolls as before.
+            return _zoom(e.x, e.y, e.delta > 0)
+
+        def _on_middle(e: Any) -> "Optional[str]":
+            ax, _yc = _axes_at(e.x, e.y)
+            home = getattr(ax, "_wheel_home_ylim", None) if ax is not None else None
+            if home is None:
+                return None
+            ax.set_ylim(*home)
+            self.canvas.draw_idle()
+            return "break"
+
+        w.bind("<MouseWheel>", _on_wheel)
+        w.bind("<Button-4>", lambda e: _zoom(e.x, e.y, True))    # X11
+        w.bind("<Button-5>", lambda e: _zoom(e.x, e.y, False))
+        w.bind("<Button-2>", _on_middle)
+
     def update(self, draw_fn: Any) -> None:
         """Store *draw_fn* and immediately render it.
 
