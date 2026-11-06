@@ -9,7 +9,9 @@ from matplotlib.patches import Ellipse
 
 from ecg.core.analysis import compute_segment_stats
 from ecg.io.group_table import append_group_row, group_row
-from ecg.ui.poincare_figure import draw_poincare_pair, grid_step, shared_limits
+from ecg.ui.poincare_figure import (
+    draw_poincare_pair, draw_poincare_set, grid_step, shared_limits,
+)
 
 FS = 1000.0
 METRICS = [("hr_mean", "Mean HR", "bpm"), ("sd1", "Poincaré SD1", "ms"),
@@ -74,16 +76,29 @@ def test_no_pair_draws_a_note():
 def test_group_table_one_row_per_recording(tmp_path):
     sa, sb = _segments()
     path = str(tmp_path / "group.xlsx")
-    assert append_group_row(path, group_row("M1", "D:/x/1720M.mat", sa, sb, METRICS)) == (1, False)
-    assert append_group_row(path, group_row("M2", "D:/x/1721M.mat", sa, sb, METRICS)) == (2, False)
+    row = lambda subj, f, b: group_row(subj, f, [sa, b], METRICS, template="T5")  # noqa: E731
+    assert append_group_row(path, row("M1", "D:/x/1720M.mat", sb)) == (1, False)
+    assert append_group_row(path, row("M2", "D:/x/1721M.mat", sb)) == (2, False)
     # The same recording again replaces its row.
-    sb2 = dict(sb, sd1=99.0)
-    assert append_group_row(path, group_row("M1", "D:/x/1720M.mat", sa, sb2, METRICS)) == (2, True)
+    assert append_group_row(path, row("M1", "D:/x/1720M.mat", dict(sb, sd1=99.0))) == (2, True)
     df = pd.read_excel(path, sheet_name="Group")
     assert list(df["subject"]) == ["M1", "M2"]
-    assert df.loc[df.subject == "M1", "Poincaré SD1 (ms) B"].item() == 99.0
-    assert {"Poincaré SD1 (ms) A", "Mean HR (bpm) B", "start (s) A", "segment B"} <= set(df.columns)
-    assert df.loc[0, "segment A"] == "Before" and df.loc[0, "segment B"] == "After"
+    # Columns tagged with the segment labels.
+    assert df.loc[df.subject == "M1", "Poincaré SD1 (ms) After"].item() == 99.0
+    assert {"Poincaré SD1 (ms) Before", "Mean HR (bpm) After", "start (s) Before",
+            "valid RR (%) After", "Poincaré pairs (n) Before", "QC After"} <= set(df.columns)
+    assert (df["template"] == "T5").all() and (df["QC Before"] == "ok").all()
+
+
+def test_group_row_takes_any_number_of_segments_and_their_flags():
+    sa, sb = _segments()
+    sc = dict(sb, label="Late")
+    row = group_row("M1", "f.mat", [sa, sb, sc], METRICS, flags=[[], ["few pairs"], []])
+    assert row["QC After"] == "few pairs" and row["QC Late"] == "ok"
+    assert "Mean HR (bpm) Late" in row
+    # Labels that clash fall back to letters.
+    row = group_row("M1", "f.mat", [sa, dict(sb, label="Before")], METRICS)
+    assert "Mean HR (bpm) A" in row and "Mean HR (bpm) B" in row
 
 
 def test_points_on_the_sampling_grid_are_jittered_for_display_only():
@@ -99,3 +114,15 @@ def test_points_on_the_sampling_grid_are_jittered_for_display_only():
     lo, hi = ax.get_xlim()
     assert lo <= pts[:, 0].min() and hi >= pts[:, 0].max()
     assert any("jittered" in t.get_text() for t in ax.texts)
+
+
+def test_poincare_set_draws_one_panel_per_segment():
+    sa, sb = _segments()
+    fig = Figure(figsize=(12, 4))
+    segs = [sa, sb, dict(sb, label="C")]
+    assert draw_poincare_set(fig, segs, ("b", "orange", "g"))
+    assert len(fig.axes) == 3
+    assert len({ax.get_xlim() for ax in fig.axes}) == 1
+    fig = Figure()
+    draw_poincare_set(fig, [sa] * 5, ("b",))
+    assert sum(ax.axison for ax in fig.axes) == 5            # 2 rows of 4, 3 blank

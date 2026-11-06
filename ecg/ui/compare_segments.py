@@ -2,9 +2,9 @@
 """
 ecg.ui.compare_segments
 -----------------------
-ECGApp Compare Segments tab: two windows A / B of the recording, their
-metric table, RR tachograms or Poincaré plots, the export and the group
-table. Built in the tab when it opens, rebuilt when the recording or its
+ECGApp Compare segments tab: 1 to 6 windows of the recording, typed or
+placed by a saved template around an event, their metric table, quality
+checks, RR tachograms or Poincaré plots, the export and the group table. Built in the tab when it opens, rebuilt when the recording or its
 peaks have changed since. Mixin of ECGApp (see ecg/ui/app.py).
 """
 from __future__ import annotations
@@ -22,15 +22,20 @@ import pandas as pd
 from ecg.core.models import MouseECG
 from ecg.ui.theme import (
     BG, PANEL, CARD, BORDER, BORDER2, TEXT, MUTED, LIGHT, PLOT, RED, BLUE,
-    GREEN, ORANGE, TEAL, TEAL_DARK, GREEN_DARK, ORANGE_DARK, SPACE_XS, SPACE_S,
+    GREEN, ORANGE, PURPLE, TEAL, TEAL_DARK, GREEN_DARK, ORANGE_DARK, SPACE_XS, SPACE_S,
     SPACE_M, SPACE_L, FONT_LABEL, FONT_SMALL, FONT_KPI_VALUE, FONT_KPI_LABEL,
     FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR, FONT_MICRO, FONT_BADGE,
     FONT_SUBSECTION,
 )
 from ecg.ui.theme import combo_style, input_style
 from ecg.ui.theme import button_style, disabled_style, toggle_style
-from ecg.ui.poincare_figure import draw_poincare_pair
+from ecg.ui.poincare_figure import draw_poincare_set
 from ecg.io.group_table import append_group_row, group_row
+from ecg.core.segment_plan import (
+    DEFAULT_ARTEFACT_MARGIN_S, MAX_SEGMENTS, SegmentTemplate, delete_template,
+    load_templates, quality_flags, resolve, save_template, segment_quality,
+    template_from_windows, unique_tags,
+)
 from ecg.ui.plots import CanvasSlot, style_axes
 from ecg.ui.tab_keys import TAB_COMPARE
 
@@ -126,15 +131,18 @@ class CompareSegmentsMixin:
         self._build_compare_segments(holder)
 
     def _build_compare_segments(self: ECGApp, win) -> None:
-        """The comparison inside *win* (the tab's frame): two configurable
-        time windows (A / B) → side-by-side metric table + superimposed RR
-        tachogram or Poincaré plots. All stats run on a background thread."""
+        """The comparison inside *win* (the tab's frame): 1 to MAX_SEGMENTS
+        windows, typed or placed by a template around an event, their metric
+        table (Δ % against the first), RR tachograms or Poincaré plots, the
+        quality of each, the export and the group table. The stats run on a
+        background thread."""
         sig    = self._signal_flt
         rp     = self._rpeaks_ok.copy()
         fs     = self._fs
         dur    = float(len(sig)) / fs
         vlf, lf, hf = self._get_freq_bands()
         sub    = self.ent_subject.get().strip() if self.ent_subject else "subject"
+        tip    = self._bind_hover_tip
 
         hdr = ctk.CTkFrame(win, fg_color=PANEL, corner_radius=0)
         hdr.pack(fill="x")
@@ -145,59 +153,15 @@ class CompareSegmentsMixin:
                      text=f"{sub}  ·  {dur:.1f} s  ·  {len(rp)} peaks",
                      font=FONT_SMALL, text_color=MUTED).pack(side="left", padx=(0, SPACE_L))
 
-        # ── Quick fill: before / after an event ─────────────────────────
-        # Packed above the two segment cards now, populated with widgets
-        # further down once seg_entries exists -- pack() position is set
-        # by call order, so this still renders at the top of the window.
-        quick_frame = ctk.CTkFrame(win, fg_color=CARD, corner_radius=8)
-        quick_frame.pack(fill="x", padx=SPACE_L, pady=(SPACE_M, 0))
-
-        seg_frame = ctk.CTkFrame(win, fg_color="transparent")
-        seg_frame.pack(fill="x", padx=SPACE_L, pady=(SPACE_S, SPACE_S))
-
-        seg_entries: "list[dict]" = []
-        _colors = [BLUE, ORANGE_DARK]
-        _names  = ["Segment A", "Segment B"]
-
-        for i, (name, col) in enumerate(zip(_names, _colors)):
-            card = ctk.CTkFrame(seg_frame, fg_color=CARD, corner_radius=8,
-                                border_width=2, border_color=col)
-            card.pack(side="left", fill="x", expand=True,
-                      padx=(0, 8 if i == 0 else 0))
-            ctk.CTkLabel(card, text=name, font=FONT_SIDEBAR_HDR,
-                         text_color=col, anchor="w").pack(padx=SPACE_L, pady=(SPACE_M, SPACE_S), fill="x")
-            row = ctk.CTkFrame(card, fg_color="transparent")
-            row.pack(fill="x", padx=SPACE_L, pady=(0, SPACE_M))
-            ctk.CTkLabel(row, text="From (s):", font=FONT_SMALL,
-                         text_color=MUTED, width=62).pack(side="left")
-            lo_e = ctk.CTkEntry(row, width=80, **input_style())
-            lo_e.insert(0, str(int(dur * i / 2)))
-            lo_e.pack(side="left", padx=(0, SPACE_M))
-            ctk.CTkLabel(row, text="To (s):", font=FONT_SMALL,
-                         text_color=MUTED, width=46).pack(side="left")
-            hi_e = ctk.CTkEntry(row, width=80, **input_style())
-            hi_e.insert(0, str(int(dur * (i + 1) / 2)))
-            hi_e.pack(side="left", padx=(0, SPACE_M))
-            lbl_e = ctk.CTkEntry(
-                row,
-                width=120,
-                placeholder_text="Label (optional)",
-                **input_style(),
-            )
-            lbl_e.insert(0, name)
-            lbl_e.pack(side="left")
-            seg_entries.append({"lo": lo_e, "hi": hi_e, "lbl": lbl_e, "color": col})
-
-        # ── Quick-fill content (frame already packed above the cards) ────
-        ctk.CTkLabel(quick_frame, text="⚡  Quick fill — before / after an event",
+        # ── Event and template ────────────────────────────────────────────
+        tcard = ctk.CTkFrame(win, fg_color=CARD, corner_radius=8)
+        tcard.pack(fill="x", padx=SPACE_L, pady=(SPACE_M, 0))
+        ctk.CTkLabel(tcard, text="⚡  Windows around an event — the same template for every animal",
                      font=FONT_SUBSECTION, text_color=TEAL, anchor="w"
                      ).pack(padx=SPACE_L, pady=(SPACE_S, 2), anchor="w")
-        qrow = ctk.CTkFrame(quick_frame, fg_color="transparent")
-        qrow.pack(fill="x", padx=SPACE_L, pady=(0, SPACE_S))
+        qrow = ctk.CTkFrame(tcard, fg_color="transparent")
+        qrow.pack(fill="x", padx=SPACE_L, pady=(0, SPACE_XS))
 
-        # ── Event picker: prefill start/end from an existing annotation or
-        # abnormal-event episode instead of requiring the user to know/type
-        # the time by hand. Only shown when there is something to pick.
         _event_opts: "dict[str, tuple[float, float]]" = {}
         for _ann in self.analysis.annotations:
             _lbl = _ann.get("label") or "Annotation"
@@ -211,113 +175,237 @@ class CompareSegmentsMixin:
             times = _event_opts.get(choice)
             if times is None:
                 return
-            t0, t1 = times
-            q_evt_start.delete(0, "end"); q_evt_start.insert(0, f"{t0:.1f}")
-            q_evt_end.delete(0, "end");   q_evt_end.insert(0, f"{t1:.1f}")
+            for e, v in ((q_evt_start, times[0]), (q_evt_end, times[1])):
+                e.delete(0, "end"); e.insert(0, f"{v:.1f}")
 
         if _event_opts:
-            ctk.CTkLabel(qrow, text="Event:", font=FONT_SMALL,
-                         text_color=MUTED).pack(side="left")
-            cb_event = ctk.CTkComboBox(
-                qrow,
-                width=190,
-                values=list(_event_opts.keys()),
-                command=_on_event_pick,
-                **combo_style(),
-            )
+            ctk.CTkLabel(qrow, text="Event:", font=FONT_SMALL, text_color=MUTED).pack(side="left")
+            cb_event = ctk.CTkComboBox(qrow, width=210, values=list(_event_opts.keys()),
+                                       command=_on_event_pick, **combo_style())
             cb_event.set("Pick…")
             cb_event.pack(side="left", padx=(4, SPACE_M))
 
-        ctk.CTkLabel(qrow, text="Event start (s):", font=FONT_SMALL,
-                     text_color=MUTED).pack(side="left")
+        ctk.CTkLabel(qrow, text="Start (s):", font=FONT_SMALL, text_color=MUTED).pack(side="left")
         q_evt_start = ctk.CTkEntry(qrow, width=70, **input_style())
         if self.ui.nav_pos > 0:
-            # Default to wherever the user is currently scrubbed to in the
-            # Detection view -- most likely near the event they want to
-            # compare around, since that's usually why they navigated there.
+            # Where the Detection view is: most likely near the event.
             q_evt_start.insert(0, str(int(self.ui.nav_pos)))
         q_evt_start.pack(side="left", padx=(4, SPACE_M))
-
-        ctk.CTkLabel(qrow, text="Event end (s):", font=FONT_SMALL,
-                     text_color=MUTED).pack(side="left")
+        ctk.CTkLabel(qrow, text="End (s):", font=FONT_SMALL, text_color=MUTED).pack(side="left")
         q_evt_end = ctk.CTkEntry(qrow, width=70, placeholder_text="= start", **input_style())
         q_evt_end.pack(side="left", padx=(4, SPACE_M))
-
-        ctk.CTkLabel(qrow, text="Window (min):", font=FONT_SMALL,
+        ctk.CTkLabel(qrow, text="Artefact margin (s):", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left")
-        q_window = ctk.CTkEntry(qrow, width=55, **input_style())
-        q_window.insert(0, "10")
-        q_window.pack(side="left", padx=(4, SPACE_M))
+        ent_margin = ctk.CTkEntry(qrow, width=48, **input_style())
+        ent_margin.insert(0, f"{DEFAULT_ARTEFACT_MARGIN_S:g}")
+        ent_margin.pack(side="left", padx=(4, SPACE_M))
+        tip(ent_margin, "Quality check only: a window overlapping the event or this "
+                        "many seconds after it is flagged (shock / movement artefact).")
 
-        lbl_quick_status = ctk.CTkLabel(quick_frame, text="", font=FONT_MICRO,
-                                        text_color=MUTED, anchor="w")
+        trow = ctk.CTkFrame(tcard, fg_color="transparent")
+        trow.pack(fill="x", padx=SPACE_L, pady=(0, SPACE_XS))
+        ctk.CTkLabel(trow, text="Template:", font=FONT_SMALL, text_color=MUTED).pack(side="left")
+        _templates: "dict[str, SegmentTemplate]" = {}
+        cb_tpl = ctk.CTkComboBox(trow, width=300, values=[""], state="readonly", **combo_style())
+        cb_tpl.pack(side="left", padx=(4, SPACE_S))
 
-        def _apply_quick_fill() -> None:
-            """Fill Segment A/B from an event time + a shared window duration.
+        def _reload_templates(select: "Optional[str]" = None) -> None:
+            _templates.clear()
+            for t in load_templates():
+                _templates[t.name + ("" if t.builtin else "  (mine)")] = t
+            names = list(_templates)
+            cb_tpl.configure(values=names)
+            pick = next((k for k, t in _templates.items() if t.name == select), None)
+            cb_tpl.set(pick or (cb_tpl.get() if cb_tpl.get() in _templates else names[0]))
 
-            Segment A ("Before") = [event_start - window, event_start]
-            Segment B ("After")  = [event_end,             event_end + window]
-            event_end defaults to event_start (a point event) when left
-            blank, so a single time + duration is enough for the common
-            case, while still supporting a stimulus/injection that spans
-            a start..end window of its own.
-            """
+        lbl_tpl_status = ctk.CTkLabel(tcard, text="", font=FONT_MICRO, text_color=MUTED,
+                                      anchor="w", justify="left")
+
+        def _event_times() -> "Optional[tuple[float, float]]":
+            """(start, end) of the event typed, None when none is."""
             if not q_evt_start.get().strip():
-                lbl_quick_status.configure(text="⚠  enter an event start time",
-                                           text_color=RED)
-                return
+                return None
+            t0 = float(q_evt_start.get())
+            t1 = float(q_evt_end.get()) if q_evt_end.get().strip() else t0
+            if t1 < t0:
+                raise ValueError("the event's end is before its start")
+            return t0, t1
+
+        def _apply_template() -> None:
+            t = _templates.get(cb_tpl.get())
             try:
-                evt_start = float(q_evt_start.get())
-                evt_end_s = q_evt_end.get().strip()
-                evt_end   = float(evt_end_s) if evt_end_s else evt_start
-                window_m  = float(q_window.get())
-                if window_m <= 0:
-                    raise ValueError("window must be positive")
-                if evt_end < evt_start:
-                    raise ValueError("event end is before event start")
+                ev = _event_times()
             except ValueError as exc:
-                lbl_quick_status.configure(text=f"⚠  invalid input — {exc}",
-                                           text_color=RED)
-                return
-            window_s = window_m * 60.0
-            before_lo, before_hi = evt_start - window_s, evt_start
-            after_lo,  after_hi  = evt_end,               evt_end + window_s
-            # Clamp to the recording's own bounds -- on a short recording an
-            # event near either edge used to produce a Before/After range
-            # outside [0, dur] with nothing but a warning label; ▶ Compare
-            # would then reject it outright as "outside recording".
-            raw = (before_lo, before_hi, after_lo, after_hi)
-            before_lo = max(0.0, min(before_lo, dur))
-            before_hi = max(0.0, min(before_hi, dur))
-            after_lo  = max(0.0, min(after_lo,  dur))
-            after_hi  = max(0.0, min(after_hi,  dur))
-            clamped = raw != (before_lo, before_hi, after_lo, after_hi)
-            for entry, val in [(seg_entries[0]["lo"], before_lo),
-                               (seg_entries[0]["hi"], before_hi),
-                               (seg_entries[1]["lo"], after_lo),
-                               (seg_entries[1]["hi"], after_hi)]:
-                entry.delete(0, "end")
-                entry.insert(0, f"{val:.1f}")
-            for entry, txt in [(seg_entries[0]["lbl"], "Before"),
-                               (seg_entries[1]["lbl"], "After")]:
-                entry.delete(0, "end")
-                entry.insert(0, txt)
-            lbl_quick_status.configure(
-                text=("⚠  clamped to recording bounds — " if clamped else "✓  ") +
-                     f"Before [{before_lo:.0f}–{before_hi:.0f}s]  ·  "
-                     f"After [{after_lo:.0f}–{after_hi:.0f}s]"
-                     + (f"  (recording is {dur:.0f}s)" if clamped else ""),
+                lbl_tpl_status.configure(text=f"⚠  {exc}", text_color=RED); return
+            if t is None or ev is None:
+                lbl_tpl_status.configure(text="⚠  pick an event (or type its start) and a template",
+                                         text_color=RED); return
+            wins = resolve(t, ev[0], ev[1], dur)
+            _set_rows([(w.label, w.lo, w.hi) for w in wins])
+            _state["template"] = t.name
+            clamped = [w.label for w in wins if w.clamped]
+            lbl_tpl_status.configure(
+                text=("⚠  cut at the recording's edge: " + ", ".join(clamped)) if clamped else
+                     "✓  " + "  ·  ".join(f"{w.label} [{w.lo:.0f}–{w.hi:.0f} s]" for w in wins),
                 text_color=ORANGE if clamped else GREEN)
 
-        ctk.CTkButton(
-            qrow,
-            text="Fill segments",
-            width=110,
-            command=_apply_quick_fill,
-            **button_style("primary"),
-        ).pack(side="left", padx=(SPACE_S, 0))
-        lbl_quick_status.pack(padx=SPACE_L, pady=(0, SPACE_S), anchor="w", fill="x")
+        def _save_template() -> None:
+            try:
+                ev = _event_times()
+                rows = _read_rows()
+            except ValueError as exc:
+                lbl_tpl_status.configure(text=f"⚠  {exc}", text_color=RED); return
+            if ev is None:
+                lbl_tpl_status.configure(
+                    text="⚠  a template is placed from an event: type or pick its start first",
+                    text_color=RED); return
+            dlg = ctk.CTkInputDialog(text="Template name (e.g. Footshock 5 min):",
+                                     title="Save the windows as a template")
+            name = (dlg.get_input() or "").strip()
+            if not name:
+                return
+            try:
+                save_template(template_from_windows(name, rows, ev[0], ev[1]))
+            except (OSError, ValueError) as exc:
+                messagebox.showerror("Template", str(exc), parent=win); return
+            _reload_templates(select=name)
+            _state["template"] = name
+            lbl_tpl_status.configure(text=f"✓  template '{name}' saved", text_color=GREEN)
 
+        def _delete_template() -> None:
+            t = _templates.get(cb_tpl.get())
+            if t is None or t.builtin:
+                lbl_tpl_status.configure(text="⚠  built-in templates cannot be deleted",
+                                         text_color=ORANGE); return
+            if not messagebox.askyesno("Template", f"Delete the template '{t.name}'?",
+                                       parent=win):
+                return
+            try:
+                delete_template(t.name)
+            except OSError as exc:
+                messagebox.showerror("Template", str(exc), parent=win); return
+            _reload_templates()
+            lbl_tpl_status.configure(text=f"✓  template '{t.name}' deleted", text_color=GREEN)
+
+        for text, cmd, style, tiptext in (
+                ("Apply", _apply_template, "primary",
+                 "Place the template's windows around the event"),
+                ("Save as template…", _save_template, "secondary",
+                 "Save the windows below, relative to the event, under a name: "
+                 "apply it to the next animals"),
+                ("Delete", _delete_template, "secondary", "Delete the selected template (yours only)")):
+            b = ctk.CTkButton(trow, text=text, width=0, command=cmd, **button_style(style))
+            b.pack(side="left", padx=(0, SPACE_S))
+            tip(b, tiptext)
+        lbl_tpl_status.pack(padx=SPACE_L, pady=(0, SPACE_S), anchor="w", fill="x")
+
+        # ── Segments: 1 to MAX_SEGMENTS rows ──────────────────────────────
+        seg_card = ctk.CTkFrame(win, fg_color=CARD, corner_radius=8)
+        seg_card.pack(fill="x", padx=SPACE_L, pady=(SPACE_S, SPACE_S))
+        rows_frame = ctk.CTkFrame(seg_card, fg_color="transparent")
+        rows_frame.pack(fill="x", padx=SPACE_L, pady=(SPACE_S, 0))
+        seg_rows: "list[dict]" = []
+        _state: "dict[str, Any]" = {"template": "", "segs": None, "cmps": None, "flags": None}
+
+        def _color(i: int) -> str:
+            # Segment colours in order, the first the reference; read at call
+            # time so a theme change re-synced into this module applies.
+            seq = (BLUE, ORANGE_DARK, GREEN, PURPLE, TEAL, RED)
+            return seq[i % len(seq)]
+
+        def _read_rows() -> "list[tuple[str, float, float]]":
+            out = []
+            for i, r in enumerate(seg_rows):
+                try:
+                    lo, hi = float(r["lo"].get()), float(r["hi"].get())
+                except ValueError:
+                    raise ValueError(f"segment {i + 1}: invalid time") from None
+                out.append((r["lbl"].get().strip() or f"Segment {chr(65 + i)}", lo, hi))
+            return out
+
+        def _set_rows(values: "list[tuple[str, float, float]]") -> None:
+            for r in seg_rows:
+                r["frame"].destroy()
+            seg_rows.clear()
+            for label, lo, hi in values[:MAX_SEGMENTS]:
+                _add_row(label, lo, hi)
+            _refresh_add_btn()
+
+        def _remove_row(r: dict) -> None:
+            if len(seg_rows) <= 1:
+                return
+            vals = [(x["lbl"].get(), x["lo"].get(), x["hi"].get()) for x in seg_rows if x is not r]
+            _set_rows([(lbl, float(lo or 0), float(hi or 0)) for lbl, lo, hi in vals])
+
+        def _add_row(label: str, lo: float, hi: float) -> None:
+            i = len(seg_rows)
+            col = _color(i)
+            f = ctk.CTkFrame(rows_frame, fg_color="transparent")
+            f.pack(fill="x", pady=2)
+            ctk.CTkLabel(f, text="■", text_color=col, font=FONT_LABEL, width=16).pack(side="left")
+            lbl_e = ctk.CTkEntry(f, width=130, placeholder_text="Label", **input_style())
+            lbl_e.insert(0, label)
+            lbl_e.pack(side="left", padx=(SPACE_XS, SPACE_M))
+            ctk.CTkLabel(f, text="From (s):", font=FONT_SMALL, text_color=MUTED).pack(side="left")
+            lo_e = ctk.CTkEntry(f, width=80, **input_style())
+            lo_e.insert(0, f"{lo:g}")
+            lo_e.pack(side="left", padx=(4, SPACE_M))
+            ctk.CTkLabel(f, text="To (s):", font=FONT_SMALL, text_color=MUTED).pack(side="left")
+            hi_e = ctk.CTkEntry(f, width=80, **input_style())
+            hi_e.insert(0, f"{hi:g}")
+            hi_e.pack(side="left", padx=(4, SPACE_S))
+            len_l = ctk.CTkLabel(f, text="", font=FONT_SMALL, text_color=MUTED, width=70, anchor="w")
+            len_l.pack(side="left")
+            r: dict = {"frame": f, "lbl": lbl_e, "lo": lo_e, "hi": hi_e, "len": len_l}
+            x_btn = ctk.CTkButton(f, text="✕", width=28, command=lambda: _remove_row(r),
+                                  **button_style("secondary"))
+            x_btn.pack(side="left", padx=(0, SPACE_M))
+            qc_l = ctk.CTkLabel(f, text="", font=FONT_SMALL, text_color=MUTED, anchor="w",
+                                justify="left")
+            qc_l.pack(side="left", fill="x", expand=True)
+            r["qc"] = qc_l
+
+            def _upd_len(_e=None) -> None:
+                try:
+                    d = float(hi_e.get()) - float(lo_e.get())
+                    len_l.configure(text=f"= {d:g} s" if d > 0 else "⚠ end ≤ start",
+                                    text_color=MUTED if d > 0 else RED)
+                except ValueError:
+                    len_l.configure(text="")
+            for e in (lo_e, hi_e):
+                e.bind("<KeyRelease>", _upd_len)
+            _upd_len()
+            seg_rows.append(r)
+
+        add_bar = ctk.CTkFrame(seg_card, fg_color="transparent")
+        add_bar.pack(fill="x", padx=SPACE_L, pady=(SPACE_XS, SPACE_S))
+
+        def _add_segment() -> None:
+            if len(seg_rows) >= MAX_SEGMENTS:
+                return
+            try:
+                last_hi = float(seg_rows[-1]["hi"].get()) if seg_rows else 0.0
+                last_d = float(seg_rows[-1]["hi"].get()) - float(seg_rows[-1]["lo"].get())
+            except ValueError:
+                last_hi, last_d = 0.0, 300.0
+            lo = min(max(last_hi, 0.0), dur)
+            _add_row(f"Segment {chr(65 + len(seg_rows))}", lo, min(lo + max(last_d, 1.0), dur))
+            _refresh_add_btn()
+
+        add_btn = ctk.CTkButton(add_bar, text="＋  Add segment", width=0, command=_add_segment,
+                                **button_style("secondary"))
+        add_btn.pack(side="left")
+        ctk.CTkLabel(add_bar, text=(f"Up to {MAX_SEGMENTS}; Δ % and the block comparison are "
+                                    "against the first segment (the reference)."),
+                     font=FONT_MICRO, text_color=MUTED).pack(side="left", padx=(SPACE_M, 0))
+
+        def _refresh_add_btn() -> None:
+            add_btn.configure(state="normal" if len(seg_rows) < MAX_SEGMENTS else "disabled")
+
+        _set_rows([("Segment A", 0.0, float(int(dur / 2))),
+                   ("Segment B", float(int(dur / 2)), float(int(dur)))])
+
+        # ── Run / export bar ──────────────────────────────────────────────
         ctrl = ctk.CTkFrame(win, fg_color="transparent")
         ctrl.pack(fill="x", padx=SPACE_L, pady=(0, SPACE_S))
         lbl_status = ctk.CTkLabel(ctrl, text="", font=FONT_SMALL, text_color=MUTED)
@@ -326,55 +414,46 @@ class CompareSegmentsMixin:
                                           progress_color=TEAL)
         progress_bar.pack(side="right", padx=(SPACE_M, 0))
         progress_bar.pack_forget()
-
         run_btn = ctk.CTkButton(ctrl, text="▶  Compare", **button_style("primary"))
         run_btn.pack(side="left")
         # Length of the non-overlapping blocks each segment is summarised by
-        # (compare_segment_blocks) -- the beat-level RR test this replaced
-        # pseudo-replicated hundreds of autocorrelated beats.
+        # (compare_segment_blocks): no beat-level test, see analysis.
         ctk.CTkLabel(ctrl, text="Block (s):", font=FONT_SMALL,
                      text_color=MUTED).pack(side="left", padx=(SPACE_L, 4))
         ent_block = ctk.CTkEntry(ctrl, width=55, **input_style())
         ent_block.insert(0, f"{MouseECG.SEGMENT_BLOCK_S:g}")
         ent_block.pack(side="left")
 
+        # ── Results: table | plot ─────────────────────────────────────────
         results_frame = ctk.CTkFrame(win, fg_color="transparent")
         results_frame.pack(fill="both", expand=True, padx=SPACE_L, pady=(0, SPACE_M))
-
         table_card = ctk.CTkFrame(results_frame, fg_color=PANEL, corner_radius=8)
         table_card.pack(side="left", fill="both", expand=True, padx=(0, SPACE_M))
         ctk.CTkLabel(table_card, text="Metric comparison",
                      font=FONT_SUBSECTION, text_color=MUTED,
                      anchor="w").pack(padx=SPACE_M, pady=(SPACE_M, SPACE_S), fill="x")
         lbl_mw = ctk.CTkLabel(table_card, text="", font=FONT_MICRO,
-                              text_color=MUTED, anchor="w", justify="left",
-                              wraplength=480)
+                              text_color=MUTED, anchor="w", justify="left", wraplength=520)
         lbl_mw.pack(padx=SPACE_M, pady=(0, SPACE_XS), fill="x")
         tbl = ctk.CTkScrollableFrame(table_card, fg_color=BG, height=380,
                                      scrollbar_button_color=BORDER)
         tbl.pack(fill="both", expand=True, padx=SPACE_S, pady=(0, SPACE_M))
-        for ci in range(4):
-            tbl.grid_columnconfigure(ci, weight=1)
-        # Placeholder row, cleared by _populate_table's winfo_children() sweep
-        # the first time ▶ Compare actually runs.
-        ctk.CTkLabel(tbl, text="Set segment ranges above, then click ▶ Compare",
+        ctk.CTkLabel(tbl, text="Set the segments above, then click ▶ Compare",
                      font=FONT_SMALL, text_color=MUTED, anchor="w").grid(
-            row=0, column=0, columnspan=4, sticky="ew", padx=SPACE_S, pady=SPACE_M)
+            row=0, column=0, sticky="ew", padx=SPACE_S, pady=SPACE_M)
 
         plot_card = ctk.CTkFrame(results_frame, fg_color=PANEL, corner_radius=8)
         plot_card.pack(side="right", fill="both", expand=True)
-        # Two views of the same two segments: the RR tachograms superimposed,
-        # or their Poincaré plots side by side on the same axes.
         view_bar = ctk.CTkFrame(plot_card, fg_color="transparent")
         view_bar.pack(padx=SPACE_M, pady=(SPACE_M, SPACE_XS), fill="x")
-        _view = {"mode": "rr", "sa": None, "sb": None}
+        _view = {"mode": "rr"}
         _view_btns: "dict[str, ctk.CTkButton]" = {}
 
         def _set_view(mode: str) -> None:
             _view["mode"] = mode
             for m, b in _view_btns.items():
                 b.configure(**toggle_style(m == mode))
-            if _view["sa"] is not None:
+            if _state["segs"] is not None:
                 _redraw_plot()
 
         for mode, text in (("rr", "RR tachograms"), ("poincare", "Poincaré")):
@@ -382,9 +461,8 @@ class CompareSegmentsMixin:
                               **{**button_style("secondary"), **toggle_style(mode == "rr")})
             b.pack(side="left", padx=(0, SPACE_S))
             _view_btns[mode] = b
-        from ecg.ui.plots import CanvasSlot as _CS
-        plot_slot = _CS(plot_card, 8, 4, toolbar=False, yscale_bar=True,
-                         placeholder="Click ▶ Compare to overlay tachograms")
+        plot_slot = CanvasSlot(plot_card, 8, 4, toolbar=False, yscale_bar=True,
+                               placeholder="Click ▶ Compare to overlay tachograms")
 
         _METRICS: "list[tuple[str, str, str]]" = list(self._SEGMENT_TABLE_METRICS)
 
@@ -399,73 +477,75 @@ class CompareSegmentsMixin:
             except Exception:
                 return str(v) if v else "—"
 
-        def _populate_table(sa: dict, sb: dict) -> None:
+        def _delta(va: float, vb: float) -> float:
+            return (100.0 * (vb - va) / abs(va)
+                    if np.isfinite(va) and np.isfinite(vb) and abs(va) > 1e-9 else float("nan"))
+
+        def _populate_table(segs: "list[dict]") -> None:
             for w in tbl.winfo_children():
                 w.destroy()
-            for ci, (txt, col) in enumerate([
-                ("Metric", TEXT), (sa["label"], _colors[0]),
-                (sb["label"], _colors[1]), ("Δ%", MUTED),
-            ]):
-                ctk.CTkLabel(tbl, text=txt, font=FONT_BADGE,
-                             text_color=col, anchor="w").grid(
-                    row=0, column=ci, sticky="ew", padx=SPACE_S, pady=(SPACE_XS, SPACE_S))
+            ncol = 1 + len(segs)
+            for ci in range(ncol):
+                tbl.grid_columnconfigure(ci, weight=1)
+            ctk.CTkLabel(tbl, text="Metric", font=FONT_BADGE, text_color=TEXT, anchor="w").grid(
+                row=0, column=0, sticky="ew", padx=SPACE_S, pady=(SPACE_XS, SPACE_S))
+            for k, s in enumerate(segs):
+                ctk.CTkLabel(tbl, text=s["label"], font=FONT_BADGE, text_color=_color(k),
+                             anchor="e").grid(row=0, column=1 + k, sticky="ew", padx=SPACE_S,
+                                              pady=(SPACE_XS, SPACE_S))
+            ref = segs[0]
             for ri, (key, name, unit) in enumerate(_METRICS, start=1):
-                va = float(sa.get(key, float("nan")))
-                vb = float(sb.get(key, float("nan")))
                 bg = CARD if ri % 2 == 0 else BG
-                lbl_txt = f"{name}  {unit}" if unit else name
-                ctk.CTkLabel(tbl, text=lbl_txt, font=FONT_KPI_LABEL,
-                             text_color=MUTED, fg_color=bg,
-                             anchor="w").grid(row=ri, column=0, sticky="ew", padx=SPACE_S, pady=SPACE_XS)
-                ctk.CTkLabel(tbl, text=_fmt(va), font=FONT_KPI_LABEL,
-                             text_color=TEXT, fg_color=bg,
-                             anchor="e").grid(row=ri, column=1, sticky="ew", padx=SPACE_S, pady=SPACE_XS)
-                ctk.CTkLabel(tbl, text=_fmt(vb), font=FONT_KPI_LABEL,
-                             text_color=TEXT, fg_color=bg,
-                             anchor="e").grid(row=ri, column=2, sticky="ew", padx=SPACE_S, pady=SPACE_XS)
-                if np.isfinite(va) and np.isfinite(vb) and abs(va) > 1e-9:
-                    delta = 100.0 * (vb - va) / abs(va)
-                    ctk.CTkLabel(tbl, text=f"{'▲' if delta>0 else '▼'} {abs(delta):.1f}%",
-                                 font=FONT_MICRO, text_color=MUTED, fg_color=bg,
-                                 anchor="e").grid(row=ri, column=3, sticky="ew", padx=SPACE_S, pady=SPACE_XS)
+                ctk.CTkLabel(tbl, text=f"{name}  {unit}" if unit else name, font=FONT_KPI_LABEL,
+                             text_color=MUTED, fg_color=bg, anchor="w").grid(
+                    row=ri, column=0, sticky="ew", padx=SPACE_S, pady=SPACE_XS)
+                va = float(ref.get(key, float("nan")))
+                for k, s in enumerate(segs):
+                    v = float(s.get(key, float("nan")))
+                    txt = _fmt(v)
+                    d = _delta(va, v) if k else float("nan")
+                    if np.isfinite(d):
+                        txt += f"  {'▲' if d > 0 else '▼'}{abs(d):.1f}%"
+                    ctk.CTkLabel(tbl, text=txt, font=FONT_KPI_LABEL, text_color=TEXT,
+                                 fg_color=bg, anchor="e").grid(
+                        row=ri, column=1 + k, sticky="ew", padx=SPACE_S, pady=SPACE_XS)
 
-        def _populate_plot(sa: dict, sb: dict) -> None:
-            _view["sa"], _view["sb"] = sa, sb
-            _redraw_plot()
-
-        def _redraw_plot() -> None:
-            sa, sb = _view["sa"], _view["sb"]
-            if _view["mode"] == "poincare":
-                plot_slot.update(lambda fig: draw_poincare_pair(fig, sa, sb, _colors))
-                return
-            _t_a, _r_a, _la, _ca = sa["t_rr"], sa["rr_ms"], sa["label"], _colors[0]
-            _t_b, _r_b, _lb, _cb = sb["t_rr"], sb["rr_ms"], sb["label"], _colors[1]
+        def _rr_drawer(segs: "list[dict]", colors: "list[str]"):
+            """The superimposed RR tachograms of *segs*, as a draw function."""
             def _draw(fig):
                 ax = fig.add_subplot(111)
                 style_axes(ax)
-                if len(_t_a) and len(_r_a):
-                    ax.plot(_t_a - _t_a[0], _r_a, color=_ca, lw=1.0, alpha=0.85, label=_la)
-                    ax.axhline(float(np.mean(_r_a)), color=_ca, lw=1.0, ls="--", alpha=0.5)
-                if len(_t_b) and len(_r_b):
-                    ax.plot(_t_b - _t_b[0], _r_b, color=_cb, lw=1.0, alpha=0.85, label=_lb)
-                    ax.axhline(float(np.mean(_r_b)), color=_cb, lw=1.0, ls="--", alpha=0.5)
+                for s, c in zip(segs, colors):
+                    t, r = s["t_rr"], s["rr_ms"]
+                    if len(t) and len(r):
+                        ax.plot(t - t[0], r, color=c, lw=1.0, alpha=0.85, label=s["label"])
+                        ax.axhline(float(np.mean(r)), color=c, lw=1.0, ls="--", alpha=0.5)
                 ax.set_xlabel("Time within segment (s)", fontsize=9)
                 ax.set_ylabel("RR (ms)", fontsize=9)
                 ax.set_title("RR intervals — segments superimposed", loc="left", fontsize=9)
                 ax.legend(framealpha=0, fontsize=8)
-            plot_slot.update(_draw)
+            return _draw
 
-        _last_cmp: "dict[str, Any]" = {"cmp": None}
+        def _redraw_plot() -> None:
+            segs = _state["segs"]
+            colors = [_color(k) for k in range(len(segs))]
+            if _view["mode"] == "poincare":
+                plot_slot.update(lambda fig: draw_poincare_set(fig, segs, colors))
+            else:
+                plot_slot.update(_rr_drawer(segs, colors))
+
+        def _show_flags(flags: "list[list[str]]") -> None:
+            for r, fl in zip(seg_rows, flags):
+                r["qc"].configure(text=("⚠  " + "  ·  ".join(fl)) if fl else "✓  quality ok",
+                                  text_color=ORANGE if fl else GREEN)
 
         def _run_compare() -> None:
             try:
-                lo_a = float(seg_entries[0]["lo"].get()); hi_a = float(seg_entries[0]["hi"].get())
-                la   = seg_entries[0]["lbl"].get().strip() or "Segment A"
-                lo_b = float(seg_entries[1]["lo"].get()); hi_b = float(seg_entries[1]["hi"].get())
-                lb   = seg_entries[1]["lbl"].get().strip() or "Segment B"
-            except ValueError:
-                lbl_status.configure(text="⚠  Invalid time values", text_color=RED)
-                return
+                windows = _read_rows()
+                ev = _event_times()
+                margin = float(ent_margin.get() or 0)
+            except ValueError as exc:
+                lbl_status.configure(text=f"⚠  {exc}", text_color=RED); return
             try:
                 block_s = float(ent_block.get())
                 if not (np.isfinite(block_s) and block_s > 0):
@@ -474,13 +554,13 @@ class CompareSegmentsMixin:
                 lbl_status.configure(text="⚠  Block length must be a positive number of seconds",
                                      text_color=RED)
                 return
-            for lo, hi, lbl_s in [(lo_a, hi_a, "A"), (lo_b, hi_b, "B")]:
+            for i, (_lbl, lo, hi) in enumerate(windows):
                 if lo >= hi:
-                    lbl_status.configure(text=f"⚠  Segment {lbl_s}: start ≥ end", text_color=RED)
+                    lbl_status.configure(text=f"⚠  Segment {i + 1}: start ≥ end", text_color=RED)
                     return
                 if lo < 0 or hi > dur:
                     lbl_status.configure(
-                        text=f"⚠  Segment {lbl_s}: outside recording ({dur:.1f} s)",
+                        text=f"⚠  Segment {i + 1}: outside recording ({dur:.1f} s)",
                         text_color=RED)
                     return
             run_btn.configure(state="disabled")
@@ -493,340 +573,201 @@ class CompareSegmentsMixin:
             seg_breaks   = self.analysis_ctrl.hrv_breaks(rp)
 
             import threading as _th
+
             def _worker():
-                # Own try/except -- anything raising outside
-                # compute_segment_stats()' own handling used to leave the
-                # dialog stuck on "Computing…" with Compare still disabled.
                 try:
                     from ecg.core.analysis import compare_segments, compute_segment_stats
                     seg_kw = dict(lf_band=lf, hf_band=hf, vlf_band=vlf,
                                   rr_min_ms=rr_lo, rr_max_ms=rr_hi,
                                   breaks=seg_breaks, block_s=block_s)
-                    sa = compute_segment_stats(sig, rp, fs, lo_a, hi_a, la, **seg_kw)
-                    sb = compute_segment_stats(sig, rp, fs, lo_b, hi_b, lb, **seg_kw)
-                    # Descriptive block-mean comparison (no beat-level test:
-                    # beats of one recording are not independent replicates).
-                    cmp = compare_segments(sa, sb)
+                    segs = [compute_segment_stats(sig, rp, fs, lo, hi, lbl, **seg_kw)
+                            for lbl, lo, hi in windows]
+                    # Descriptive block-mean comparison of each segment with the
+                    # first (no beat-level test: beats are not replicates).
+                    cmps = [compare_segments(segs[0], s) for s in segs[1:]]
+                    flags = quality_flags(segs, ev, margin)
                 except Exception as exc:
                     log.exception("Segment comparison worker failed")
                     win.after(0, lambda e=exc: _on_worker_error(e))
                     return
-                win.after(0, lambda: _on_done(sa, sb, cmp))
+                win.after(0, lambda: _on_done(segs, cmps, flags))
 
             def _on_worker_error(exc: Exception) -> None:
                 run_btn.configure(state="normal")
                 progress_bar.stop(); progress_bar.pack_forget()
                 lbl_status.configure(text=f"⚠  Comparison failed — {exc}", text_color=RED)
 
-            def _on_done(sa: dict, sb: dict, cmp: dict) -> None:
+            def _on_done(segs: "list[dict]", cmps: "list[dict]", flags) -> None:
                 run_btn.configure(state="normal")
                 progress_bar.stop(); progress_bar.pack_forget()
-                # Persist for Prism export
-                self._last_seg_a = sa
-                self._last_seg_b = sb
-                _last_cmp["cmp"] = cmp
-                errs = [s["error"] for s in (sa, sb) if s.get("error")]
+                _state.update(segs=segs, cmps=cmps, flags=flags)
+                self._last_seg_a = segs[0]
+                self._last_seg_b = segs[1] if len(segs) > 1 else None
+                errs = [s["error"] for s in segs if s.get("error")]
+                n_flag = sum(1 for f in flags if f)
                 if errs:
                     lbl_status.configure(text=f"⚠  {errs[0]}", text_color=RED)
                 else:
-                    # LF/HF withheld where excluded RR intervals are too long
-                    # to interpolate across (compute_segment_stats).
-                    withheld = [s["label"] for s in (sa, sb) if s.get("freq_withheld_reason")]
+                    withheld = [s["label"] for s in segs if s.get("freq_withheld_reason")]
                     lbl_status.configure(
-                        text=f"✓  {sa['label']}: {sa['n_beats']} beats  ·  "
-                             f"{sb['label']}: {sb['n_beats']} beats"
-                             + (f"  ·  LF/HF withheld for {', '.join(withheld)} "
-                                f"(long RR gaps)" if withheld else ""),
-                        text_color=ORANGE if withheld else GREEN)
-                    self._set_btn_enabled(export_btn, True, "primary")   # unlock Export button
+                        text="✓  " + "  ·  ".join(f"{s['label']}: {s['n_beats']} beats" for s in segs)
+                             + (f"  ·  LF/HF withheld for {', '.join(withheld)}" if withheld else "")
+                             + (f"  ·  ⚠ {n_flag} segment(s) to check" if n_flag else ""),
+                        text_color=ORANGE if (withheld or n_flag) else GREEN)
+                    self._set_btn_enabled(export_btn, True, "primary")
                 from ecg.core.analysis import segment_comparison_text
-                lbl_mw.configure(text=segment_comparison_text(cmp, sa["label"], sb["label"]))
-                _populate_table(sa, sb)
-                _populate_plot(sa, sb)
+                lines = [segment_comparison_text(c, segs[0]["label"], s["label"]).split("\n")
+                         for c, s in zip(cmps, segs[1:])]
+                lbl_mw.configure(text="\n".join(ln[0] for ln in lines)
+                                 + (f"\n{lines[0][1]}" if lines and len(lines[0]) > 1 else ""))
+                _show_flags(flags)
+                _populate_table(segs)
+                _redraw_plot()
 
             _th.Thread(target=_worker, daemon=True).start()
 
-        # ── Export function ───────────────────────────────────────────────
-        _METRICS_EXPORT: "list[tuple[str, str, str]]" = list(self._SEGMENT_TABLE_METRICS)
-
+        # ── Export ────────────────────────────────────────────────────────
         def _export_comparison() -> None:
-            sa = self._last_seg_a
-            sb = self._last_seg_b
-            if sa is None or sb is None:
-                messagebox.showwarning("No results",
-                                       "Run the comparison first.", parent=win)
+            segs = _state["segs"]
+            if not segs:
+                messagebox.showwarning("No results", "Run the comparison first.", parent=win)
                 return
-
-            sub  = self.ent_subject.get().strip() if self.ent_subject else "subject"
-            ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-            default_name = f"{sub}_comparison_{ts}"
-
+            sub_ = self.ent_subject.get().strip() if self.ent_subject else "subject"
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             path = filedialog.asksaveasfilename(
-                parent=win,
-                title="Export segment comparison",
-                defaultextension=".xlsx",
-                initialfile=f"{default_name}.xlsx",
-                filetypes=[
-                    ("Excel workbook", "*.xlsx"),
-                    ("CSV",            "*.csv"),
-                    ("All files",      "*.*"),
-                ],
-            )
+                parent=win, title="Export segment comparison", defaultextension=".xlsx",
+                initialfile=f"{sub_}_comparison_{ts}.xlsx",
+                filetypes=[("Excel workbook", "*.xlsx"), ("CSV", "*.csv"), ("All files", "*.*")])
             if not path:
                 return
+            try:
+                _write_export(path, segs, sub_)
+            except Exception as exc:
+                log.exception("comparison export")
+                messagebox.showerror("Export", str(exc), parent=win)
 
-            la = sa["label"]
-            lb = sb["label"]
-
-            # ── Build metric comparison DataFrame ─────────────────────────
+        def _write_export(path: str, segs: "list[dict]", sub_: str) -> None:
+            tags = unique_tags([s["label"] for s in segs])
+            flags = _state["flags"] or [[] for _ in segs]
+            cmps = _state["cmps"] or []
             rows = []
-            for key, name, unit in _METRICS_EXPORT:
-                va = sa.get(key, float("nan"))
-                vb = sb.get(key, float("nan"))
-                try:
-                    va = float(va) if va is not None else float("nan")
-                    vb = float(vb) if vb is not None else float("nan")
-                except (TypeError, ValueError):
-                    va = vb = float("nan")
-                delta = (100.0 * (vb - va) / abs(va)
-                         if np.isfinite(va) and np.isfinite(vb) and abs(va) > 1e-9
-                         else float("nan"))
-                rows.append({
-                    "Metric":      f"{name}  ({unit})" if unit else name,
-                    la:            va,
-                    lb:            vb,
-                    "Δ% (A→B)":    delta,
-                })
-            cmp = _last_cmp.get("cmp")
-            if cmp is not None:
-                # The descriptive-only caveat travels with the numbers.
-                from ecg.core.analysis import segment_comparison_text
-                rows.append({"Metric": "Note: " + segment_comparison_text(
-                                 cmp, la, lb).replace("\n", "  "),
-                             la: None, lb: None, "Δ% (A→B)": None})
+            for key, name, unit in _METRICS:
+                row: "dict[str, Any]" = {"Metric": f"{name}  ({unit})" if unit else name}
+                vals = [float(s.get(key, float("nan")) if s.get(key) is not None else float("nan"))
+                        for s in segs]
+                for tag, v in zip(tags, vals):
+                    row[tag] = v
+                for tag, v in zip(tags[1:], vals[1:]):
+                    row[f"Δ% {tags[0]}→{tag}"] = _delta(vals[0], v)
+                rows.append(row)
             metrics_df = pd.DataFrame(rows)
-
-            # ── RR series per segment ─────────────────────────────────────
-            rr_a = pd.DataFrame({
-                "Time (s)": np.asarray(sa["t_rr"], dtype=float),
-                "RR (ms)":  np.asarray(sa["rr_ms"], dtype=float),
-            })
-            rr_b = pd.DataFrame({
-                "Time (s)": np.asarray(sb["t_rr"], dtype=float),
-                "RR (ms)":  np.asarray(sb["rr_ms"], dtype=float),
-            })
-
-            # ── Write ─────────────────────────────────────────────────────
             if path.lower().endswith(".csv"):
                 metrics_df.to_csv(path, index=False, float_format="%.4f")
-                lbl_status.configure(
-                    text=f"✓  CSV saved → {os.path.basename(path)}",
-                    text_color=GREEN)
-            else:
+                lbl_status.configure(text=f"✓  CSV saved → {os.path.basename(path)}",
+                                     text_color=GREEN)
+                return
+            from ecg.core.analysis import segment_comparison_text
+            qc_df = pd.DataFrame([{
+                "Segment": tag, "Start (s)": s["t_lo"], "End (s)": s["t_hi"],
+                "Duration (s)": s["duration_s"], "Beats": s["n_beats"],
+                "Valid RR (% of window)": round(segment_quality(s)["valid_pct"], 1),
+                "Excluded RR (%)": round(segment_quality(s)["excluded_pct"], 1),
+                "Poincaré pairs": segment_quality(s)["n_pairs"],
+                "Abrupt RR jumps": segment_quality(s)["n_jumps"],
+                "SD1 (ms)": s.get("sd1"),
+                "SD1 trimmed 2 % (ms)": round(segment_quality(s)["sd1_robust"], 3),
+                "QC": "; ".join(f) if f else "ok"} for tag, s, f in zip(tags, segs, flags)])
+            blocks = []
+            for tag, s in zip(tags, segs):
+                blk = s.get("blocks") or {}
+                for t0, n_rr, rr_m, hr_m in zip(blk.get("t_start", []), blk.get("n_rr", []),
+                                                blk.get("rr_mean", []), blk.get("hr_mean", [])):
+                    blocks.append({"Segment": tag, "Block start (s)": round(float(t0), 2),
+                                   "N RR": int(n_rr), "Mean RR (ms)": round(float(rr_m), 3),
+                                   "HR (bpm, 60000/mean NN)": round(float(hr_m), 2)})
+            summary = [("Subject", sub_), ("File", os.path.basename(self.signal.filepath or "")),
+                       ("Template", _state["template"] or "—"),
+                       ("Export date", datetime.now().strftime("%Y-%m-%d %H:%M")),
+                       ("LF band (Hz)", f"{lf[0]:.2f}–{lf[1]:.2f}"),
+                       ("HF band (Hz)", f"{hf[0]:.2f}–{hf[1]:.2f}")]
+            for tag, c in zip(tags[1:], cmps):
+                summary.append((f"{tags[0]} vs {tag}",
+                                segment_comparison_text(c, tags[0], tag).split("\n")[0]))
+            if cmps:
+                summary.append(("Note", cmps[0]["note"]))
+            with pd.ExcelWriter(path, engine="openpyxl") as xw:
+                metrics_df.to_excel(xw, sheet_name="Comparison", index=False)
+                qc_df.to_excel(xw, sheet_name="Quality", index=False)
+                for tag, s in zip(tags, segs):
+                    pd.DataFrame({"Time (s)": np.asarray(s["t_rr"], dtype=float),
+                                  "RR (ms)": np.asarray(s["rr_ms"], dtype=float)}).to_excel(
+                        xw, sheet_name=f"RR — {tag}"[:31], index=False)
+                pd.DataFrame(blocks).to_excel(xw, sheet_name="Blocks", index=False)
+                pd.DataFrame(summary, columns=["Item", "Value"]).to_excel(
+                    xw, sheet_name="Summary", index=False)
+                for ws in xw.book.worksheets:
+                    ws.freeze_panes = "A2"
+                    for col in ws.columns:
+                        width = max((len(str(c.value)) for c in col if c.value is not None),
+                                    default=8)
+                        ws.column_dimensions[col[0].column_letter].width = min(width + 3, 60)
+            done = [os.path.basename(path)]
+            colors = [_color(k) for k in range(len(segs))]
+            base = os.path.splitext(path)[0]
+            for suffix, figsize, draw in (
+                    ("_plot.png", (10, 4), _rr_drawer(segs, colors)),
+                    ("_poincare.png", (min(4 * len(segs), 16), 4.6 * (1 + (len(segs) > 4))),
+                     lambda fig: draw_poincare_set(fig, segs, colors, title=sub_))):
                 try:
-                    import openpyxl
-                    from openpyxl.styles import Font
-                    from openpyxl.utils import get_column_letter
-                except ImportError:
-                    messagebox.showerror("Missing dependency",
-                                         "openpyxl required: pip install openpyxl",
-                                         parent=win)
-                    return
-
-                wb = openpyxl.Workbook()
-
-                # ── Sheet 1: Metric comparison ────────────────────────────
-                ws = wb.active
-                assert ws is not None
-                ws.title = "Comparison"
-
-                headers = list(metrics_df.columns)
-                for ci, h in enumerate(headers, start=1):
-                    cell = ws.cell(row=1, column=ci, value=h)
-                    cell.font = Font(bold=True)
-
-                for ri, row_d in enumerate(metrics_df.itertuples(index=False), start=2):
-                    for ci, val in enumerate(row_d, start=1):
-                        ws.cell(row=ri, column=ci, value=val)
-
-                ws.freeze_panes = "A2"
-                ws.auto_filter.ref = ws.dimensions
-                for col in ws.columns:
-                    if not col:
-                        continue
-                    first_cell = col[0]
-                    if first_cell.column is None:
-                        continue
-                    max_len = max(
-                        (len(str(c.value)) for c in col if c.value), default=8)
-                    ws.column_dimensions[
-                        get_column_letter(first_cell.column)].width = min(
-                        max_len + 3, 30)
-
-                # ── Sheet 2: RR series ────────────────────────────────────
-                def _rr_sheet(name: str, rr_df: pd.DataFrame) -> None:
-                    ws2 = wb.create_sheet(name)
-                    for ci, col in enumerate(rr_df.columns, start=1):
-                        c = ws2.cell(row=1, column=ci, value=col)
-                        c.font = Font(bold=True)
-                    for ri, row_vals in enumerate(rr_df.itertuples(index=False),
-                                                   start=2):
-                        for ci, v in enumerate(row_vals, start=1):
-                            ws2.cell(row=ri, column=ci, value=round(float(v), 4))
-                    ws2.freeze_panes = "A2"
-                    ws2.auto_filter.ref = ws2.dimensions
-                    ws2.column_dimensions["A"].width = 14
-                    ws2.column_dimensions["B"].width = 12
-
-                _rr_sheet(f"RR — {la}", rr_a)
-                _rr_sheet(f"RR — {lb}", rr_b)
-
-                # ── Sheet: per-block means (the comparison's data) ────────
-                ws_b = wb.create_sheet("Blocks")
-                for ci, h in enumerate(["Segment", "Block start (s)", "N RR",
-                                        "Mean RR (ms)", "HR (bpm, 60000/mean NN)"],
-                                       start=1):
-                    ws_b.cell(row=1, column=ci, value=h).font = Font(bold=True)
-                rb = 2
-                for seg in (sa, sb):
-                    blk = seg.get("blocks") or {}
-                    for t0, n_rr, rr_m, hr_m in zip(blk.get("t_start", []), blk.get("n_rr", []),
-                                                    blk.get("rr_mean", []), blk.get("hr_mean", [])):
-                        for ci, v in enumerate([seg["label"], round(float(t0), 2), int(n_rr),
-                                                round(float(rr_m), 3), round(float(hr_m), 2)],
-                                               start=1):
-                            ws_b.cell(row=rb, column=ci, value=v)
-                        rb += 1
-                ws_b.freeze_panes = "A2"
-                for col_l, w in zip("ABCDE", (16, 16, 8, 14, 24)):
-                    ws_b.column_dimensions[col_l].width = w
-
-                # ── Sheet 3: Summary stats ────────────────────────────────
-                ws3 = wb.create_sheet("Summary")
-                ws3.cell(row=1, column=1, value="Subject").font = Font(bold=True)
-                ws3.cell(row=1, column=2, value=sub)
-                ws3.cell(row=2, column=1, value="Export date").font = Font(bold=True)
-                ws3.cell(row=2, column=2,
-                         value=datetime.now().strftime("%Y-%m-%d %H:%M"))
-                ws3.cell(row=3, column=1, value="LF band (Hz)").font = Font(bold=True)
-                ws3.cell(row=3, column=2, value=f"{lf[0]:.2f}–{lf[1]:.2f}")
-                ws3.cell(row=4, column=1, value="HF band (Hz)").font = Font(bold=True)
-                ws3.cell(row=4, column=2, value=f"{hf[0]:.2f}–{hf[1]:.2f}")
-                if cmp is not None:
-                    hr_c = cmp["metrics"]["hr_mean"]
-                    p_d  = hr_c.get("p_descriptive")
-                    for ri, (k, v) in enumerate([
-                        ("Block length (s)", cmp["block_s"]),
-                        (f"Blocks used — {la}", cmp["n_blocks_a"]),
-                        (f"Blocks used — {lb}", cmp["n_blocks_b"]),
-                        ("Blocks dropped (< 50 % valid RR)",
-                         f"{cmp['n_dropped_a']} / {cmp['n_dropped_b']}"),
-                        ("HR block means Δ (B − A, bpm)", hr_c["diff"]),
-                        ("Descriptive Mann-Whitney p (block means)",
-                         p_d if p_d is not None else "n/a (< 3 blocks)"),
-                        ("Note", cmp["note"]),
-                    ], start=5):
-                        ws3.cell(row=ri, column=1, value=k).font = Font(bold=True)
-                        ws3.cell(row=ri, column=2, value=v)
-                for col in ws3.columns:
-                    ws3.column_dimensions[
-                        get_column_letter(col[0].column)].width = 22
-
-                wb.save(path)
-                lbl_status.configure(
-                    text=f"✓  Exported → {os.path.basename(path)}",
-                    text_color=GREEN)
-
-            # ── Also save the plot as PNG next to the xlsx ─────────────────
-            png_path = os.path.splitext(path)[0] + "_plot.png"
-            try:
-                export_fig = Figure(
-                    figsize=(10, 4), dpi=200,
-                    facecolor=PLOT.get("bg", "#1A1A2E"), layout="constrained")
-                if hasattr(export_fig, "set_constrained_layout_pads"):
-                    # Was previously called with left=/right=/top=/bottom= --
-                    # not real parameters of this method (only w_pad, h_pad,
-                    # wspace, hspace are), so this raised TypeError on every
-                    # single call, silently caught by the except block below
-                    # at DEBUG level: this companion PNG has never actually
-                    # been written. Reuse CanvasSlot's own pad constants
-                    # instead of a third hardcoded copy of the numbers.
-                    getattr(export_fig, "set_constrained_layout_pads")(
-                        w_pad=CanvasSlot._CL_PAD, h_pad=CanvasSlot._CL_PAD,
-                        wspace=CanvasSlot._CL_SPACE, hspace=CanvasSlot._CL_SPACE)
-                if plot_slot._draw_fn is not None:
-                    plot_slot._draw_fn(export_fig)
-                    export_fig.savefig(
-                        png_path, dpi=200,
-                        facecolor=export_fig.get_facecolor(),
-                        bbox_inches="tight")
-                    plt.close(export_fig)
-                    lbl_status.configure(
-                        text=lbl_status.cget("text") + f"  +  {os.path.basename(png_path)}",
-                        text_color=GREEN)
-            except Exception as exc:
-                log.debug("comparison PNG export: %s", exc)
-            try:
-                poin_path = os.path.splitext(path)[0] + "_poincare.png"
-                poin_fig = Figure(figsize=(10, 5), dpi=300, facecolor="white",
-                                  layout="constrained")
-                if draw_poincare_pair(poin_fig, sa, sb, _colors, title=sub):
-                    poin_fig.savefig(poin_path, dpi=300, facecolor="white",
-                                     bbox_inches="tight")
-                    lbl_status.configure(
-                        text=lbl_status.cget("text") + f"  +  {os.path.basename(poin_path)}",
-                        text_color=GREEN)
-                plt.close(poin_fig)
-            except Exception as exc:
-                log.warning("Poincaré PNG export: %s", exc)
+                    fig = Figure(figsize=figsize, dpi=300, facecolor="white", layout="constrained")
+                    if draw(fig) is not False:
+                        fig.savefig(base + suffix, dpi=300, facecolor="white", bbox_inches="tight")
+                        done.append(os.path.basename(base + suffix))
+                    plt.close(fig)
+                except Exception as exc:
+                    log.warning("comparison figure %s: %s", suffix, exc)
+            lbl_status.configure(text="✓  Exported → " + "  +  ".join(done), text_color=GREEN)
 
         run_btn.configure(command=_run_compare)
-
-        # Export button — disabled until comparison has run. Built with an
-        # explicit muted fg_color (see _set_btn_enabled) rather than relying
-        # on CTkButton's default disabled treatment, which only dims the
-        # text and left this looking clickable while genuinely disabled.
-        export_btn = ctk.CTkButton(
-            ctrl,
-            text="📊  Export",
-            command=_export_comparison,
-            state="disabled",
-            **{**button_style("secondary"), **disabled_style()},
-        )
+        export_btn = ctk.CTkButton(ctrl, text="📊  Export", command=_export_comparison,
+                                   state="disabled",
+                                   **{**button_style("secondary"), **disabled_style()})
         export_btn.pack(side="left", padx=(SPACE_M, 0))
 
         def _add_to_group() -> None:
-            sa, sb = self._last_seg_a, self._last_seg_b
-            if sa is None or sb is None:
+            segs = _state["segs"]
+            if not segs:
                 messagebox.showwarning("No results", "Run the comparison first.", parent=win)
                 return
             path = filedialog.asksaveasfilename(
                 parent=win, title="Group table: add this recording (created if new)",
-                defaultextension=".xlsx", initialfile="group_before_after.xlsx",
+                defaultextension=".xlsx", initialfile="group_segments.xlsx",
                 confirmoverwrite=False, filetypes=[("Excel workbook", "*.xlsx"), ("All files", "*.*")])
             if not path:
                 return
-            sub = self.ent_subject.get().strip() if self.ent_subject else ""
+            sub_ = self.ent_subject.get().strip() if self.ent_subject else ""
             try:
                 n, replaced = append_group_row(path, group_row(
-                    sub, self.signal.filepath, sa, sb, self._SEGMENT_TABLE_METRICS))
+                    sub_, self.signal.filepath, segs, _METRICS,
+                    template=_state["template"], flags=_state["flags"]))
             except Exception as exc:
                 messagebox.showerror("Group table", str(exc), parent=win)
                 return
             lbl_status.configure(
-                text=(f"✓  {sub or 'recording'} {'updated in' if replaced else 'added to'} "
+                text=(f"✓  {sub_ or 'recording'} {'updated in' if replaced else 'added to'} "
                       f"{os.path.basename(path)} ({n} recording{'s' if n != 1 else ''})"),
                 text_color=GREEN)
 
         group_btn = ctk.CTkButton(ctrl, text="➕  Add to group table…", command=_add_to_group,
                                   **button_style("secondary"))
         group_btn.pack(side="left", padx=(SPACE_M, 0))
-        self._bind_hover_tip(
-            group_btn,
-            "One row per recording (subject, file, every metric of both segments): "
-            "the table for a paired test across mice. A recording already in it is "
-            "replaced.")
+        tip(group_btn,
+            "One row per recording (subject, file, template, every metric and the "
+            "quality of each segment): the table for a paired / repeated-measures "
+            "test across animals. Columns are named after the segment labels: use "
+            "the same template for every animal. A recording already in it is replaced.")
 
+        _reload_templates()
         ctk.CTkLabel(win,
                      text=f"Tip: equal durations give a fair comparison  ·  "
                           f"LF {lf[0]:.2f}–{lf[1]:.2f} Hz  HF {hf[0]:.2f}–{hf[1]:.2f} Hz",

@@ -295,17 +295,42 @@ course > Autonomic, Event-locked part) opens it. It is built for the recording a
 its peaks: the windows you typed stay while they do not change, and it is rebuilt
 when a new file is opened or the peaks are edited.
 
-**RR tachograms / Poincaré** switches the plot: the Poincaré view draws both
+**Segments.** 1 to 6 windows (label, from, to; **＋ Add segment**, ✕ to remove).
+The first is the reference: the table gives each metric of every segment with
+its Δ % against the first, and the HR block comparison is each segment against
+the first.
+
+**Templates: the same windows for every animal.** Pick the event (an annotation
+or an abnormal event, or type its start / end), choose a template and click
+**Apply**. A template window is placed from the event's start (before it) or
+from its end (after it), so a stimulus of another length keeps the post windows
+after it. Built in: *Before / after, 5 min* and *10 min* (After starts 30 s
+after the event, leaving out the shock / movement artefact) and *Recovery:
+baseline, 0–5, 10–15, 25–30 min*. **Save as template…** stores the windows on
+screen, relative to the event, under a name (in `~/.ecg_segment_templates.json`);
+**Delete** removes one of yours.
+
+**Quality of each segment**, shown on its row after ▶ Compare and in the
+export's *Quality* sheet: valid RR covering < 80 % of the window, < 200
+Poincaré pairs, a duration other than the first segment's (> 2 %), an overlap
+with the event or the **Artefact margin** after it, abrupt RR jumps (> 20 % of
+the median RR in more than 0.5 % of the pairs), and an SD1 more than 1.5× its
+value without the 2 % most extreme pairs — a few missed or extra beats drive
+it: check the peaks before using that segment.
+
+**RR tachograms / Poincaré** switches the plot: the Poincaré view draws the
 segments side by side on the same square axes (identity line, centre, SD1 / SD2
 ellipse; only successive valid pairs; at 1 kHz the points are jittered ± half a
-sample for display only). **Export** also writes `<name>_poincare.png` (300 dpi).
-**➕ Add to group table…** adds this recording to an .xlsx with one row per
-recording (subject, file, every metric of A and of B; the same recording again
-replaces its row): the table for a paired test across animals (Prism paired
-column table, Wilcoxon matched-pairs or paired t).
+sample for display only). **Export** writes the .xlsx (Comparison, Quality, one
+RR sheet per segment, Blocks, Summary with the template) and the tachogram and
+Poincaré PNGs (300 dpi). **➕ Add to group table…** adds this recording to an
+.xlsx with one row per recording (subject, file, template, then per segment its
+times, valid RR %, pairs, QC and every metric, columns named after the segment
+labels; the same recording again replaces its row): use the same template for
+every animal and the columns line up for a paired test (2 segments: Wilcoxon
+matched-pairs or paired t) or a repeated-measures one (Friedman / RM ANOVA).
 
-Pick two time ranges (or fill them around an event) and click **▶ Compare**:
-the table shows every metric for both segments, with the same definitions
+Click **▶ Compare**: the table shows every metric for every segment, with the same definitions
 as the main panels. Each segment is also cut into **non-overlapping blocks**
 of **Block (s)** seconds (default 10 s; a block is used when valid RR
 intervals cover at least half of it) and the summary line gives the HR block

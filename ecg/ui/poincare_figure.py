@@ -2,7 +2,7 @@
 """
 ecg.ui.poincare_figure
 ----------------------
-Poincaré plots of two segments side by side (before / after a stimulus), as
+Poincaré plots of the segments side by side (before / after a stimulus), as
 in the HRV literature: RR_n against RR_n+1, the same square axes on both
 panels so that a shift of the cloud (rate change) and its contraction (SD1,
 SD2) read at a glance, the identity line, the cloud's centre and its SD1/SD2
@@ -94,21 +94,33 @@ def draw_poincare_panel(ax, seg: dict, color: str, lim: "tuple[float, float]",
                  fontsize=9, color=color, loc="center")
 
 
-def draw_poincare_pair(fig, sa: dict, sb: dict, colors: "Sequence[str]",
-                       title: str = "") -> bool:
-    """Both segments side by side on *fig* (same axes). False when neither
-    segment has a pair (nothing drawn but a note)."""
-    lim = shared_limits((sa, sb))
+def draw_poincare_set(fig, segs: "Sequence[dict]", colors: "Sequence[str]",
+                      title: str = "") -> bool:
+    """Every segment side by side on *fig* (same square axes; up to 4 a
+    row). False when no segment has a pair (nothing drawn but a note)."""
+    lim = shared_limits(segs)
     if lim is None:
         ax = fig.add_subplot(111)
-        ax.text(0.5, 0.5, "No successive valid RR pairs in either segment",
+        ax.text(0.5, 0.5, "No successive valid RR pairs in any segment",
                 ha="center", va="center", transform=ax.transAxes,
                 color=PLOT.get("muted", "#888"))
         ax.set_axis_off()
         return False
-    axes = fig.subplots(1, 2)
-    for ax, seg, color in zip(axes, (sa, sb), colors):
-        draw_poincare_panel(ax, seg, color, lim)
+    n = len(segs)
+    ncols = min(n, 4)
+    nrows = -(-n // ncols)
+    axes = np.atleast_1d(fig.subplots(nrows, ncols)).ravel()
+    for k, ax in enumerate(axes):
+        if k < n:
+            draw_poincare_panel(ax, segs[k], colors[k % len(colors)], lim)
+        else:
+            ax.set_axis_off()
     if title:
         fig.suptitle(title, fontsize=10, color=PLOT.get("text", "#222"))
     return True
+
+
+def draw_poincare_pair(fig, sa: dict, sb: dict, colors: "Sequence[str]",
+                       title: str = "") -> bool:
+    """Two segments side by side (draw_poincare_set)."""
+    return draw_poincare_set(fig, (sa, sb), colors, title)
