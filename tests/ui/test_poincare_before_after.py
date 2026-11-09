@@ -126,3 +126,19 @@ def test_poincare_set_draws_one_panel_per_segment():
     fig = Figure()
     draw_poincare_set(fig, [sa] * 5, ("b",))
     assert sum(ax.axison for ax in fig.axes) == 5            # 2 rows of 4, 3 blank
+
+
+def test_jitter_can_be_turned_off():
+    sa, sb = _segments()
+    fig = Figure(figsize=(10, 5))
+    draw_poincare_pair(fig, sa, sb, ("blue", "orange"))
+    fig_off = Figure(figsize=(10, 5))
+    from ecg.ui.poincare_figure import draw_poincare_set as _set
+    _set(fig_off, (sa, sb), ("blue", "orange"), jitter=False)
+    pts = fig_off.axes[0].collections[0].get_offsets()
+    assert np.array_equal(pts[:, 0], sa["pairs_x"]) and np.array_equal(pts[:, 1], sa["pairs_y"])
+    assert not any("jittered" in t.get_text() for t in fig_off.axes[0].texts)
+    # The ellipse is the same either way.
+    e_on = [p for p in fig.axes[0].patches if isinstance(p, Ellipse)][0]
+    e_off = [p for p in fig_off.axes[0].patches if isinstance(p, Ellipse)][0]
+    assert (e_on.width, e_on.height, e_on.center) == (e_off.width, e_off.height, e_off.center)

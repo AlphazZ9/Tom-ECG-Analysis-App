@@ -57,8 +57,10 @@ def jitter_for_display(x: np.ndarray, y: np.ndarray) -> "tuple[np.ndarray, np.nd
 
 
 def draw_poincare_panel(ax, seg: dict, color: str, lim: "tuple[float, float]",
-                        point_size: float = 6.0) -> None:
-    """One segment's Poincaré plot on *ax*, on the shared square range *lim*."""
+                        point_size: float = 6.0, jitter: bool = True) -> None:
+    """One segment's Poincaré plot on *ax*, on the shared square range *lim*.
+    *jitter* False draws the points at their measured values (stacked on the
+    sampling grid)."""
     style_axes(ax)
     x = np.asarray(seg.get("pairs_x", ()), dtype=float)
     y = np.asarray(seg.get("pairs_y", ()), dtype=float)
@@ -67,7 +69,7 @@ def draw_poincare_panel(ax, seg: dict, color: str, lim: "tuple[float, float]",
     ax.plot(lim, lim, color=PLOT.get("muted", "#888"), lw=0.8, ls="--", zorder=1)
     step = 0.0
     if len(x):
-        jx, jy, step = jitter_for_display(x, y)
+        jx, jy, step = jitter_for_display(x, y) if jitter else (x, y, 0.0)
         ax.scatter(jx, jy, s=point_size, color=color, alpha=0.35, linewidths=0, zorder=2)
         cx, cy = float(x.mean()), float(y.mean())
         sd1, sd2 = float(seg.get("sd1", np.nan)), float(seg.get("sd2", np.nan))
@@ -95,7 +97,7 @@ def draw_poincare_panel(ax, seg: dict, color: str, lim: "tuple[float, float]",
 
 
 def draw_poincare_set(fig, segs: "Sequence[dict]", colors: "Sequence[str]",
-                      title: str = "") -> bool:
+                      title: str = "", jitter: bool = True) -> bool:
     """Every segment side by side on *fig* (same square axes; up to 4 a
     row). False when no segment has a pair (nothing drawn but a note)."""
     lim = shared_limits(segs)
@@ -112,7 +114,7 @@ def draw_poincare_set(fig, segs: "Sequence[dict]", colors: "Sequence[str]",
     axes = np.atleast_1d(fig.subplots(nrows, ncols)).ravel()
     for k, ax in enumerate(axes):
         if k < n:
-            draw_poincare_panel(ax, segs[k], colors[k % len(colors)], lim)
+            draw_poincare_panel(ax, segs[k], colors[k % len(colors)], lim, jitter=jitter)
         else:
             ax.set_axis_off()
     if title:

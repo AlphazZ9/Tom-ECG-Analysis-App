@@ -543,6 +543,25 @@ class CompareSegmentsMixin:
                               **{**button_style("secondary"), **toggle_style(mode == "rr")})
             b.pack(side="left", padx=(0, SPACE_S))
             _view_btns[mode] = b
+        # Display only: SD1, SD2 and the ellipse use the measured values.
+        if not hasattr(self, "_compare_jitter"):
+            self._compare_jitter = True                   # kept across tab rebuilds
+        chk_jitter = ctk.CTkCheckBox(view_bar, text="Jitter Poincaré points", font=FONT_SMALL,
+                                     text_color=MUTED, fg_color=BLUE, checkmark_color="white",
+                                     border_color=BORDER2, width=16)
+        if self._compare_jitter:
+            chk_jitter.select()
+
+        def _on_jitter() -> None:
+            self._compare_jitter = bool(chk_jitter.get())
+            if _state["segs"] is not None and _view["mode"] == "poincare":
+                _redraw_plot()
+        chk_jitter.configure(command=_on_jitter)
+        chk_jitter.pack(side="left", padx=(SPACE_M, 0))
+        tip(chk_jitter, "On: points on the sampling grid (1 ms at 1 kHz) are spread by "
+                        "± half a step so the cloud's density shows. Off: every point at its "
+                        "measured value. Display and figure export only; SD1, SD2 and the "
+                        "ellipse never change.")
         plot_card = ctk.CTkFrame(plot_box, fg_color=CARD, corner_radius=0, height=460)
         plot_card.pack(fill="x")
         plot_card.pack_propagate(False)        # a scrolling page gives no height to fit
@@ -642,7 +661,8 @@ class CompareSegmentsMixin:
             segs = _state["segs"]
             colors = [_color(k) for k in range(len(segs))]
             if _view["mode"] == "poincare":
-                plot_slot.update(lambda fig: draw_poincare_set(fig, segs, colors))
+                plot_slot.update(lambda fig: draw_poincare_set(
+                    fig, segs, colors, jitter=self._compare_jitter))
             else:
                 plot_slot.update(_rr_drawer(segs, colors))
 
@@ -847,7 +867,8 @@ class CompareSegmentsMixin:
             for suffix, figsize, draw in (
                     ("_tachograms", (10, 4), _rr_drawer(segs_, colors)),
                     ("_poincare", (min(4 * len(segs_), 16), 4.6 * n_rows),
-                     lambda fig: draw_poincare_set(fig, segs_, colors, title=_subject()))):
+                     lambda fig: draw_poincare_set(fig, segs_, colors, title=_subject(),
+                                                   jitter=self._compare_jitter))):
                 out = base + suffix + ext
                 try:
                     fig = Figure(figsize=figsize, dpi=300, facecolor="white", layout="constrained")
