@@ -173,8 +173,10 @@ class TabHrvMixin:
         right = ctk.CTkFrame(sec2, fg_color="transparent")
         right.grid(row=1, column=0, sticky="ew")
         self._rhythm_plot_card(right, 420, "poincare", 12.0).pack(fill="x")
+        self._slots["poincare"].enable_wheel_yzoom()
         ctk.CTkLabel(
-            right, text="Successive valid pairs only: no pair crosses an excluded interval.",
+            right, text=("Successive valid pairs only: no pair crosses an excluded interval  ·  "
+                         "wheel: zoom  ·  middle-click: reset"),
             font=FONT_HINT, text_color=MUTED, anchor="w",
         ).pack(fill="x", pady=(SPACE_XS, 0))
 

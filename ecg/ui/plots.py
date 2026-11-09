@@ -563,8 +563,9 @@ class CanvasSlot:
 
     def enable_wheel_yzoom(self) -> None:
         """Mouse wheel over a panel zooms its Y axis around the pointer (away
-        from you: in, towards you: out); the middle button restores the
-        panel's limits as drawn. Bound on the canvas widget and ending the
+        from you: in, towards you: out) -- both axes of an equal-aspect panel
+        (Poincaré), and with it every such panel sharing its ranges; the
+        middle button restores the limits as drawn. Bound on the canvas widget and ending the
         event there, so the wheel does not also scroll an enclosing page
         (CTkScrollableFrame) or reach matplotlib's own wheel handler."""
         w = self.canvas.get_tk_widget()
@@ -572,14 +573,30 @@ class CanvasSlot:
         if self._draw_fn is not None:        # already drawn: lay it out for the room
             self._redraw()
 
-        def _axes_at(x: int, y: int) -> "tuple[Any, float]":
+        def _axes_at(x: int, y: int) -> "tuple[Any, float, float]":
             # Tk y runs down from the widget's top, matplotlib's display y up
             # from the figure's bottom.
             yd = w.winfo_height() - y
             for ax in self.fig.axes:
                 if ax.get_visible() and ax.bbox.contains(x, yd):
-                    return ax, float(ax.transData.inverted().transform((x, yd))[1])
-            return None, float("nan")
+                    xc, yc = ax.transData.inverted().transform((x, yd))
+                    return ax, float(xc), float(yc)
+            return None, float("nan"), float("nan")
+
+        def _square(ax: Any) -> bool:
+            # An equal-aspect plot (Poincaré): zooming Y alone would reshape
+            # its box to keep the aspect, so both axes zoom together.
+            asp = ax.get_aspect()
+            return asp == "equal" or (isinstance(asp, (int, float)) and asp == 1.0)
+
+        def _group(ax: Any) -> "list[Any]":
+            """*ax* and, when square, every square panel showing the same
+            ranges: side-by-side Poincaré panels keep one common scale."""
+            if not _square(ax):
+                return [ax]
+            lims = (ax.get_xlim(), ax.get_ylim())
+            return [a for a in self.fig.axes if a is ax or (
+                a.get_visible() and _square(a) and (a.get_xlim(), a.get_ylim()) == lims)]
 
         def _freeze_layout() -> None:
             # constrained_layout re-flows the figure on every draw: a zoom
@@ -593,18 +610,29 @@ class CanvasSlot:
                     self._layout_frozen = True
 
         def _zoom(x: int, y: int, zoom_in: bool) -> str:
-            ax, yc = _axes_at(x, y)
+            ax, xc, yc = _axes_at(x, y)
             if ax is None or not np.isfinite(yc):
                 return ""
             _freeze_layout()
-            if not hasattr(ax, "_wheel_home_ylim"):
-                ax._wheel_home_ylim = ax.get_ylim()   # type: ignore[attr-defined]
+            square = _square(ax)
+            group = _group(ax)
+            for a in group:
+                if not hasattr(a, "_wheel_home_ylim"):
+                    a._wheel_home_ylim = a.get_ylim()   # type: ignore[attr-defined]
+                    a._wheel_home_xlim = a.get_xlim()   # type: ignore[attr-defined]
             f = self.WHEEL_ZOOM_IN if zoom_in else 1.0 / self.WHEEL_ZOOM_IN
             lo, hi = ax.get_ylim()
             h_lo, h_hi = ax._wheel_home_ylim       # type: ignore[attr-defined]
             if zoom_in and (hi - lo) * f < self.WHEEL_MIN_SPAN * abs(h_hi - h_lo):
                 return "break"                    # deepest zoom reached
-            ax.set_ylim(yc - (yc - lo) * f, yc + (hi - yc) * f)
+            new_y = (yc - (yc - lo) * f, yc + (hi - yc) * f)
+            if square:
+                xlo, xhi = ax.get_xlim()
+                new_x = (xc - (xc - xlo) * f, xc + (xhi - xc) * f)
+            for a in group:
+                a.set_ylim(*new_y)
+                if square:
+                    a.set_xlim(*new_x)
             self.canvas.draw_idle()
             return "break"
 
@@ -613,11 +641,16 @@ class CanvasSlot:
             return _zoom(e.x, e.y, e.delta > 0)
 
         def _on_middle(e: Any) -> "Optional[str]":
-            ax, _yc = _axes_at(e.x, e.y)
-            home = getattr(ax, "_wheel_home_ylim", None) if ax is not None else None
-            if home is None:
+            ax, _xc, _yc = _axes_at(e.x, e.y)
+            if ax is None or getattr(ax, "_wheel_home_ylim", None) is None:
                 return None
-            ax.set_ylim(*home)
+            for a in _group(ax):
+                home_y = getattr(a, "_wheel_home_ylim", None)
+                if home_y is None:
+                    continue
+                a.set_ylim(*home_y)
+                if _square(a):
+                    a.set_xlim(*a._wheel_home_xlim)   # type: ignore[attr-defined]
             self.canvas.draw_idle()
             return "break"
 

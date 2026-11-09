@@ -107,3 +107,40 @@ def test_a_redraw_lays_the_figure_out_again(root):
     assert slot.fig.get_layout_engine().__class__.__name__ != "ConstrainedLayoutEngine"
     slot._redraw(force=True)
     assert slot.fig.get_layout_engine().__class__.__name__ == "ConstrainedLayoutEngine"
+
+
+def test_square_poincare_panels_zoom_together_without_reshaping(root):
+    """A Y-only zoom reshaped an equal-aspect box (370 x 370 -> 652 x 267 px)
+    and left the other Poincaré panel on another scale."""
+    import numpy as np
+    from ecg.ui.poincare_figure import draw_poincare_set
+    for w_ in root.winfo_children():
+        w_.destroy()
+    page = tk.Frame(root, width=480, height=380)
+    page.pack(fill="both", expand=True)
+    slot = CanvasSlot(page, 4.8, 3.8, toolbar=False)
+    slot.enable_wheel_yzoom()
+    rng = np.random.default_rng(0)
+    segs = []
+    for m, lab in ((125, "Before"), (120, "After")):
+        x = np.round(m + 2 * rng.standard_normal(2000))
+        segs.append({"pairs_x": x, "pairs_y": np.r_[x[1:], m], "sd1": 0.7, "sd2": 2.0,
+                     "label": lab})
+    slot.update(lambda fig: draw_poincare_set(fig, segs, ("b", "orange")))
+    root.update()
+    slot.canvas.draw()
+    root.update()
+    a, b = slot.fig.axes
+    boxes = [ax.get_window_extent().bounds for ax in (a, b)]
+    home = a.get_xlim()
+    x, y = _pixel(slot, a, 124)
+    for _ in range(5):
+        _wheel(slot, x, y, 120)
+        root.update()
+        slot.canvas.draw()
+    assert [ax.get_window_extent().bounds for ax in (a, b)] == boxes
+    assert a.get_xlim() == b.get_xlim() and a.get_ylim() == b.get_ylim()
+    span_x, span_y = np.ptp(a.get_xlim()), np.ptp(a.get_ylim())
+    assert span_x == pytest.approx(span_y) and span_x < 0.5 * np.ptp(home)
+    slot.canvas.get_tk_widget().event_generate("<Button-2>", x=x, y=y)
+    assert a.get_xlim() == pytest.approx(home) and b.get_xlim() == pytest.approx(home)
