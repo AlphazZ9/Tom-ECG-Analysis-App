@@ -61,6 +61,7 @@ from ecg.ui.theme import (
 from ecg.ui.theme import toggle_style
 from ecg.ui.freshness import recorded_rr_bounds
 from ecg.ui.plots import style_axes
+from ecg.ui.state import MIN_VIEW_WINDOW_S
 from ecg.ui.plots import centered_ylim
 from ecg.ui.tab_keys import MODE_EPOCHS, MODE_SLIDING, TAB_EVENTS, TAB_TIME_COURSE
 
@@ -1187,14 +1188,27 @@ class AnalysisController:
         self.app._update_undo_btns()
 
     def on_arr_scroll(self, event) -> None:
-        if event.xdata is None or self.app.signal.time is None:
+        """Scroll-wheel zoom on the Abnormal Events ECG, centred on the cursor.
+
+        The current view is read from the axes limits actually on screen,
+        not from ``arr_win``/``arr_nav_pos``: the full redraw is debounced,
+        so during a burst of ticks the state is already ahead of what is
+        displayed and ``event.xdata`` refers to the old axes -- mixing the
+        two made the view jump instead of zooming around the cursor.
+        Each tick also applies an immediate set_xlim() for live feedback.
+        """
+        ax = event.inaxes
+        if event.xdata is None or ax is None or self.app.signal.time is None:
             return
+        t_max    = float(self.app.signal.time[-1])
+        x_min, x_max = ax.get_xlim()
+        cur_win  = max(x_max - x_min, 1e-6)
         factor   = 0.8 if event.button == "up" else 1.25
-        new_win  = max(0.3, min(float(self.app.signal.time[-1]), self.app.analysis.arr_win * factor))
+        new_win  = max(MIN_VIEW_WINDOW_S, min(t_max, cur_win * factor))
         cursor_x = float(event.xdata)
-        frac     = (cursor_x - self.app.analysis.arr_nav_pos) / max(self.app.analysis.arr_win, 1e-6)
+        frac     = min(1.0, max(0.0, (cursor_x - x_min) / cur_win))
         t_start  = max(0.0, cursor_x - frac * new_win)
-        t_start  = min(t_start, max(0.0, float(self.app.signal.time[-1]) - new_win))
+        t_start  = min(t_start, max(0.0, t_max - new_win))
         self.app.analysis.arr_win     = new_win
         self.app.analysis.arr_nav_pos = t_start
         try:
@@ -1202,15 +1216,17 @@ class AnalysisController:
             self.app.ent_arr_win.insert(0, f"{new_win:.2f}")
         except Exception as e:
             log.debug("ent_arr_win update failed: %s", e)
+        try:
+            ax.set_xlim(t_start, t_start + new_win)
+            self.app._slots["arr_detail"].canvas.draw_idle()
+        except Exception as e:
+            log.debug("arr_detail live zoom failed: %s", e)
         # Debounced (mirrors the Detection tab's on_detail_scroll ->
         # scroll_sync_after_id) so a burst of scroll ticks during one zoom
         # gesture triggers one full rebuild once scrolling settles, not one
-        # fig.clear()+rebuild per tick. Unlike the Detection tab this
-        # doesn't also do a cheap immediate set_xlim()+draw_idle() step --
-        # draw_arr_detail() doesn't expose its axes between calls the way
-        # the detail-view one does -- so visual feedback lands with the
-        # debounce delay rather than instantly; still far better than one
-        # full rebuild per tick.
+        # fig.clear()+rebuild per tick; the set_xlim() above gives the
+        # instant feedback, the rebuild re-slices the signal and peaks for
+        # the new range (needed when zooming out past the drawn slice).
         if self.app.ui.arr_scroll_after_id is not None:
             self.app.after_cancel(self.app.ui.arr_scroll_after_id)
         self.app.ui.arr_scroll_after_id = self.app.after(120, self._flush_arr_scroll)

@@ -26,6 +26,11 @@ from ecg.core.analysis import ENSEMBLE_BEATS_DEFAULT
 from ecg.core.models import MouseECG
 from ecg.core.wave_template import WaveTemplate
 
+# Narrowest time window (s) the ECG views can be zoomed to, by scroll wheel
+# or the window entry -- shared by the Detection detail view and the
+# Abnormal Events editor so both allow the same zoom depth.
+MIN_VIEW_WINDOW_S: float = 0.1
+
 
 @dataclass
 class SignalState:

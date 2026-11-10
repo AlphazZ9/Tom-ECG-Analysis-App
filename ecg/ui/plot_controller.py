@@ -49,6 +49,7 @@ from ecg.core.metric_table import (
     results_rr_valid, rhythm_cards, rhythm_rows,
 )
 from ecg.ui.plots import centered_ylim, style_axes, wrap_fig_text
+from ecg.ui.state import MIN_VIEW_WINDOW_S
 from ecg.ui.wave_editor import WaveTemplateMiniEditor
 from ecg.ui.theme import (
     THEME, PLOT, RED, AMBER, ORANGE, ORANGE_DARK,
@@ -235,7 +236,7 @@ class PlotController:
             win = float(self.app.ent_arr_win.get())
         except Exception:
             win = self.app.analysis.arr_win
-        win = max(0.5, win)
+        win = max(MIN_VIEW_WINDOW_S, win)
         self.app.analysis.arr_win = win
 
         t_start = self.app.analysis.arr_nav_pos
@@ -325,6 +326,10 @@ class PlotController:
 
             ax.axhline(t_amp, color=PLOT.get("threshold",AMBER_DARK),
                        lw=1.2, ls="--", alpha=0.6)
+            # Pin the x-range to the requested window (no autoscale margins)
+            # so the axes limits always equal arr_nav_pos..arr_nav_pos+win --
+            # the scroll-zoom handler reads them back as the current view.
+            ax.set_xlim(t_start, t_end if t_end > t_start else t_start + win)
             ax.set_xlabel("Time (s)")
             ax.set_ylabel("Amplitude (norm.)")
 
