@@ -13,7 +13,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from ecg.ui.theme import BLUE_DARK, BORDER, TEXT
+from ecg.core.models import event_kind_label
+from ecg.ui.state import MIN_VIEW_WINDOW_S
+from ecg.ui.theme import AMBER, BLUE_DARK, BORDER, MUTED, TEXT
+from ecg.ui.tab_keys import TAB_DETECTION
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
@@ -30,14 +33,24 @@ class NavigationController:
         """Keyboard left/right arrow navigation — only active on Detection tab."""
         app = self.app
         try:
-            if app.tabs.get() != "📈 Detection":
+            if app.tabs.get() != TAB_DETECTION:
                 return
         except Exception:
             return
         self.navigate(direction)
 
     def navigate(self, direction: int) -> None:
-        """Shift the detail view left/right by 80 % of the window width."""
+        """Shift the detail view left/right by 80 % of the window width.
+
+        Bound to Left/Right (kb_navigate) which repeat continuously while
+        held, unlike every other rapid-fire input in this app (minimap
+        drag, threshold slider, scroll-zoom), which all debounce their
+        expensive redraw. nav_pos itself and the position entry update
+        immediately on every tick (cheap, so held-key feedback stays
+        instant); only the actual 3-canvas _draw_detail() is debounced, so
+        a burst of OS key-repeat ticks collapses into one redraw instead of
+        one per tick.
+        """
         app = self.app
         if app.signal.time is None or len(app.signal.time) == 0:
             return
@@ -50,7 +63,13 @@ class NavigationController:
         max_start  = float(app.signal.time[-1]) - win
         app.ui.nav_pos = max(0.0, min(max_start, app.ui.nav_pos + direction * win * 0.8))
         self.sync_nav_pos_entry()
-        app._draw_detail()
+        if app.ui.nav_key_after_id is not None:
+            app.after_cancel(app.ui.nav_key_after_id)
+        app.ui.nav_key_after_id = app.after(40, self._flush_nav_key_redraw)
+
+    def _flush_nav_key_redraw(self) -> None:
+        self.app.ui.nav_key_after_id = None
+        self.app._draw_detail()
 
     def navigate_big(self, direction: int) -> None:
         """Jump by 10× the current window width."""
@@ -109,6 +128,46 @@ class NavigationController:
         self.sync_nav_pos_entry()
         app._draw_detail()
 
+    def step_spike(self, direction: int) -> None:
+        """Jump to the next/previous suspicious RR beat (HRV tab's spike list).
+
+        Walks ``app.ui.rr_spike_times``, the same array PlotController.plot_rr()
+        already computes for the tachogram's right-click-to-nearest-spike
+        behaviour, so working through several flagged beats no longer needs a
+        right-click on the HRV tab per beat.
+        """
+        app = self.app
+        spikes = app.ui.rr_spike_times
+        if spikes is None or len(spikes) == 0 or app.signal.time is None:
+            app._set_status("No suspicious beats to step through — run Analyze first", MUTED)
+            return
+        try:
+            win = float(app.ent_window.get())
+            if not (0 < win < 1e6):
+                win = 2.0
+        except (ValueError, TypeError):
+            win = 2.0
+        # Compare against the centre of the visible window, not its left
+        # edge (nav_pos) -- a jump always centres the target spike in the
+        # window (t_nav - win/2 below), so comparing against nav_pos itself
+        # would find that same spike again on every "next" press.
+        cur = app.ui.nav_pos + win / 2
+        later    = spikes[spikes > cur + 1e-6]
+        earlier  = spikes[spikes < cur - 1e-6]
+        if direction > 0:
+            t_nav = float(later.min()) if len(later) else float(spikes.min())
+        else:
+            t_nav = float(earlier.max()) if len(earlier) else float(spikes.max())
+        sig_dur = float(app.signal.time[-1])
+        app.ui.nav_pos = max(0.0, min(t_nav - win / 2, sig_dur - win))
+        self.sync_nav_pos_entry()
+        try:
+            app.tabs.set(TAB_DETECTION)
+        except Exception as e:
+            log.debug("tabs.set Detection failed: %s", e)
+        app._draw_detail()
+        app._set_status(f"Navigation → spike at {t_nav:.3f} s", AMBER)
+
     def sync_nav_pos_entry(self) -> None:
         """Update the position entry widget to reflect ui.nav_pos."""
         app = self.app
@@ -128,6 +187,32 @@ class NavigationController:
         max_t = max(0.0, float(app.signal.time[-1]) - app.analysis.arr_win)
         app.analysis.arr_nav_pos = max(0.0, min(max_t, app.analysis.arr_nav_pos + direction * step))
         app._draw_arr_detail()
+
+    def arr_step_event(self, direction: int) -> None:
+        """Previous / Next: the event before or after the selected one, stopping
+        at either end; from none selected, the first or the last."""
+        app = self.app
+        n = len(app.analysis.arrhythmia_events)
+        if not n:
+            return
+        cur = app.analysis.arr_selected_idx
+        idx = (0 if direction > 0 else n - 1) if cur < 0 else cur + direction
+        if 0 <= idx < n:
+            self.select_arrhythmia_event(idx)
+            self._reveal_arr_card(idx)
+
+    def _reveal_arr_card(self, idx: int) -> None:
+        """Scroll the selected card into the list (past the listed cards: none)."""
+        app = self.app
+        try:
+            frame = app._arr_event_scroll
+            if idx >= len(app._arr_card_widgets) or frame is None:
+                return
+            frame.update_idletasks()
+            frame._parent_canvas.yview_moveto(
+                app._arr_card_widgets[idx].winfo_y() / max(frame.winfo_height(), 1))
+        except Exception as e:
+            log.debug("arr card reveal failed: %s", e)
 
     def select_arrhythmia_event(self, idx: int) -> None:
         """Highlight selected card and load the ECG window for this event."""
@@ -151,7 +236,7 @@ class NavigationController:
             win = float(app.ent_arr_win.get())
         except Exception:
             win = 3.0
-        app.analysis.arr_win = max(0.5, win)
+        app.analysis.arr_win = max(MIN_VIEW_WINDOW_S, win)
 
         padding = max(app.analysis.arr_win * 0.25, 0.5)
         ep_dur  = max(ev.duration_s, 0.1)
@@ -164,13 +249,22 @@ class NavigationController:
             app.analysis.arr_win = min(ep_dur + 2 * padding, 30.0)
             t_start = max(0.0, ev.t_start - padding)
 
+        # draw_arr_detail() re-reads the window from the entry box, so write
+        # the (possibly expanded) window back -- otherwise the expansion
+        # above is silently undone and the long episode is cut off.
+        try:
+            app.ent_arr_win.delete(0, "end")
+            app.ent_arr_win.insert(0, f"{app.analysis.arr_win:.2f}")
+        except Exception as _exc:
+            log.debug("ent_arr_win update failed: %s", _exc)
+
         app.analysis.arr_nav_pos = t_start
         app._draw_arr_detail()
 
         # Update title bar
         sev_icon = {"alert": "🔴", "warning": "🟠", "info": "🔵"}.get(ev.severity, "·")
         app.lbl_arr_event_title.configure(  # type: ignore[union-attr]
-            text=f"{sev_icon}  #{idx+1}  {ev.kind.replace('_',' ').title()}"
+            text=f"{sev_icon}  #{idx+1}  {event_kind_label(ev.kind)}"
                  f"  —  {ev.t_start:.2f} s → {ev.t_end:.2f} s  ({ev.hr_mean:.0f} bpm)",
             text_color=TEXT,
         )
@@ -246,10 +340,6 @@ class NavigationController:
         app.ui.nav_pos = max(0.0, min(max_start, t_click - win / 2.0))
         self.sync_nav_pos_entry()
 
-    def on_overview_scroll(self, event) -> None:
-        """Stub — scroll-to-zoom on the minimap is out of scope for Phase 3b."""
-        pass
-
     def on_detail_scroll(self, event) -> None:
         """Zoom the detail view's x-axis in/out centred on the cursor position.
 
@@ -273,7 +363,7 @@ class NavigationController:
         cursor_x = float(event.xdata)
         factor   = 0.8 if event.button == "up" else 1.25   # up = zoom in
 
-        new_win  = max(0.5, min(float(app.signal.time[-1]), cur_win * factor))
+        new_win  = max(MIN_VIEW_WINDOW_S, min(float(app.signal.time[-1]), cur_win * factor))
         # Keep the point under the cursor stationary
         frac     = (cursor_x - x_min) / max(cur_win, 1e-6)
         new_xmin = cursor_x - frac * new_win

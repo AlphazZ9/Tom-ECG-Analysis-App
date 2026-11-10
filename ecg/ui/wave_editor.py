@@ -8,11 +8,12 @@ the beat-template (P/Q/S/T landmark positions).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional, TYPE_CHECKING
 
 import customtkinter as ctk  # type: ignore[import-untyped]
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -27,38 +28,84 @@ from ecg.ui.theme import (
     FONT_LABEL, FONT_SMALL, FONT_BTN_PRIMARY, FONT_BTN_SEC,
     FONT_HINT,
 )
+from ecg.ui.theme import button_style
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
 
 log = logging.getLogger("ecg")
 
+def hit_landmark(landmarks: "Any", keys: "Any", x_ms: float,
+                 radius_ms: float) -> "tuple[Optional[str], str]":
+    """(landmark, "center" | "lo" | "hi") whose line is nearest *x_ms*, within *radius_ms*."""
+    best_key: "Optional[str]" = None
+    best_d   = float("inf")
+    best_mode = "center"
+    for key in keys:
+        if key not in landmarks:
+            continue
+        c, hw = landmarks[key]
+        for val, mode in [(c, "center"), (c - hw, "lo"), (c + hw, "hi")]:
+            d = abs(x_ms - val)
+            if d < best_d and d < radius_ms:
+                best_d    = d
+                best_key  = key
+                best_mode = mode
+    return best_key, best_mode
+
+
+def dragged_landmark(center: float, half: float, mode: str, x_ms: float) -> "tuple[float, float]":
+    """(centre, half-window) once the line of *mode* is at *x_ms*."""
+    if mode == "center":
+        return round(x_ms, 1), half
+    if mode == "lo":
+        return center, round(max(2.0, center - x_ms), 1)
+    return center, round(max(2.0, x_ms - center), 1)
+
+
 class WaveTemplateMiniEditor(ctk.CTkToplevel):
     """Compact P/Q/R/S/T template editor — draggable lines on the mean beat.
 
-    Shows the quality-filtered mean beat with 6 coloured vertical lines
-    (landmark centres) and 6 shaded bands (search half-windows).
+    Shows the quality-filtered mean beat with one coloured vertical line
+    (landmark centre) and one shaded band (search half-window) per landmark
+    in ``_KEYS``.
     Drag a line to move a centre; drag a shaded edge to resize the window.
-    Click "Save & Confirm" to persist and mark the template as user-confirmed.
+
+    The template edited is the CURRENT RECORDING's (``app.analysis.
+    wave_template``): "Apply to this recording" changes only it (kept in the
+    recording's session) and writes nothing to disk. Making it the default
+    for recordings opened later is the separate, explicit "Save as default
+    template" (``WaveTemplate.save``); "Save to file..." / "Load..." exchange
+    named template files. The provenance (default / calibrated or edited on
+    this recording / loaded from a file) follows every action and is shown
+    in the Morphology & Intervals tab and in exports.
 
     Replaces the previous 1400-line WaveTemplateEditor.  All logic lives here;
     the external WaveTemplate data model is unchanged.
     """
 
-    _KEYS   = ["P_peak", "Q_peak", "S_peak", "J_peak", "T_peak"]
+    # QRS onset / QRS offset (J point) bound PR, QRS and QT (PR = P onset ->
+    # QRS onset, QRS = onset -> offset, QT = onset -> T end); their windows
+    # only constrain where the per-beat detector may place them.
+    _KEYS   = ["P_peak", "QRS_onset", "Q_peak", "S_peak", "QRS_offset",
+               "J_peak", "T_peak"]
     _COLS   = {
         "P_peak":  BLUE_DARK,
+        "QRS_onset": "#FFB74D",
         "Q_peak":  "#EF9A9A", "S_peak":  CORAL,
+        "QRS_offset": "#BA68C8",
         "J_peak":  TEAL,   # teal — J wave / early repolarization
         "T_peak":  "#66BB6A",
     }
     _LABELS = {
         "P_peak": "P peak",
+        "QRS_onset": "QRS onset",
         "Q_peak": "Q peak",  "S_peak": "S peak",
+        "QRS_offset": "J point",
         "J_peak": "J peak",
         "T_peak": "T peak",
     }
-    # Aliases expected by callers that reference WaveTemplateEditor.WAVE_COLORS etc.
+    # For the plots that draw these waves.
     WAVE_COLORS       = _COLS
     WAVE_SHORT_LABELS = _LABELS
     _GRAB_R_MS = 5.0   # grab radius (ms) for click-on-line
@@ -70,6 +117,7 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
         mean_beat: "Optional[np.ndarray]" = None,
         beat_time: "Optional[np.ndarray]" = None,
         beat_sd:   "Optional[np.ndarray]" = None,
+        intervals: "Optional[Any]"        = None,
     ) -> None:
         super().__init__(parent)
         self.title("Wave Template Editor")
@@ -79,6 +127,11 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
 
         self._template  = template
         self._parent_app = parent
+        # This recording's delineation (for "Refine from delineation").
+        self._intervals = intervals
+        # Provenance of the windows being edited (applied with them).
+        self._src:    str = template.source
+        self._origin: str = template.origin
         self._saved:     bool                    = False
         self._drag_key:  "Optional[str]" = None
         self._drag_mode: str             = "center"  # "center" | "lo" | "hi"
@@ -93,8 +146,11 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
             self._sd = None
 
         # Working copy of landmarks (list so we can mutate in place)
+        # A template saved before QRS onset / offset existed lacks them: show
+        # (and save) the defaults so they can be adjusted.
         self._lm: "dict[str, list[float]]" = {
-            k: list(v) for k, v in template.landmarks.items()
+            k: list(v) for k, v in {**WaveTemplate.DEFAULTS,
+                                    **template.landmarks}.items()
         }
 
         self.columnconfigure(0, weight=1)
@@ -139,27 +195,68 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
         bar.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
 
         ctk.CTkButton(
-            bar, text="↺ Reset defaults", width=130, height=30,
-            fg_color=CARD, text_color=TEXT, font=FONT_SMALL,
+            bar,
+            text="↺ Reset defaults",
+            width=130,
             command=self._reset_defaults,
+            **button_style("secondary"),
         ).pack(side="left", padx=(0, 6))
 
         ctk.CTkButton(
-            bar, text="⚡ Auto-calibrate from mean beat", width=230, height=30,
-            fg_color=PURPLE_DARK, text_color="white", font=FONT_SMALL,
+            bar,
+            text="⚡ Auto-calibrate",
+            width=120,
             command=self._auto_calibrate,
+            **button_style("primary"),
+        ).pack(side="left", padx=(0, 6))
+
+        if self._intervals is not None:
+            ctk.CTkButton(
+                bar,
+                text="⟲ Refine from delineation",
+                width=170,
+                command=self._refine_from_intervals,
+                **button_style("secondary"),
+            ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            bar,
+            text="📂 Load…",
+            width=80,
+            command=self._load_file,
+            **button_style("secondary"),
         ).pack(side="left", padx=(0, 6))
 
         ctk.CTkButton(
-            bar, text="✗ Cancel", width=80, height=30,
-            fg_color=CARD, text_color=TEXT, font=FONT_SMALL,
+            bar,
+            text="💾 Save to file…",
+            width=110,
+            command=self._save_file,
+            **button_style("secondary"),
+        ).pack(side="left", padx=(0, 6))
+
+        ctk.CTkButton(
+            bar,
+            text="✗ Cancel",
+            width=80,
             command=self.destroy,
+            **button_style("secondary"),
         ).pack(side="right")
 
         ctk.CTkButton(
-            bar, text="✔ Save & Confirm", width=150, height=30,
-            fg_color=GREEN, text_color="white", font=FONT_SMALL,
-            command=self._save,
+            bar,
+            text="✔ Apply to this recording",
+            width=170,
+            command=self._apply,
+            **button_style("primary"),
+        ).pack(side="right", padx=(0, 6))
+
+        ctk.CTkButton(
+            bar,
+            text="Save as default template",
+            width=170,
+            command=self._save_default,
+            **button_style("secondary"),
         ).pack(side="right", padx=(0, 6))
 
     # ── Drawing ───────────────────────────────────────────────────────────
@@ -197,29 +294,14 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
         ax.set_xlim(float(self._bt[0]), float(self._bt[-1]))
         ax.set_xlabel("Time from R (ms)", fontsize=9)
         ax.set_ylabel("Amplitude (norm.)", fontsize=9)
-        src_note = f"  source={self._template.source}"
-        conf_note = "  ✓ confirmed" if self._template.confirmed else "  (not confirmed)"
-        ax.set_title(f"Wave Template{src_note}{conf_note}",
+        ax.set_title(f"Wave Template — {self._pending_template().provenance()}",
                      loc="left", fontsize=9, color=PLOT["muted"])
         self._canvas.draw_idle()
 
     # ── Drag interaction ─────────────────────────────────────────────────
 
     def _hit_test(self, x_ms: float) -> "tuple[Optional[str], str]":
-        best_key: "Optional[str]" = None
-        best_d   = float("inf")
-        best_mode = "center"
-        for key in self._KEYS:
-            if key not in self._lm:
-                continue
-            c, hw = self._lm[key]
-            for val, mode in [(c, "center"), (c - hw, "lo"), (c + hw, "hi")]:
-                d = abs(x_ms - val)
-                if d < best_d and d < self._GRAB_R_MS:
-                    best_d    = d
-                    best_key  = key
-                    best_mode = mode
-        return best_key, best_mode
+        return hit_landmark(self._lm, self._KEYS, x_ms, self._GRAB_R_MS)
 
     def _on_press(self, event: "Any") -> None:
         if event.inaxes is None or event.xdata is None or event.button != 1:
@@ -234,54 +316,162 @@ class WaveTemplateMiniEditor(ctk.CTkToplevel):
         key  = self._drag_key
         x    = float(event.xdata)
         c, hw = self._lm[key]
-        if self._drag_mode == "center":
-            self._lm[key][0] = round(x, 1)
-        elif self._drag_mode == "lo":
-            self._lm[key][1] = round(max(2.0, c - x), 1)
-        elif self._drag_mode == "hi":
-            self._lm[key][1] = round(max(2.0, x - c), 1)
+        self._lm[key] = list(dragged_landmark(c, hw, self._drag_mode, x))
+        self._mark_edited()
         self._draw()
 
     def _on_release(self, _event: "Any") -> None:
         self._drag_key = None
 
+    # ── Provenance ───────────────────────────────────────────────────────
+
+    def _pending_template(self) -> WaveTemplate:
+        """The windows on screen as a WaveTemplate (with their provenance)."""
+        wt = WaveTemplate()
+        wt.landmarks = {k: (float(v[0]), float(v[1])) for k, v in self._lm.items()}
+        wt.source, wt.origin = self._src, self._origin
+        wt.created_at = self._template.created_at if self._src == "saved-default" else ""
+        return wt
+
+    def _set_provenance(self, source: str, origin: str = "") -> None:
+        self._src, self._origin = source, origin
+
+    def _mark_edited(self) -> None:
+        """A hand edit: the provenance becomes "edited on this recording
+        (from <what was there before>)" -- kept once already edited."""
+        if self._src != "edited":
+            self._set_provenance("edited", self._pending_template().provenance())
+
     # ── Actions ──────────────────────────────────────────────────────────
 
     def _reset_defaults(self) -> None:
         self._lm = {k: list(v) for k, v in WaveTemplate.DEFAULTS.items()}
+        self._set_provenance("default")
         self._draw()
 
     def _auto_calibrate(self) -> None:
         tmp = WaveTemplate()
         tmp.calibrate_from_beat(self._bt, self._mb)
         self._lm = {k: list(v) for k, v in tmp.landmarks.items()}
+        self._set_provenance("auto-calibrated")
         self._draw()
 
-    def _save(self) -> None:
-        self._template.landmarks = {  # type: ignore[assignment]
-            k: (float(v[0]), float(v[1])) for k, v in self._lm.items()
-        }
-        self._template.confirmed  = True
-        self._template.source     = "user-confirmed"
+    def _refine_from_intervals(self) -> None:
+        """Centre the P / Q / S / T windows on this recording's delineation
+        (the explicit replacement of the old silent auto-update)."""
+        from ecg.core.analysis import refine_template_from_intervals
+        new = (refine_template_from_intervals(self._intervals, self._pending_template())
+               if self._intervals is not None else None)
+        if new is None:
+            messagebox.showinfo(
+                "Not enough beats",
+                "Refining needs at least 10 fully delineated beats — Measure "
+                "intervals first.", parent=self)
+            return
+        self._lm = {k: list(v) for k, v in {**WaveTemplate.DEFAULTS,
+                                            **new.landmarks}.items()}
+        self._set_provenance("refined")
+        self._draw()
+
+    def _load_file(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self, title="Load wave template",
+            filetypes=[("Wave template", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
         try:
-            self._template.save()
+            wt = WaveTemplate.load(path)
+        except Exception as exc:
+            messagebox.showwarning("Load failed", str(exc), parent=self)
+            return
+        self._lm = {k: list(v) for k, v in {**WaveTemplate.DEFAULTS,
+                                            **wt.landmarks}.items()}
+        self._set_provenance(wt.source, wt.origin)
+        self._draw()
+        problems = wt.plausibility_problems()
+        if problems:
+            # Loaded anyway (the user picked it and sees it on the beat),
+            # but these windows would not be accepted as the saved default.
+            messagebox.showwarning(
+                "Check these windows",
+                "These search windows look implausible for a mouse beat:\n\n"
+                + "\n".join(f"• {p}" for p in problems)
+                + "\n\nCheck them on the beat before applying.", parent=self)
+
+    def _save_file(self) -> None:
+        path = filedialog.asksaveasfilename(
+            parent=self, title="Save wave template", defaultextension=".json",
+            filetypes=[("Wave template", "*.json")])
+        if not path:
+            return
+        try:
+            self._pending_template().save(path)
         except Exception as exc:
             messagebox.showwarning("Save failed", str(exc), parent=self)
-            return
+
+    def _commit(self) -> None:
+        """Apply the windows (and their provenance) to this recording's
+        template, in place. Writes nothing to disk."""
+        pending = self._pending_template()
+        self._template.landmarks  = pending.landmarks
+        self._template.source     = pending.source
+        self._template.origin     = pending.origin
+        self._template.created_at = pending.created_at
+        self._template.confirmed  = True
         if hasattr(self._parent_app, "_wave_template"):
             self._parent_app._wave_template = self._template
         self._saved = True
+
+    def _apply(self) -> None:
+        self._commit()
         messagebox.showinfo(
-            "Template saved",
-            "Template saved and confirmed.\n"
-            "Next delineation run will use these search windows.",
+            "Template applied",
+            "Template applied to this recording (kept in its session).\n"
+            "Measure intervals again to use these search windows.",
             parent=self,
         )
         self.destroy()
 
+    def _recording_name(self) -> str:
+        """File name of the recording being edited ('' when none)."""
+        fp = getattr(self._parent_app, "_filepath", None)
+        return os.path.basename(str(fp)) if fp else ""
 
-# Keep old name as alias so any leftover references don't break
-WaveTemplateEditor = WaveTemplateMiniEditor
+    def _save_default(self) -> None:
+        """Explicit: make these windows the default for recordings opened
+        from now on (recordings already analysed keep their own). Windows
+        the startup check would reject are not saved as the default."""
+        problems = self._pending_template().plausibility_problems()
+        if problems:
+            messagebox.showwarning(
+                "Not saved as default",
+                "These search windows look implausible for a mouse beat, so "
+                "they would not be used as the default template:\n\n"
+                + "\n".join(f"• {p}" for p in problems)
+                + "\n\nAdjust them (or Apply to this recording only).",
+                parent=self)
+            return
+        if not messagebox.askyesno(
+                "Save as default template",
+                "Use these search windows as the default template for "
+                "recordings opened from now on?\n\nRecordings already "
+                "analysed and saved sessions keep their own template.",
+                parent=self):
+            return
+        try:
+            self._pending_template().save(recording=self._recording_name())
+        except Exception as exc:
+            messagebox.showwarning("Save failed", str(exc), parent=self)
+            return
+        self._commit()
+        messagebox.showinfo(
+            "Template saved",
+            "Saved as the default template and applied to this recording.\n"
+            "Measure intervals again to use these search windows.",
+            parent=self,
+        )
+        self.destroy()
+
 
 # ════════════════════════════════════════════════════════════
 #  SESSION RESULT SERIALISATION HELPERS

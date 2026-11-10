@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import colorsys
 import dataclasses
+import functools
 import json
 import logging
-import pickle
 import sys
 import types as _types
 from pathlib import Path
@@ -80,6 +80,10 @@ class ThemeConfig:
             TEXT="#1B222C", MUTED="#5B6472", LIGHT="#939DA8",
             RED="#D64545",  BLUE="#2D6CDF", GREEN="#2E9E5B", ORANGE="#E08A2A",
             plot_signal="#2D6CDF", plot_rpeak="#2E9E5B", plot_filtered="#6A1B9A",
+            # Mockup tokens: context strip, hairlines inside cards, the
+            # selected tab's text, warning text.
+            STRIP_BG="#EEF3FC", HAIRLINE="#EEF0F3", ACCENT_TEXT="#1344A8",
+            WARN_TEXT="#9A5A12", STRIP_EDGE="#9DB6E8",
             description="Clean, modern, restrained — the app's default look",
         ),
         "Dark": dict(
@@ -89,6 +93,8 @@ class ThemeConfig:
             TEXT="#E7EAEE", MUTED="#9BA5B2", LIGHT="#656E79",
             RED="#E5695F",  BLUE="#5B8DF5", GREEN="#4CBA7C", ORANGE="#E8A552",
             plot_signal="#5B8DF5", plot_rpeak="#4CBA7C", plot_filtered="#9125D2",
+            STRIP_BG="#1C2635", HAIRLINE="#232831", ACCENT_TEXT="#8FB2F8",
+            WARN_TEXT="#E8B36A", STRIP_EDGE="#3E5A85",
             description="The same design, low-light",
         ),
     }
@@ -118,8 +124,15 @@ class ThemeConfig:
         self._colors     = dict(preset)
         self.is_dark     = preset["is_dark"]
 
-    def font(self, size: int, bold: bool = False) -> "tuple[str, int, str]":
+    def font(self, size: int, bold: "bool | str" = False) -> "tuple[str, int, str]":
+        """bold: False, True, or "semibold" (the mockup's weight 600: Tk
+        has no numeric weights, so it is the family's Semibold face)."""
         scaled = max(8, int(round(size * self.font_scale)))
+        if bold == "semibold":
+            semi = _semibold_family(self.font_family)
+            if semi:
+                return (semi, scaled, "normal")
+            bold = True
         return (self.font_family, scaled, "bold" if bold else "normal")
 
     def mono_font(self, size: int = 12) -> "tuple[str, int, str]":
@@ -146,9 +159,8 @@ class ThemeConfig:
     def load(cls) -> "ThemeConfig":
         """Load theme from ``THEME_PATH`` (JSON).
 
-        Falls back to defaults on any error.  If only a legacy ``.pkl`` file
-        exists (Python upgrade scenario), it is migrated to JSON on first run
-        and then deleted so the warning never appears again.
+        Falls back to defaults on any error. Legacy pickle themes are not
+        deserialised because pickle can execute arbitrary code during loading.
         """
         obj = cls()
 
@@ -181,23 +193,28 @@ class ThemeConfig:
                     "Delete %s to suppress this message.", exc, THEME_PATH)
                 return obj
 
-        # ── Fallback: migrate legacy pickle on first run after upgrade ──────
+        # Preserve old data but never execute pickle payloads during startup.
         if _THEME_PATH_LEGACY.exists():
-            try:
-                with open(_THEME_PATH_LEGACY, "rb") as fh:
-                    data = pickle.load(fh)
-                obj.__dict__.update(data)
-                obj.save()                    # write JSON
-                _THEME_PATH_LEGACY.unlink()   # remove old pickle
-                log.info("Theme migrated from pickle → JSON (%s)", THEME_PATH)
-            except Exception as exc:
-                log.warning("Legacy theme migration failed (%s) — using defaults", exc)
+            log.warning(
+                "Ignoring legacy pickle theme at %s; set the theme again to "
+                "save it in JSON", _THEME_PATH_LEGACY)
 
         return obj
 
 
+@functools.lru_cache(maxsize=1)
 def _detect_system_font() -> str:
-    """Pick the best available UI font for the current platform."""
+    """Pick the best available UI font for the current platform.
+
+    Memoized: font_family is deliberately NOT persisted to THEME_PATH (see
+    the comment in ThemeConfig.load()), so without this cache every
+    ThemeConfig() -- including one built fresh each time the Theme dialog
+    opens (dialogs.py's `self._working = ThemeConfig.load()`) -- spins up
+    and tears down a whole second Tk() interpreter purely to enumerate
+    fonts again. Caching in-process (not on disk) keeps the "always
+    re-detect, never carry forward a stale value" intent while paying the
+    cost once per run instead of once per ThemeConfig().
+    """
     import sys
     import tkinter as _tk
     import tkinter.font as _tkf
@@ -216,6 +233,23 @@ def _detect_system_font() -> str:
     except Exception as e:
         log.warning("Font detection failed: %s", e)
     return "Helvetica"
+
+
+@functools.lru_cache(maxsize=4)
+def _semibold_family(family: str) -> str:
+    """The Semibold face of *family* ("Segoe UI" -> "Segoe UI Semibold"), or
+    "" when the system has none."""
+    import tkinter as _tk
+    import tkinter.font as _tkf
+    try:
+        root = _tk.Tk(); root.withdraw()
+        available = set(_tkf.families(root)); root.destroy()
+    except Exception:
+        return ""
+    for name in (f"{family} Semibold", f"{family} SemiBold", f"{family} Semibol"):
+        if name in available:
+            return name
+    return ""
 
 
 # Active theme singleton (loaded from disk or defaults)
@@ -275,6 +309,14 @@ ORANGE  = THEME._colors.get("ORANGE",  "#FF9500")
 MUTED   = THEME._colors.get("MUTED",   "#6E6E73")
 LIGHT   = THEME._colors.get("LIGHT",   "#AEAEB2")
 TEXT    = THEME._colors.get("TEXT",    "#1D1D1F")
+# Mockup surface tokens. A theme file saved before they existed has no such
+# keys: fall back on the current preset's values.
+_PRESET_OF = lambda tc: ThemeConfig.PRESETS["Dark" if tc.is_dark else "Light"]  # noqa: E731
+STRIP_BG    = THEME._colors.get("STRIP_BG",    _PRESET_OF(THEME)["STRIP_BG"])
+HAIRLINE    = THEME._colors.get("HAIRLINE",    _PRESET_OF(THEME)["HAIRLINE"])
+ACCENT_TEXT = THEME._colors.get("ACCENT_TEXT", _PRESET_OF(THEME)["ACCENT_TEXT"])
+WARN_TEXT   = THEME._colors.get("WARN_TEXT",   _PRESET_OF(THEME)["WARN_TEXT"])
+STRIP_EDGE  = THEME._colors.get("STRIP_EDGE",  _PRESET_OF(THEME)["STRIP_EDGE"])
 
 # ── Extended colour palette (hover states, domain-specific accents) ──────
 # Base (light-mode) hex values -- dark-mode variants are derived
@@ -408,6 +450,129 @@ SPACE_XS = 2
 SPACE_S  = 4
 SPACE_M  = 8
 SPACE_L  = 12
+SPACE_XL = 16
+
+# ── Control and surface sizes, from the mockup ───────────────────────────
+BTN_H       = 36    # every button
+BTN_H_LG    = 40    # header commands, mode pills
+TAB_H       = 44    # tab heads
+RADIUS      = 6     # buttons, entries, chips, plot frames, stat cells
+CARD_RADIUS = 8     # cards
+CARD_PAD    = 16    # inside a card (the mockup's padding)
+PAGE_PAD_X  = 24    # page margin left / right of the cards
+PAGE_PAD_Y  = 16    # above the first card (the mockup's 20, less on a laptop)
+PAGE_GAP    = 12    # between cards (the mockup's 16, less on a laptop)
+
+
+def button_style(kind: str = "secondary", *, large: bool = False, **overrides) -> "dict":
+    """CTkButton keyword arguments for the mockup's button kinds, read from
+    the live palette (call it at build time, after any theme change):
+
+    - "primary":   blue fill, white text (one per area: the main action);
+    - "secondary": white with a 1 px #C7CDD4 border, dark text;
+    - "pill_on" / "pill_off": a selected / unselected segment (rounded ends);
+    - "link":      no fill, blue text (inline actions);
+    - "danger":    red fill, white text.
+
+    Height is BTN_H (BTN_H_LG with large=True or for pills), scaled with the
+    fonts. Callers pass width/command/text beside it; any key given in
+    *overrides* (a taller height, another font) replaces the style's.
+    """
+    h = int(round((BTN_H_LG if large or kind.startswith("pill") else BTN_H)
+                  * THEME.font_scale))
+    base = dict(height=h, corner_radius=RADIUS, border_width=0, font=FONT_BTN_SEC,
+                text_color_disabled=LIGHT)
+    if kind == "primary":
+        base.update(fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
+                    font=FONT_BTN_PRIMARY)
+    elif kind == "danger":
+        base.update(fg_color=RED, hover_color=RED_DARK, text_color="white")
+    elif kind == "pill_on":
+        base.update(fg_color=BLUE, hover_color=BLUE_HOVER, text_color="white",
+                    border_width=1, border_color=BLUE, corner_radius=h // 2,
+                    font=FONT_CARD_TITLE)
+    elif kind == "pill_off":
+        base.update(fg_color=CARD, hover_color=BG, text_color=TEXT, border_width=1,
+                    border_color=BORDER2, corner_radius=h // 2, font=FONT_BODY)
+    elif kind == "link":
+        base.update(fg_color="transparent", hover_color=BG, text_color=BLUE)
+    else:
+        base.update(fg_color=CARD, hover_color=BG, text_color=TEXT, border_width=1,
+                    border_color=BORDER2)
+    base.update(overrides)
+    return base
+
+
+def disabled_style() -> "dict":
+    """The look of a disabled button of any kind: no fill colour that reads
+    as clickable, a light border, light text."""
+    return dict(fg_color=BG, hover_color=BG, text_color=LIGHT, text_color_disabled=LIGHT,
+                border_width=1, border_color=BORDER)
+
+
+def input_style(*, strip: bool = False, **overrides) -> "dict":
+    """CTkEntry / CTkComboBox / CTkOptionMenu-compatible keyword arguments for
+    an input: white, 1 px #C7CDD4 border, 6 px corners, BTN_H tall. With
+    strip=True, the context strip's compact bold entry (28 px, blue edge)."""
+    if strip:
+        return dict(height=int(round(28 * THEME.font_scale)), corner_radius=4,
+                    border_width=1, border_color=STRIP_EDGE, fg_color=CARD,
+                    text_color=TEXT, placeholder_text_color=MUTED, font=THEME.font(12, True))
+    base = dict(height=int(round(BTN_H * THEME.font_scale)), corner_radius=RADIUS,
+                border_width=1, border_color=BORDER2, fg_color=CARD, text_color=TEXT,
+                placeholder_text_color=LIGHT, font=FONT_BODY)
+    base.update(overrides)
+    return base
+
+
+def combo_style(**overrides) -> "dict":
+    """CTkComboBox keyword arguments: the mockup's white select, its list in
+    the same colours."""
+    base = input_style()
+    base.pop("placeholder_text_color")     # an entry's option, not a combobox's
+    # CTkComboBox paints its arrow area over the border: a light grey tab
+    # keeps the outline whole and the arrow visible.
+    base.update(button_color=BORDER, button_hover_color=BORDER2, dropdown_fg_color=CARD,
+                dropdown_hover_color=BG, dropdown_text_color=TEXT, dropdown_font=FONT_BODY)
+    base.update(overrides)
+    return base
+
+
+def chip_style(active: bool = False) -> "dict":
+    """A rounded chip of the detection bar (Filters, Annotations, Pacing):
+    white bordered, or the strip blue with a blue edge while it is open /
+    applies something."""
+    h = int(round(BTN_H * THEME.font_scale))
+    if active:
+        return dict(height=h, corner_radius=h // 2, border_width=1, border_color=BLUE,
+                    fg_color=STRIP_BG, hover_color=STRIP_BG, text_color=ACCENT_TEXT,
+                    font=FONT_BTN_SEC)
+    return dict(height=h, corner_radius=h // 2, border_width=1, border_color=BORDER2,
+                fg_color=CARD, hover_color=BG, text_color=TEXT, font=FONT_BODY)
+
+
+def toggle_style(on: bool, *, warn: bool = False) -> "dict":
+    """The colours of an on/off button: off is a secondary button; on is the
+    strip blue with a blue edge (the mockup's open Filters chip), or an
+    orange fill for a mode that changes what a click does (warn=True)."""
+    if on and warn:
+        return dict(fg_color=ORANGE, hover_color=ORANGE_DEEP, text_color="white",
+                    border_width=1, border_color=ORANGE)
+    if on:
+        return dict(fg_color=STRIP_BG, hover_color=STRIP_BG, text_color=ACCENT_TEXT,
+                    border_width=1, border_color=BLUE)
+    return dict(fg_color=CARD, hover_color=BG, text_color=TEXT, border_width=1,
+                border_color=BORDER2)
+
+
+def card_style() -> "dict":
+    """CTkFrame keyword arguments for a card: white, 1 px border, 8 px corners."""
+    return dict(fg_color=CARD, corner_radius=CARD_RADIUS, border_width=1, border_color=BORDER)
+
+
+def cell_style() -> "dict":
+    """A stat cell inside a card: the page grey, 6 px corners, no border."""
+    return dict(fg_color=BG, corner_radius=RADIUS, border_width=0)
 
 
 def _make_plot_theme(tc: "ThemeConfig") -> "dict[str, str]":
@@ -460,14 +625,10 @@ def apply_theme_config(tc: "ThemeConfig") -> None:
     """
     global BG, PANEL, CARD, BORDER, BORDER2, RED, BLUE, GREEN, ORANGE
     global MUTED, LIGHT, TEXT, PLOT
+    global STRIP_BG, HAIRLINE, ACCENT_TEXT, WARN_TEXT, STRIP_EDGE
     global COLOR_PRIMARY, COLOR_PRIMARY_HOVER, COLOR_SUCCESS, COLOR_SUCCESS_HOVER
     global COLOR_WARNING, COLOR_WARNING_HOVER, COLOR_DANGER, COLOR_DANGER_HOVER
     global COLOR_SECONDARY, COLOR_SECONDARY_HOVER
-    global FONT_TITLE, FONT_SECTION_HDR, FONT_LABEL, FONT_SMALL, FONT_BODY, FONT_MONO
-    global FONT_KPI_VALUE, FONT_KPI_LABEL, FONT_KPI_HERO, FONT_BTN_PRIMARY, FONT_BTN_SEC
-    global FONT_SIDEBAR_HDR
-    global FONT_MICRO, FONT_HINT, FONT_BADGE, FONT_SUBSECTION, FONT_CARD_TITLE
-    global FONT_DIALOG_TITLE
 
     BG      = tc._colors.get("BG",      BG)
     PANEL   = tc._colors.get("PANEL",   PANEL)
@@ -481,6 +642,11 @@ def apply_theme_config(tc: "ThemeConfig") -> None:
     MUTED   = tc._colors.get("MUTED",   MUTED)
     LIGHT   = tc._colors.get("LIGHT",   LIGHT)
     TEXT    = tc._colors.get("TEXT",    TEXT)
+    STRIP_BG    = tc._colors.get("STRIP_BG",    _PRESET_OF(tc)["STRIP_BG"])
+    HAIRLINE    = tc._colors.get("HAIRLINE",    _PRESET_OF(tc)["HAIRLINE"])
+    ACCENT_TEXT = tc._colors.get("ACCENT_TEXT", _PRESET_OF(tc)["ACCENT_TEXT"])
+    WARN_TEXT   = tc._colors.get("WARN_TEXT",   _PRESET_OF(tc)["WARN_TEXT"])
+    STRIP_EDGE  = tc._colors.get("STRIP_EDGE",  _PRESET_OF(tc)["STRIP_EDGE"])
 
     # Extended palette must be recomputed before the semantic aliases below,
     # which reference BLUE_HOVER/GREEN_DARK/ORANGE_DARK/RED_DARK from it.
@@ -513,57 +679,116 @@ def apply_theme_config(tc: "ThemeConfig") -> None:
 
     ctk.set_appearance_mode("dark" if tc.is_dark else "light")
 
-    FONT_TITLE        = tc.font(15, bold=True)
-    FONT_SECTION_HDR  = tc.font(12, bold=True)
-    FONT_LABEL        = tc.font(12)
-    FONT_SMALL        = tc.font(11)
-    FONT_BODY         = tc.font(12)
-    FONT_MONO         = tc.mono_font(12)
-    # Extended scale-aware font tokens
-    FONT_KPI_VALUE    = tc.font(14, bold=True)
-    FONT_KPI_LABEL    = tc.font(9)
-    FONT_KPI_HERO     = tc.font(20, bold=True)
-    FONT_BTN_PRIMARY  = tc.font(13, bold=True)
-    FONT_BTN_SEC      = tc.font(11)
-    FONT_SIDEBAR_HDR  = tc.font(11, bold=True)
-    FONT_MICRO        = tc.font(8)
-    FONT_HINT         = tc.font(10)
-    FONT_BADGE        = tc.font(9,  bold=True)
-    FONT_SUBSECTION   = tc.font(10, bold=True)
-    FONT_CARD_TITLE   = tc.font(12, bold=True)
-    FONT_DIALOG_TITLE = tc.font(18, bold=True)
+    globals().update(_build_fonts(tc))
 
     _sync_to_submodules()
 
 
-def make_font(size: int = 12, bold: bool = False) -> "tuple[str, int, str]":
+def make_font(size: int = 12, bold: "bool | str" = False) -> "tuple[str, int, str]":
     """Return a font tuple scaled by the active THEME.font_scale."""
     return THEME.font(size, bold)
 
 
-FONT_TITLE        = make_font(15, bold=True)
-FONT_SECTION_HDR  = make_font(12, bold=True)
-FONT_LABEL        = make_font(12)
-FONT_SMALL        = make_font(11)
-FONT_BODY         = make_font(12)
-FONT_MONO         = THEME.mono_font(12)
-# Extended scale-aware font tokens
-FONT_KPI_VALUE    = make_font(14, bold=True)
-FONT_KPI_LABEL    = make_font(9)
-FONT_KPI_HERO     = make_font(20, bold=True)  # one emphasized number in a stat grid
-FONT_BTN_PRIMARY  = make_font(13, bold=True)
-FONT_BTN_SEC      = make_font(11)
-FONT_SIDEBAR_HDR  = make_font(11, bold=True)
-# Tokens supplémentaires — couvrent les usages réels de make_font(N) trouvés
-# dans app.py qui contournaient la hiérarchie nommée existante (79 appels
-# bruts avant cette extension). Tailles choisies pour matcher exactement
-# l'usage observé, sans changer aucun rendu visuel existant.
-FONT_MICRO        = make_font(8)              # unités d'axes, libellés ultra-discrets
-FONT_HINT         = make_font(10)             # texte d'aide / statut sous un bouton
-FONT_BADGE        = make_font(9,  bold=True)  # badges courts (sévérité, tag d'état)
-FONT_SUBSECTION   = make_font(10, bold=True)  # en-tête de sous-bloc (sous FONT_SIDEBAR_HDR)
-FONT_CARD_TITLE   = make_font(12, bold=True)  # titre de carte (alias sémantique de FONT_SECTION_HDR)
-FONT_DIALOG_TITLE = make_font(18, bold=True)  # en-tête de dialogue pleine page (ex. Appearance Settings)
+# ── Type scale, from the mockup (Segoe UI; sizes in px, × font_scale) ─────
+# Weights: the mockup's 700 is bold, its 600 Segoe UI Semibold.
+_FONT_SPECS: "dict[str, tuple[int, bool | str]]" = {
+    "FONT_TITLE":        (15, True),        # app name in the header
+    "FONT_SECTION_HDR":  (12, True),        # card titles (uppercase, muted)
+    "FONT_LABEL":        (12, False),       # labels, context strip, chips
+    "FONT_SMALL":        (11, False),       # captions, legends, notes
+    "FONT_BODY":         (13, False),       # body text, tables, tab names
+    "FONT_KPI_VALUE":    (18, "semibold"),  # stat-cell values
+    "FONT_KPI_LABEL":    (11, False),       # stat-cell / KPI labels
+    "FONT_KPI_HERO":     (24, True),        # KPI tile values
+    "FONT_SCORE":        (40, True),        # the signal-quality score
+    "FONT_BTN_PRIMARY":  (13, "semibold"),  # buttons (all weight 600)
+    "FONT_BTN_SEC":      (13, "semibold"),
+    "FONT_SIDEBAR_HDR":  (12, True),        # panel titles (uppercase, muted)
+    "FONT_MICRO":        (10, False),
+    "FONT_HINT":         (11, False),       # help / status text
+    "FONT_BADGE":        (10, True),
+    "FONT_SUBSECTION":   (11, True),
+    "FONT_CARD_TITLE":   (13, True),        # bold body: selected tab, row heads
+    "FONT_DIALOG_TITLE": (18, True),
+}
+
+
+def _build_fonts(tc: "ThemeConfig") -> "dict[str, tuple[str, int, str]]":
+    fonts = {name: tc.font(size, weight) for name, (size, weight) in _FONT_SPECS.items()}
+    fonts["FONT_MONO"] = tc.mono_font(12)
+    return fonts
+
+
+# Type-only declarations (set by _build_fonts below), as for the palette.
+FONT_TITLE: "tuple[str, int, str]"; FONT_SECTION_HDR: "tuple[str, int, str]"
+FONT_LABEL: "tuple[str, int, str]"; FONT_SMALL: "tuple[str, int, str]"
+FONT_BODY: "tuple[str, int, str]"; FONT_MONO: "tuple[str, int, str]"
+FONT_KPI_VALUE: "tuple[str, int, str]"; FONT_KPI_LABEL: "tuple[str, int, str]"
+FONT_KPI_HERO: "tuple[str, int, str]"; FONT_SCORE: "tuple[str, int, str]"
+FONT_BTN_PRIMARY: "tuple[str, int, str]"; FONT_BTN_SEC: "tuple[str, int, str]"
+FONT_SIDEBAR_HDR: "tuple[str, int, str]"; FONT_MICRO: "tuple[str, int, str]"
+FONT_HINT: "tuple[str, int, str]"; FONT_BADGE: "tuple[str, int, str]"
+FONT_SUBSECTION: "tuple[str, int, str]"; FONT_CARD_TITLE: "tuple[str, int, str]"
+FONT_DIALOG_TITLE: "tuple[str, int, str]"
+globals().update(_build_fonts(THEME))
+
+_SYNC_COLOUR_NAMES = (
+    "BG", "PANEL", "CARD", "BORDER", "BORDER2",
+    "RED", "BLUE", "GREEN", "ORANGE", "MUTED", "LIGHT", "TEXT", "PLOT",
+    "STRIP_BG", "HAIRLINE", "ACCENT_TEXT", "WARN_TEXT", "STRIP_EDGE",
+    "BLUE_DARK", "BLUE_HOVER", "BLUE_MID", "BLUE_DEEP",
+    "PURPLE", "PURPLE_DARK", "PURPLE_LIGHT", "PINK", "TEAL", "TEAL_DARK", "CYAN", "CYAN_BRIGHT",
+    "GREEN_DARK", "GREEN_MID", "ORANGE_DARK", "ORANGE_DEEP",
+    "AMBER", "AMBER_DARK", "RED_DARK", "RED_MID", "RED_LIGHT",
+    "CORAL", "NAVY", "GRAY", "GRAY_LIGHT",
+    # Semantic action-colour tokens (rationalised palette, UI redesign)
+    "COLOR_PRIMARY", "COLOR_PRIMARY_HOVER", "COLOR_SUCCESS", "COLOR_SUCCESS_HOVER",
+    "COLOR_WARNING", "COLOR_WARNING_HOVER", "COLOR_DANGER", "COLOR_DANGER_HOVER",
+    "COLOR_SECONDARY", "COLOR_SECONDARY_HOVER",
+    "ARTIFACT_TYPE_COLOR",
+)
+_SYNC_FONT_NAMES = (
+    "FONT_TITLE", "FONT_SECTION_HDR", "FONT_LABEL", "FONT_SMALL",
+    "FONT_BODY", "FONT_MONO", "FONT_KPI_VALUE", "FONT_KPI_LABEL", "FONT_KPI_HERO",
+    "FONT_BTN_PRIMARY", "FONT_BTN_SEC", "FONT_SIDEBAR_HDR",
+    "FONT_MICRO", "FONT_HINT", "FONT_BADGE", "FONT_SUBSECTION", "FONT_CARD_TITLE",
+    "FONT_DIALOG_TITLE", "FONT_SCORE",
+)
+# Every module below does `from ecg.ui.theme import BG, PANEL, ...` at
+# import time, which copies the value once -- when apply_theme_config()
+# rebinds these globals here, those copies go stale unless re-synced.
+# Names are the fully-qualified dotted paths under the ecg.* package
+# (matching sys.modules keys) since the reorg out of the old flat
+# module layout; a bare "sidebar" or "app" would no longer match
+# anything in sys.modules and this loop would silently become a no-op
+# again (that exact bug -- a stale pre-package-move name list -- is why
+# this function was a no-op for a while before the reorg too).
+_SYNC_MODULES = (
+    "ecg.ui.app", "ecg.ui.popover", "ecg.ui.plots", "ecg.ui.dialogs",
+    "ecg.io.export", "ecg.core.models", "ecg.core.detection",
+    "ecg.io.loaders", "ecg.core.analysis", "ecg.ui.wave_editor",
+    # Controller modules extracted from app.py -- each imports its own
+    # subset of colour/font names at module scope, so each needs the
+    # same re-sync or its colours freeze at whatever theme was active
+    # when it was first imported (the same bug this function exists to
+    # fix, just introduced by any new sibling module going forward).
+    "ecg.ui.navigation_controller", "ecg.ui.export_controller",
+    "ecg.ui.plot_controller", "ecg.ui.session_controller",
+    "ecg.ui.detection_controller", "ecg.ui.signal_controller",
+    "ecg.ui.analysis_controller",
+    # New in the UI redesign (Phase 0) -- same requirement as every
+    # module above: it imports colour/font names at module scope.
+    "ecg.ui.widgets",
+    # The mixin modules ecg.ui.app was split into -- same requirement.
+    "ecg.ui.app_state_props", "ecg.ui.app_header_menus", "ecg.ui.app_toolbar",
+    "ecg.ui.app_detection_bar", "ecg.ui.app_async", "ecg.ui.app_helpers",
+    "ecg.ui.app_delegates", "ecg.ui.params_dialog", "ecg.ui.compare_segments",
+    "ecg.ui.poincare_figure", "ecg.ui.group_figure",
+    "ecg.ui.tab_detection", "ecg.ui.tab_hrv", "ecg.ui.tab_time_course", "ecg.ui.tab_events",
+    "ecg.ui.tab_morphology", "ecg.ui.tab_report",
+    "ecg.ui.tabbar", "ecg.ui.context_strip",
+)
+
 
 def _sync_to_submodules() -> None:
     """Push updated colour/font globals into all already-imported ecg.ui.* modules.
@@ -574,57 +799,10 @@ def _sync_to_submodules() -> None:
     copied names so every submodule always sees the current theme without
     needing a full reimport.
     """
-    _colour_names = (
-        "BG", "PANEL", "CARD", "BORDER", "BORDER2",
-        "RED", "BLUE", "GREEN", "ORANGE", "MUTED", "LIGHT", "TEXT", "PLOT",
-        "BLUE_DARK", "BLUE_HOVER", "BLUE_MID", "BLUE_DEEP",
-        "PURPLE", "PURPLE_DARK", "PURPLE_LIGHT", "PINK", "TEAL", "TEAL_DARK", "CYAN", "CYAN_BRIGHT",
-        "GREEN_DARK", "GREEN_MID", "ORANGE_DARK", "ORANGE_DEEP",
-        "AMBER", "AMBER_DARK", "RED_DARK", "RED_MID", "RED_LIGHT",
-        "CORAL", "NAVY", "GRAY", "GRAY_LIGHT",
-        # Semantic action-colour tokens (rationalised palette, UI redesign)
-        "COLOR_PRIMARY", "COLOR_PRIMARY_HOVER", "COLOR_SUCCESS", "COLOR_SUCCESS_HOVER",
-        "COLOR_WARNING", "COLOR_WARNING_HOVER", "COLOR_DANGER", "COLOR_DANGER_HOVER",
-        "COLOR_SECONDARY", "COLOR_SECONDARY_HOVER",
-        "ARTIFACT_TYPE_COLOR",
-    )
-    _font_names = (
-        "FONT_TITLE", "FONT_SECTION_HDR", "FONT_LABEL", "FONT_SMALL",
-        "FONT_BODY", "FONT_MONO", "FONT_KPI_VALUE", "FONT_KPI_LABEL", "FONT_KPI_HERO",
-        "FONT_BTN_PRIMARY", "FONT_BTN_SEC", "FONT_SIDEBAR_HDR",
-        "FONT_MICRO", "FONT_HINT", "FONT_BADGE", "FONT_SUBSECTION", "FONT_CARD_TITLE",
-        "FONT_DIALOG_TITLE",
-    )
-    # Every module below does `from ecg.ui.theme import BG, PANEL, ...` at
-    # import time, which copies the value once -- when apply_theme_config()
-    # rebinds these globals here, those copies go stale unless re-synced.
-    # Names are the fully-qualified dotted paths under the ecg.* package
-    # (matching sys.modules keys) since the reorg out of the old flat
-    # module layout; a bare "sidebar" or "app" would no longer match
-    # anything in sys.modules and this loop would silently become a no-op
-    # again (that exact bug -- a stale pre-package-move name list -- is why
-    # this function was a no-op for a while before the reorg too).
-    _submodule_names = (
-        "ecg.ui.app", "ecg.ui.sidebar", "ecg.ui.plots", "ecg.ui.dialogs",
-        "ecg.io.export", "ecg.core.models", "ecg.core.detection",
-        "ecg.io.loaders", "ecg.core.analysis", "ecg.ui.wave_editor",
-        # Controller modules extracted from app.py -- each imports its own
-        # subset of colour/font names at module scope, so each needs the
-        # same re-sync or its colours freeze at whatever theme was active
-        # when it was first imported (the same bug this function exists to
-        # fix, just introduced by any new sibling module going forward).
-        "ecg.ui.navigation_controller", "ecg.ui.export_controller",
-        "ecg.ui.plot_controller", "ecg.ui.session_controller",
-        "ecg.ui.detection_controller", "ecg.ui.signal_controller",
-        "ecg.ui.analysis_controller",
-        # New in the UI redesign (Phase 0) -- same requirement as every
-        # module above: it imports colour/font names at module scope.
-        "ecg.ui.widgets",
-    )
     _this = sys.modules[__name__]
-    _all  = _colour_names + _font_names
+    _all  = _SYNC_COLOUR_NAMES + _SYNC_FONT_NAMES
     for mod_name, mod in list(sys.modules.items()):
-        if mod_name in _submodule_names and mod is not _this and isinstance(mod, type(sys)):
+        if mod_name in _SYNC_MODULES and mod is not _this and isinstance(mod, type(sys)):
             for name in _all:
                 if hasattr(mod, name) and hasattr(_this, name):
                     try:

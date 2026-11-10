@@ -21,6 +21,18 @@ log = logging.getLogger("ecg")
 #  FILTERS
 # ════════════════════════════════════════════════════════════
 
+def bandpass_band(lo: float, hi: float, fs: float) -> "Optional[tuple[float, float]]":
+    """The (low, high) cut-offs in Hz ``bandpass`` actually applies at *fs*:
+    each normalised cut-off is clipped to [0.01, 0.99] × Nyquist. None when
+    the clipped band is degenerate (the filter is then skipped)."""
+    nyq = fs / 2
+    lo_norm = max(0.01, min(lo / nyq, 0.99))
+    hi_norm = max(0.01, min(hi / nyq, 0.99))
+    if lo_norm >= hi_norm:
+        return None
+    return lo_norm * nyq, hi_norm * nyq
+
+
 def bandpass(
     signal: np.ndarray,
     fs: float,
@@ -32,13 +44,60 @@ def bandpass(
     Returns the signal unchanged if the passband is degenerate.
     """
     nyq = fs / 2
-    lo_norm = max(0.01, min(lo / nyq, 0.99))
-    hi_norm = max(0.01, min(hi / nyq, 0.99))
-    if lo_norm >= hi_norm:
-        log.warning("bandpass: degenerate passband [%.4f, %.4f] — skipped", lo_norm, hi_norm)
+    band = bandpass_band(lo, hi, fs)
+    if band is None:
+        log.warning("bandpass: degenerate passband [%.4f, %.4f] — skipped",
+                    max(0.01, min(lo / nyq, 0.99)), max(0.01, min(hi / nyq, 0.99)))
         return signal
-    b, a = butter(3, [lo_norm, hi_norm], btype="band")  # type: ignore[misc]
+    b, a = butter(3, [band[0] / nyq, band[1] / nyq], btype="band")  # type: ignore[misc]
     return filtfilt(b, a, signal)
+
+
+def filter_description(params: "Optional[dict]", fs: "Optional[float]" = None) -> str:
+    """What the preview pipeline (SignalController.compute_preview_bundle)
+    applies for *params* (FilterParams.to_dict() keys: no_filter, lp / hp
+    = band-pass low / high cut-off in Hz, notch, clean_method) -- recorded
+    with the detection so the reports state the filters the peaks and
+    intervals were measured on, not the current widget values.
+
+    With *fs* the band-pass is the one ``bandpass`` really applies: cut-offs
+    clipped to [0.01, 0.99] × Nyquist are stated as clipped, and a
+    degenerate band as skipped."""
+    p = params or {}
+    if p.get("no_filter", False):
+        return "none (raw signal, z-score normalised)"
+    try:
+        lo = float(p.get("lp", MouseECG.BP_LO_HZ))
+        hi = float(p.get("hp", MouseECG.BP_HI_HZ))
+        band = bandpass_band(lo, hi, float(fs)) if fs else (lo, hi)
+        if band is None:
+            parts = [f"band-pass {lo:g}–{hi:g} Hz skipped (degenerate band "
+                     f"at fs = {float(fs):g} Hz)"]  # type: ignore[arg-type]
+        else:
+            elo, ehi = band
+            text = (f"Butterworth band-pass {elo:.4g}–{ehi:.4g} Hz "
+                    f"(order 3, zero-phase)")
+            if abs(elo - lo) > 1e-6 or abs(ehi - hi) > 1e-6:
+                text += (f" — {lo:g}–{hi:g} Hz entered, clipped to "
+                         f"[0.01, 0.99] × Nyquist at fs = {float(fs):g} Hz")  # type: ignore[arg-type]
+            parts = [text]
+    except (TypeError, ValueError, ZeroDivisionError):
+        parts = ["Butterworth band-pass (order 3, zero-phase)"]
+    if p.get("notch", p.get("notch_filter", False)):
+        parts.append("50 Hz notch (Q = 30)")
+    parts.append(f"NeuroKit2 ecg_clean ({p.get('clean_method', 'neurokit')})")
+    return " + ".join(parts)
+
+
+def recorded_filter_text(filter_text: "Optional[str]", no_filter_mode: bool) -> str:
+    """The filters line of the reports: the recorded *filter_text*
+    (filter_description at detection) or, when it was not recorded (e.g.
+    a signal prepared before it was), what *no_filter_mode* still tells."""
+    if filter_text:
+        return filter_text
+    if no_filter_mode:
+        return filter_description({"no_filter": True})
+    return "band-pass + NeuroKit2 ecg_clean (cut-offs not recorded)"
 
 
 def notch(signal: np.ndarray, fs: float, freq: float = 50.0, q: float = 30.0) -> np.ndarray:
@@ -108,6 +167,79 @@ def downsample_for_display(arr: np.ndarray, max_points: int = 6_000,
         out[0::2] = arr[first]
         out[1::2] = arr[second]
     return out
+
+
+def downsample_xy_for_display(
+    x: np.ndarray,
+    y: np.ndarray,
+    max_points: int = 6_000,
+) -> "tuple[np.ndarray, np.ndarray]":
+    """Gap-preserving counterpart of ``downsample_for_display`` for an
+    (x, y) line whose NaN entries are gaps -- e.g. a tachogram with its
+    excluded RR intervals set to NaN so matplotlib breaks the line there.
+
+    Each bucket emits its finite min and max at their own x (in x order),
+    plus a NaN point before, between or after them wherever the bucket has a
+    gap, so the drawn line still breaks at every gap. (downsample_for_display
+    on y alone returns the NaN itself as the bucket's extreme and drops the
+    bucket's values, and decimating x and y separately pairs extremes with
+    the wrong x.) Inputs of at most *max_points* come back unchanged; the
+    last, partial bucket is kept as is.
+    """
+    x = np.asarray(x, dtype=np.float64).flatten()
+    y = np.asarray(y, dtype=np.float64).flatten()
+    n = len(y)
+    if n <= max_points or len(x) != n:
+        return x, y
+    bucket = max(1, n // max(1, max_points // 3))
+    n_b    = n // bucket
+    n_trim = n_b * bucket
+    Y   = y[:n_trim].reshape(n_b, bucket)
+    X   = x[:n_trim].reshape(n_b, bucket)
+    gap = np.isnan(Y)
+    i_min  = np.where(gap, np.inf, Y).argmin(axis=1)
+    i_max  = np.where(gap, -np.inf, Y).argmax(axis=1)
+    first  = np.minimum(i_min, i_max)
+    second = np.maximum(i_min, i_max)
+    rows   = np.arange(n_b)
+    col    = np.arange(bucket)[None, :]
+    before  = (gap & (col < first[:, None])).any(axis=1)
+    between = (gap & (col > first[:, None]) & (col < second[:, None])).any(axis=1)
+    after   = (gap & (col > second[:, None])).any(axis=1)
+    x1, y1 = X[rows, first],  Y[rows, first]
+    x2, y2 = X[rows, second], Y[rows, second]
+    nan = np.full(n_b, np.nan)
+    # Five slots per bucket: [gap?] first [gap?] second [gap?]
+    xs = np.column_stack([x1, x1, x2, x2, x2])
+    ys = np.column_stack([nan, y1, nan, y2, nan])
+    keep = np.column_stack([before, np.ones(n_b, bool), between, second != first, after])
+    x_out = np.concatenate([xs[keep], x[n_trim:]])
+    y_out = np.concatenate([ys[keep], y[n_trim:]])
+    return x_out, y_out
+
+
+def break_line_at_gaps(
+    x:        np.ndarray,
+    y:        np.ndarray,
+    max_step: float,
+) -> "tuple[np.ndarray, np.ndarray]":
+    """(x, y) with a NaN point inserted wherever two consecutive x values
+    are more than *max_step* apart, so matplotlib breaks the line there
+    instead of drawing a straight segment across the hole -- e.g. the
+    rolling/epoch HRV timelines, whose skipped windows (too few valid RR
+    intervals) leave no row. The inserted x is the midpoint of the gap.
+    Unchanged when nothing is farther apart than *max_step*.
+    """
+    x = np.asarray(x, dtype=np.float64).flatten()
+    y = np.asarray(y, dtype=np.float64).flatten()
+    if len(x) < 2 or len(x) != len(y):
+        return x, y
+    gaps = np.flatnonzero(np.diff(x) > max_step)
+    if len(gaps) == 0:
+        return x, y
+    x_mid = (x[gaps] + x[gaps + 1]) / 2.0
+    return (np.insert(x, gaps + 1, x_mid),
+            np.insert(y, gaps + 1, np.full(len(gaps), np.nan)))
 
 
 def downsample_signal(
@@ -209,36 +341,3 @@ def sg_derivative_signal(
             delta=1.0 / fs,
             mode="interp",
         ), dtype=np.float64)
-
-
-def downsample_pair(sig: np.ndarray, time: np.ndarray,
-                    max_points: int = 6_000) -> "tuple[np.ndarray, np.ndarray]":
-    """Decimate signal/time pair for the overview by uniform stride."""
-    n = len(sig)
-    if n <= max_points:
-        return time, sig
-    stride = max(1, n // max_points)
-    return time[::stride], sig[::stride]
-
-
-def envelope_for_display(
-    sig: np.ndarray,
-    time: np.ndarray,
-    max_buckets: int = 3_000,
-) -> "tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]":
-    """Compute per-bucket min/max envelope for overview plots.
-
-    Returns (t_mid, mins, maxs, midline).
-    """
-    n = len(sig)
-    if n <= max_buckets:
-        return time, sig, sig, sig
-    bucket  = max(1, n // max_buckets)
-    n_trim  = (n // bucket) * bucket
-    sig_r   = sig[:n_trim].reshape(-1, bucket)
-    time_r  = time[:n_trim].reshape(-1, bucket)
-    t_mid   = time_r[:, bucket // 2]
-    mins    = sig_r.min(axis=1)
-    maxs    = sig_r.max(axis=1)
-    midline = sig_r.mean(axis=1)
-    return t_mid, mins, maxs, midline

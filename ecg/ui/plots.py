@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Optional, Any
 
+import numpy as np
 import matplotlib
 import matplotlib.figure
 from matplotlib.figure import Figure
@@ -87,6 +88,88 @@ def _on_theme_changed() -> None:
     _LABEL_FG = MUTED
 
 
+def fig_text_width_in(text: str, fontsize: float) -> float:
+    """Width (inches) of one line of *text* at *fontsize* pt in the current
+    matplotlib font (measured like ``wrap_fig_text``)."""
+    from matplotlib.backends.backend_agg import RendererAgg
+    from matplotlib.font_manager import FontProperties
+
+    if not text:
+        return 0.0
+    renderer = RendererAgg(1, 1, 72)
+    w = renderer.get_text_width_height_descent(text, FontProperties(size=fontsize),
+                                               ismath=False)[0]
+    return w / 72.0 / 0.98
+
+
+def ellipsize_fig_text(text: str, width_in: float, fontsize: float) -> str:
+    """*text* shortened in the middle ("…") so that it fits *width_in*
+    inches at *fontsize* pt; unchanged when it already fits. For a file
+    path in a one-line figure header (both ends -- the drive / top folder
+    and the file name -- stay readable)."""
+    if fig_text_width_in(text, fontsize) <= width_in:
+        return text
+    keep = len(text)
+    while keep > 2:
+        keep -= 1
+        head = (keep + 1) // 2
+        cand = f"{text[:head]}…{text[len(text) - (keep - head):]}"
+        if fig_text_width_in(cand, fontsize) <= width_in:
+            return cand
+    return "…"
+
+
+def wrap_fig_text(text: str, width_in: float, fontsize: float) -> str:
+    """*text* with line breaks so that no line is wider than *width_in*
+    inches at *fontsize* pt in the current matplotlib font (the one figure
+    text is drawn with; measured with an offscreen
+    Agg renderer at 72 dpi, i.e. in points; 2 % margin for hinting at other
+    resolutions). Long single-line figure footers were otherwise clipped by
+    the figure edge."""
+    from matplotlib.backends.backend_agg import RendererAgg
+    from matplotlib.font_manager import FontProperties
+
+    max_pt = max(1.0, width_in * 72.0 * 0.98)
+    renderer = RendererAgg(1, 1, 72)
+    prop = FontProperties(size=fontsize)
+
+    def _w(s: str) -> float:
+        if not s:
+            return 0.0
+        return renderer.get_text_width_height_descent(s, prop, ismath=False)[0]
+
+    lines: "list[str]" = []
+    cur = ""
+    for word in text.split(" "):
+        cand = f"{cur} {word}" if cur else word
+        if cur and _w(cand) > max_pt:
+            lines.append(cur)
+            cur = word
+        else:
+            cur = cand
+    if cur:
+        lines.append(cur)
+    return "\n".join(lines)
+
+
+def centered_ylim(values, center: "Optional[float]" = None,
+                  pad: float = 0.08) -> "Optional[tuple[float, float]]":
+    """Y limits centred on *center* (default: the mean of *values*), wide
+    enough for every finite value plus *pad* of the half-range: RR and HR
+    plots put their mean on the middle of the axis. None without a finite
+    value."""
+    v = np.asarray(values, dtype=float).ravel()
+    v = v[np.isfinite(v)]
+    if not len(v):
+        return None
+    c = float(np.mean(v)) if center is None or not np.isfinite(center) else float(center)
+    half = float(np.max(np.abs(v - c)))
+    if half <= 0:
+        half = max(abs(c) * 0.05, 1.0)
+    half *= 1.0 + pad
+    return c - half, c + half
+
+
 def style_axes(ax) -> None:
     """Apply the active PLOT theme to a matplotlib Axes object."""
     ax.set_facecolor(PLOT["axes"])
@@ -152,7 +235,8 @@ class CanvasSlot:
     # ── construction ───────────────────────────────────────────────────────
 
     def __init__(self, parent: Any, width: float = 6, height: float = 4,
-                 toolbar: bool = True, yscale_bar: bool = False) -> None:
+                 toolbar: bool = True, yscale_bar: bool = False,
+                 placeholder: str = "Run analysis to display") -> None:
         self.frame = tk.Frame(parent, bg=PLOT["bg"], bd=0, highlightthickness=0)
         self.frame.pack(fill="both", expand=True)
 
@@ -161,6 +245,10 @@ class CanvasSlot:
         self._manual_ylim:      Optional[tuple]  = None   # (lo, hi) or None = auto
         self._yscale_bar:       bool             = yscale_bar
         self._yscale_cid:       Optional[int]    = None   # mpl event id
+        self._placeholder_text: str              = placeholder
+        # A slot on a hidden tab draws when it is shown (see _defer).
+        self._pending:          Optional[str]    = None
+        self._map_bound:        bool             = False
 
         # ── Optional Y-scale bar (above canvas) ───────────────────────────
         if yscale_bar:
@@ -355,8 +443,45 @@ class CanvasSlot:
 
     # ── Drawing ────────────────────────────────────────────────────────────
 
-    def _redraw(self) -> None:
+    # ── Deferred drawing ───────────────────────────────────────────────────
+    # Drawing a figure nobody can see (another tab) costs the same as drawing
+    # one on screen, and Analyze lands results for every tab at once: a slot
+    # on a hidden tab of a shown window keeps its draw function and draws
+    # when it is mapped (its tab shown), or when flush() asks (an export
+    # reading .fig). With the window itself not shown (start-up, tests) it
+    # draws at once, as before.
+
+    def _hidden(self) -> bool:
+        try:
+            return (bool(self.frame.winfo_toplevel().winfo_viewable())
+                    and not self.frame.winfo_viewable())
+        except tk.TclError:
+            return False
+
+    def _defer(self, kind: str) -> None:
+        self._pending = kind
+        if not self._map_bound:
+            self.frame.bind("<Map>", lambda _e: self.flush(), add="+")
+            self._map_bound = True
+
+    def flush(self) -> None:
+        """Draw what was deferred, if anything (before reading .fig)."""
+        kind, self._pending = self._pending, None
+        if kind == "draw":
+            self._redraw(force=True)
+        elif kind == "placeholder":
+            self._show_placeholder(force=True)
+
+    def _redraw(self, force: bool = False) -> None:
+        if not force and self._hidden():
+            self._defer("draw")
+            return
+        self._pending = None
         self.fig.clear()
+        if getattr(self, "_layout_frozen", False):
+            # A wheel zoom froze the layout: a full redraw lays it out again.
+            self.fig.set_layout_engine("constrained")
+            self._layout_frozen = False
         self.fig.patch.set_facecolor(PLOT["bg"])
         self._set_cl_pads()
         if self._draw_fn is None:
@@ -364,6 +489,8 @@ class CanvasSlot:
             return
         try:
             self._draw_fn(self.fig)
+            if getattr(self, "_wheel_zoom", False):
+                self._reserve_ytick_room()
         except Exception as exc:
             log.exception("CanvasSlot draw error")
             ax = self.fig.add_subplot(111)
@@ -379,11 +506,15 @@ class CanvasSlot:
             self.frame.after(50, self._readback_ylim)
         self.canvas.draw_idle()
 
-    def _show_placeholder(self) -> None:
+    def _show_placeholder(self, force: bool = False) -> None:
+        if not force and self._hidden():
+            self._defer("placeholder")
+            return
+        self._pending = None
         self.fig.clear()
         ax = self.fig.add_subplot(111)
         ax.set_facecolor(PLOT["axes"])
-        ax.text(0.5, 0.5, "Run analysis to display",
+        ax.text(0.5, 0.5, self._placeholder_text,
                 ha="center", va="center", color=PLOT["muted"],
                 transform=ax.transAxes, fontsize=9)
         ax.set_xticks([])
@@ -391,6 +522,142 @@ class CanvasSlot:
         for sp in ax.spines.values():
             sp.set_color(PLOT["border"])
         self.canvas.draw_idle()
+
+    # ── Mouse-wheel zoom of the Y axis ────────────────────────────────────
+    WHEEL_ZOOM_IN = 0.8          # Y span factor per wheel notch away from you
+    WHEEL_MIN_SPAN = 0.01        # deepest zoom: 1 % of the span as drawn
+    YTICK_ROOM = "000.00"        # the widest tick label a zoom may show
+
+    def _reserve_ytick_room(self) -> None:
+        """Lay the figure out for tick labels as wide as YTICK_ROOM, with an
+        invisible label of that width beside each Y axis: zooming then never
+        widens the labels past the room left for them, so the frozen layout
+        (enable_wheel_yzoom) needs no change and nothing overlaps the axis
+        title. Offsets ("+1.4e2") are turned off for the same reason."""
+        from matplotlib.transforms import offset_copy
+        for ax in self.fig.axes:
+            if not (ax.get_visible() and ax.yaxis.get_visible()):
+                continue
+            ticks = ax.yaxis.get_major_ticks()
+            if not ticks:
+                continue
+            try:
+                ax.ticklabel_format(axis="y", useOffset=False)
+            except (AttributeError, ValueError):
+                pass                       # not a ScalarFormatter: leave it
+            t0 = ticks[0]
+            size = t0.label1.get_fontsize()
+            shift = t0.get_tick_padding() + t0.get_pad()
+            ax.text(0.0, 0.5, self.YTICK_ROOM, fontsize=size, ha="right", va="center",
+                    alpha=0.0, transform=offset_copy(ax.transAxes, fig=self.fig,
+                                                     x=-shift, units="points"))
+            # The axis title follows the tick labels left as they widen: keep
+            # its room too, beyond the widest labels (≈0.62 em per digit).
+            label = ax.yaxis.label
+            if label.get_text():
+                x_lab = shift + 0.62 * size * len(self.YTICK_ROOM) + ax.yaxis.labelpad
+                ax.text(0.0, 0.5, label.get_text(), fontsize=label.get_fontsize(),
+                        rotation=90, ha="right", va="center", alpha=0.0,
+                        transform=offset_copy(ax.transAxes, fig=self.fig,
+                                              x=-x_lab, units="points"))
+
+    def enable_wheel_yzoom(self) -> None:
+        """Mouse wheel over a panel zooms its Y axis around the pointer (away
+        from you: in, towards you: out) -- both axes of an equal-aspect panel
+        (Poincaré), and with it every such panel sharing its ranges; the
+        middle button restores the limits as drawn. Bound on the canvas widget and ending the
+        event there, so the wheel does not also scroll an enclosing page
+        (CTkScrollableFrame) or reach matplotlib's own wheel handler."""
+        w = self.canvas.get_tk_widget()
+        self._wheel_zoom = True
+        if self._draw_fn is not None:        # already drawn: lay it out for the room
+            self._redraw()
+
+        def _axes_at(x: int, y: int) -> "tuple[Any, float, float]":
+            # Tk y runs down from the widget's top, matplotlib's display y up
+            # from the figure's bottom.
+            yd = w.winfo_height() - y
+            for ax in self.fig.axes:
+                if ax.get_visible() and ax.bbox.contains(x, yd):
+                    xc, yc = ax.transData.inverted().transform((x, yd))
+                    return ax, float(xc), float(yc)
+            return None, float("nan"), float("nan")
+
+        def _square(ax: Any) -> bool:
+            # An equal-aspect plot (Poincaré): zooming Y alone would reshape
+            # its box to keep the aspect, so both axes zoom together.
+            asp = ax.get_aspect()
+            return asp == "equal" or (isinstance(asp, (int, float)) and asp == 1.0)
+
+        def _group(ax: Any) -> "list[Any]":
+            """*ax* and, when square, every square panel showing the same
+            ranges: side-by-side Poincaré panels keep one common scale."""
+            if not _square(ax):
+                return [ax]
+            lims = (ax.get_xlim(), ax.get_ylim())
+            return [a for a in self.fig.axes if a is ax or (
+                a.get_visible() and _square(a) and (a.get_xlim(), a.get_ylim()) == lims)]
+
+        def _freeze_layout() -> None:
+            # constrained_layout re-flows the figure on every draw: a zoom
+            # that changes the width of the tick labels ("140" -> "142.5" ->
+            # "143.25") would move and shrink the panels. The positions it
+            # last computed are kept until the next full redraw (_redraw).
+            if not getattr(self, "_layout_frozen", False):
+                engine = self.fig.get_layout_engine()
+                if engine is not None and type(engine).__name__ == "ConstrainedLayoutEngine":
+                    self.fig.set_layout_engine("none")
+                    self._layout_frozen = True
+
+        def _zoom(x: int, y: int, zoom_in: bool) -> str:
+            ax, xc, yc = _axes_at(x, y)
+            if ax is None or not np.isfinite(yc):
+                return ""
+            _freeze_layout()
+            square = _square(ax)
+            group = _group(ax)
+            for a in group:
+                if not hasattr(a, "_wheel_home_ylim"):
+                    a._wheel_home_ylim = a.get_ylim()   # type: ignore[attr-defined]
+                    a._wheel_home_xlim = a.get_xlim()   # type: ignore[attr-defined]
+            f = self.WHEEL_ZOOM_IN if zoom_in else 1.0 / self.WHEEL_ZOOM_IN
+            lo, hi = ax.get_ylim()
+            h_lo, h_hi = ax._wheel_home_ylim       # type: ignore[attr-defined]
+            if zoom_in and (hi - lo) * f < self.WHEEL_MIN_SPAN * abs(h_hi - h_lo):
+                return "break"                    # deepest zoom reached
+            new_y = (yc - (yc - lo) * f, yc + (hi - yc) * f)
+            if square:
+                xlo, xhi = ax.get_xlim()
+                new_x = (xc - (xc - xlo) * f, xc + (xhi - xc) * f)
+            for a in group:
+                a.set_ylim(*new_y)
+                if square:
+                    a.set_xlim(*new_x)
+            self.canvas.draw_idle()
+            return "break"
+
+        def _on_wheel(e: Any) -> str:          # Windows / macOS
+            # Outside a panel ("" = carry on) the page scrolls as before.
+            return _zoom(e.x, e.y, e.delta > 0)
+
+        def _on_middle(e: Any) -> "Optional[str]":
+            ax, _xc, _yc = _axes_at(e.x, e.y)
+            if ax is None or getattr(ax, "_wheel_home_ylim", None) is None:
+                return None
+            for a in _group(ax):
+                home_y = getattr(a, "_wheel_home_ylim", None)
+                if home_y is None:
+                    continue
+                a.set_ylim(*home_y)
+                if _square(a):
+                    a.set_xlim(*a._wheel_home_xlim)   # type: ignore[attr-defined]
+            self.canvas.draw_idle()
+            return "break"
+
+        w.bind("<MouseWheel>", _on_wheel)
+        w.bind("<Button-4>", lambda e: _zoom(e.x, e.y, True))    # X11
+        w.bind("<Button-5>", lambda e: _zoom(e.x, e.y, False))
+        w.bind("<Button-2>", _on_middle)
 
     def update(self, draw_fn: Any) -> None:
         """Store *draw_fn* and immediately render it.

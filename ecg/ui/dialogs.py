@@ -4,7 +4,8 @@ ecg.ui.dialogs
 --------------
 All CTk dialog/toplevel classes:
   ThemeDialog, ArtifactReviewDialog,
-  AnnotationDialog, AnnotationManagerDialog.
+  AnnotationDialog, AnnotationManagerDialog, ..., CalibrationDialog
+  (cohort ks / kp calibration of the Autonomic CSI / CPI).
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from typing import Any, Callable, Optional, TYPE_CHECKING
 
 import customtkinter as ctk  # type: ignore[import-untyped]
 import tkinter as tk
-from tkinter import colorchooser, messagebox
+from tkinter import colorchooser, filedialog, messagebox
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
@@ -32,17 +33,28 @@ from ecg.ui.theme import (
     FONT_TITLE, FONT_SECTION_HDR, FONT_LABEL, FONT_SMALL,
     FONT_BODY, FONT_BTN_PRIMARY, FONT_BTN_SEC, FONT_SIDEBAR_HDR,
     FONT_HINT, FONT_KPI_LABEL, FONT_CARD_TITLE, FONT_SUBSECTION,
-    FONT_DIALOG_TITLE,
+    FONT_DIALOG_TITLE, FONT_MONO,
 )
-from ecg.core.models import (
-    MouseECG, ContextRanges, EXPERIMENTAL_CONTEXTS, save_custom_context,
-)
+from ecg.ui.theme import combo_style, input_style
+from ecg.ui.theme import button_style
+from ecg.core.models import MouseECG
 from ecg.core.ml_detector import (
     training_data_summary, list_training_files, delete_training_sample,
     train_model, MLPeakModel,
 )
-from ecg.io.db import _DB_AVAILABLE, verified_recordings, set_verified
+from ecg.io.db import (
+    _DB_AVAILABLE, verified_recordings, set_verified,
+    export_event_rows_csv, list_event_labels, list_event_rows,
+)
 from ecg.io.export import ANNOTATION_COLORS
+from ecg.ui.event_locked_view import (
+    AGGREGATIONS, CALIBRATION_RULE_NOTE, DEFAULT_AGGREGATION, IN_SAMPLE_NOTE,
+    PSEUDO_REPLICATION_NOTE, apply_caveats, apply_plan, calibration_text,
+    cohort_calibration, config_label, config_of, config_options,
+    default_calibration_label, draw_calibration, in_sample, registry_frame,
+    row_config, tests_frame,
+)
+from ecg.ui.tab_keys import TAB_DETECTION
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
@@ -229,18 +241,27 @@ class ThemeDialog(ctk.CTkToplevel):
         bar.pack_propagate(False)
         ctk.CTkFrame(bar, height=1, fg_color=BORDER).pack(fill="x", side="top")
 
-        ctk.CTkButton(bar, text="Close",
-                      fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                      font=FONT_SMALL, width=90, height=34,
-                      command=self.destroy).pack(side="right", padx=12, pady=10)
-        ctk.CTkButton(bar, text="Save as Default",
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      font=FONT_SIDEBAR_HDR, width=130, height=34,
-                      command=self._save_default).pack(side="right", padx=(0, 6), pady=10)
-        ctk.CTkButton(bar, text="Apply",
-                      fg_color=BLUE, hover_color=TEXT, text_color="white",
-                      font=FONT_BTN_PRIMARY, width=100, height=34,
-                      command=self._apply).pack(side="right", padx=(0, 6), pady=10)
+        ctk.CTkButton(
+            bar,
+            text="Close",
+            width=90,
+            command=self.destroy,
+            **button_style("secondary"),
+        ).pack(side="right", padx=12, pady=10)
+        ctk.CTkButton(
+            bar,
+            text="Save as Default",
+            width=130,
+            command=self._save_default,
+            **button_style("secondary", font=FONT_SIDEBAR_HDR),
+        ).pack(side="right", padx=(0, 6), pady=10)
+        ctk.CTkButton(
+            bar,
+            text="Apply",
+            width=100,
+            command=self._apply,
+            **button_style("primary"),
+        ).pack(side="right", padx=(0, 6), pady=10)
 
         self._preview_lbl = ctk.CTkLabel(
             bar,
@@ -286,6 +307,7 @@ class ThemeDialog(ctk.CTkToplevel):
         # Destroy dialog before rebuilding so CTk appearance change
         # does not invalidate this window's widget handles mid-flight.
         self.destroy()
+        self._app._park_focus()
         apply_theme_config(THEME)
         self._app._rebuild_ui()
 
@@ -296,13 +318,9 @@ class ThemeDialog(ctk.CTkToplevel):
         self._apply()   # destroys self; no widget access after this line
 
 
-# ════════════════════════════════════════════════════════════
-#  USER WAVE TEMPLATE  (P/Q/R/S/T landmark definitions)
-# ════════════════════════════════════════════════════════════
-
-WAVE_TEMPLATE_PATH:        Path = Path.home() / ".ecg_wave_template.json"
-_WAVE_TEMPLATE_PATH_LEGACY: Path = Path.home() / ".ecg_wave_template.pkl"
-
+# The wave template's file paths live in ecg.core.wave_template only
+# (WAVE_TEMPLATE_PATH): one place to monkeypatch, one writer (the explicit
+# "Save as default template").
 
 
 class ArtifactReviewDialog(ctk.CTkToplevel):
@@ -322,7 +340,7 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
 
     _TYPE_LABEL = {
         "nonphysio": "Non-physiological (outside HR bounds)",
-        "ectopic":   "Ectopic beat (RR deviation from local median)",
+        "ectopic":   "Ectopic beat (premature: RR shorter than local median)",
         "duplicate": "Duplicate / sub-minimum interval",
     }
 
@@ -334,6 +352,7 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         fs: float,
         candidates: list[dict],
         rr_min_ms: float = MouseECG.RR_MIN_MS,
+        window_beats: int = 11,
     ):
         super().__init__(parent)
         self.title("Artifact Review")
@@ -348,6 +367,7 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         self._fs         = fs
         self._candidates = [dict(c) for c in candidates]   # deep copy
         self._rr_min_ms  = rr_min_ms
+        self._window_beats = window_beats   # local-median window, for the info-panel help text
         self._idx        = 0      # current candidate index
         self._result     = None   # set when dialog closes
 
@@ -434,6 +454,19 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
             lbl.grid(row=row_i + 1, column=0, sticky="w", padx=20, pady=(0, 4))
             self._metric_labels[key] = lbl
 
+        # Short static explanation of the metrics above -- there was
+        # previously no in-dialog way to judge whether a deviation % is
+        # borderline or clearly artifactual.
+        ctk.CTkLabel(
+            info,
+            text=(f"Deviation = |RR − local median| ÷ local median, where "
+                  f"the local median is taken over the surrounding "
+                  f"{self._window_beats} beats.\n"
+                  f"Red > 30% deviation  ·  Orange ≤ 30%"),
+            font=FONT_HINT, text_color=MUTED, wraplength=200,
+            justify="left", anchor="w").grid(
+                row=12, column=0, sticky="w", padx=12, pady=(0, 8))
+
         # Decision indicator
         ctk.CTkFrame(info, height=1, fg_color=BORDER).grid(
             row=13, column=0, sticky="ew", padx=12, pady=8)
@@ -452,17 +485,19 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         btn_frame.grid_columnconfigure(1, weight=1)
 
         self.btn_keep = ctk.CTkButton(
-            btn_frame, text="✓  Keep", height=36,
-            fg_color=GREEN, hover_color=GREEN, text_color="white",
-            font=FONT_CARD_TITLE, corner_radius=5,
-            command=lambda: self._set_decision("keep"))
+            btn_frame,
+            text="✓  Keep",
+            command=lambda: self._set_decision("keep"),
+            **button_style("primary", font=FONT_CARD_TITLE),
+        )
         self.btn_keep.grid(row=0, column=0, sticky="ew", padx=(0, 4))
 
         self.btn_remove = ctk.CTkButton(
-            btn_frame, text="✕  Remove", height=36,
-            fg_color=RED_DARK, hover_color="#D32F2F", text_color="white",
-            font=FONT_CARD_TITLE, corner_radius=5,
-            command=lambda: self._set_decision("remove"))
+            btn_frame,
+            text="✕  Remove",
+            command=lambda: self._set_decision("remove"),
+            **button_style("danger", font=FONT_CARD_TITLE),
+        )
         self.btn_remove.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
         # Spacer
@@ -474,38 +509,52 @@ class ArtifactReviewDialog(ctk.CTkToplevel):
         nav.pack_propagate(False)
 
         ctk.CTkButton(
-            nav, text="◀  Prev", width=90, height=34,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            font=FONT_LABEL, corner_radius=5,
-            command=self._prev).pack(side="left", padx=10, pady=10)
+            nav,
+            text="◀  Prev",
+            width=90,
+            command=self._prev,
+            **button_style("secondary"),
+        ).pack(side="left", padx=10, pady=10)
 
         ctk.CTkButton(
-            nav, text="Next  ▶", width=90, height=34,
-            fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-            font=FONT_LABEL, corner_radius=5,
-            command=self._next).pack(side="left", padx=(0, 10), pady=10)
+            nav,
+            text="Next  ▶",
+            width=90,
+            command=self._next,
+            **button_style("secondary"),
+        ).pack(side="left", padx=(0, 10), pady=10)
 
         ctk.CTkButton(
-            nav, text="⚡  Remove All", width=130, height=34,
-            fg_color="#5D4037", hover_color="#4E342E", text_color="white",
-            font=FONT_LABEL, corner_radius=5,
-            command=self._remove_all).pack(side="left", padx=(0, 6), pady=10)
+            nav,
+            text="⚡  Remove All",
+            width=130,
+            command=self._remove_all,
+            **button_style("primary"),
+        ).pack(side="left", padx=(0, 6), pady=10)
 
         ctk.CTkButton(
-            nav, text="✓  Keep All", width=110, height=34,
-            fg_color=GREEN, hover_color=GREEN, text_color="white",
-            font=FONT_LABEL, corner_radius=5,
-            command=self._keep_all).pack(side="left", padx=(0, 10), pady=10)
+            nav,
+            text="✓  Keep All",
+            width=110,
+            command=self._keep_all,
+            **button_style("primary"),
+        ).pack(side="left", padx=(0, 10), pady=10)
 
         self.lbl_summary = ctk.CTkLabel(
             nav, text="", font=FONT_SMALL, text_color=MUTED)
         self.lbl_summary.pack(side="left", padx=10)
 
+        ctk.CTkLabel(
+            nav, text="←→ navigate · K keep · R remove",
+            font=FONT_HINT, text_color=MUTED).pack(side="left", padx=10)
+
         ctk.CTkButton(
-            nav, text="✓  Apply Decisions", width=150, height=36,
-            fg_color=RED, hover_color=RED_DARK, text_color="white",
-            font=FONT_CARD_TITLE, corner_radius=5,
-            command=self._finish).pack(side="right", padx=10, pady=9)
+            nav,
+            text="✓  Apply Decisions",
+            width=150,
+            command=self._finish,
+            **button_style("danger", font=FONT_CARD_TITLE),
+        ).pack(side="right", padx=10, pady=9)
 
         # Keyboard shortcuts
         self.bind("<Left>",  lambda e: self._prev())
@@ -708,7 +757,9 @@ class AnnotationDialog(ctk.CTkToplevel):
 
     def __init__(self, parent, on_save: "Callable[[dict], None]",
                  existing: "Optional[dict]" = None,
-                 t_max: float = 1e6) -> None:
+                 t_max: float = 1e6,
+                 default_start: "Optional[float]" = None,
+                 default_end: "Optional[float]" = None) -> None:
         super().__init__(parent)
         self.title("Add annotation" if existing is None else "Edit annotation")
         self.resizable(False, False)
@@ -720,24 +771,30 @@ class AnnotationDialog(ctk.CTkToplevel):
         pad = dict(padx=12, pady=6)
 
         # ── Form grid ─────────────────────────────────────────────────────
+        # New annotations (no `existing`) prefill Start/End from the caller's
+        # default_start/default_end -- the currently visible Detection-view
+        # window -- so the common case (annotate what's on screen) needs no
+        # typing; editing an existing annotation still shows its own values.
         row = 0
         ctk.CTkLabel(self, text="Start (s):", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
-        self._ent_start = ctk.CTkEntry(self, width=110)
-        self._ent_start.insert(0, str((existing or {}).get("t_start", "")))
+        self._ent_start = ctk.CTkEntry(self, width=110, **input_style())
+        start_val = (existing or {}).get("t_start", default_start)
+        self._ent_start.insert(0, "" if start_val is None else f"{start_val:.3f}")
         self._ent_start.grid(row=row, column=1, sticky="w", **pad)
 
         row += 1
         ctk.CTkLabel(self, text="End (s):", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
-        self._ent_end = ctk.CTkEntry(self, width=110)
-        self._ent_end.insert(0, str((existing or {}).get("t_end", "")))
+        self._ent_end = ctk.CTkEntry(self, width=110, **input_style())
+        end_val = (existing or {}).get("t_end", default_end)
+        self._ent_end.insert(0, "" if end_val is None else f"{end_val:.3f}")
         self._ent_end.grid(row=row, column=1, sticky="w", **pad)
 
         row += 1
         ctk.CTkLabel(self, text="Label:", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
-        self._ent_label = ctk.CTkEntry(self, width=220)
+        self._ent_label = ctk.CTkEntry(self, width=220, **input_style())
         self._ent_label.insert(0, (existing or {}).get("label", ""))
         self._ent_label.grid(row=row, column=1, sticky="w", **pad)
 
@@ -759,9 +816,13 @@ class AnnotationDialog(ctk.CTkToplevel):
         btn_frame.grid(row=row, column=0, columnspan=2, pady=(4, 10))
         ctk.CTkButton(btn_frame, text="OK", width=90,
                       command=self._ok).pack(side="left", padx=6)
-        ctk.CTkButton(btn_frame, text="Cancel", width=90,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      command=self.destroy).pack(side="left", padx=6)
+        ctk.CTkButton(
+            btn_frame,
+            text="Cancel",
+            width=90,
+            command=self.destroy,
+            **button_style("secondary"),
+        ).pack(side="left", padx=6)
 
         self._ent_start.focus_set()
         self.bind("<Return>", lambda _: self._ok())
@@ -811,19 +872,33 @@ class AnnotationManagerDialog(ctk.CTkToplevel):
         self.geometry("660x420")
         self.resizable(True, True)
         self.grab_set()
+        self.configure(fg_color=PANEL)
         self._app = parent
 
         # ── Toolbar ───────────────────────────────────────────────────────
         bar = ctk.CTkFrame(self, fg_color="transparent")
         bar.pack(side="top", fill="x", padx=10, pady=(8, 4))
-        ctk.CTkButton(bar, text="＋  Add annotation", width=140,
-                      command=self._add).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(bar, text="✏  Edit selected", width=130,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      command=self._edit).pack(side="left", padx=2)
-        ctk.CTkButton(bar, text="🗑  Delete selected", width=140,
-                      fg_color=RED, hover_color=RED_DARK, text_color="white",
-                      command=self._delete).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(
+            bar,
+            text="＋  Add annotation",
+            width=140,
+            command=self._add,
+            **button_style("primary"),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            bar,
+            text="✏  Edit selected",
+            width=130,
+            command=self._edit,
+            **button_style("secondary"),
+        ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            bar,
+            text="🗑  Delete selected",
+            width=140,
+            command=self._delete,
+            **button_style("danger"),
+        ).pack(side="left", padx=(6, 0))
 
         # ── Scrollable list ───────────────────────────────────────────────
         self._list_frame = ctk.CTkScrollableFrame(self, fg_color=CARD)
@@ -860,7 +935,7 @@ class AnnotationManagerDialog(ctk.CTkToplevel):
             var = tk.BooleanVar(value=False)
             self._row_vars.append(var)
             ctk.CTkCheckBox(row, text="", variable=var, width=30,
-                            checkbox_width=16, checkbox_height=16
+                            checkbox_width=16, checkbox_height=16, font=FONT_SMALL
                             ).pack(side="left", padx=(4, 0))
             dur = ann["t_end"] - ann["t_start"]
             for txt, w in [
@@ -879,13 +954,25 @@ class AnnotationManagerDialog(ctk.CTkToplevel):
 
     def _add(self) -> None:
         t_max = float(self._app._time[-1]) if self._app._time is not None else 1e6
+        # Prefill from the Detection view's currently visible window (nav_pos
+        # .. nav_pos+window) so the common case -- annotate what's on screen
+        # -- needs no typing. Falls back to no default when nothing is loaded.
+        default_start = default_end = None
+        if self._app._time is not None:
+            try:
+                win = float(self._app.ent_window.get())
+            except Exception:
+                win = 2.0
+            default_start = self._app.ui.nav_pos
+            default_end   = min(t_max, default_start + win)
         def _save(ann: dict) -> None:
             self._app._annotations.append(ann)
             self._app._session_dirty = True
             self._app._draw_detail()
             self._app._update_ann_count()
             self._refresh()
-        AnnotationDialog(self, on_save=_save, t_max=t_max)
+        AnnotationDialog(self, on_save=_save, t_max=t_max,
+                         default_start=default_start, default_end=default_end)
 
     def _selected_indices(self) -> "list[int]":
         return [i for i, v in enumerate(self._row_vars) if v.get()]
@@ -936,7 +1023,9 @@ class PacingPeriodDialog(ctk.CTkToplevel):
 
     def __init__(self, parent, on_save: "Callable[[dict], None]",
                  existing: "Optional[dict]" = None,
-                 t_max: float = 1e6) -> None:
+                 t_max: float = 1e6,
+                 default_start: "Optional[float]" = None,
+                 default_end: "Optional[float]" = None) -> None:
         super().__init__(parent)
         self.title("Add pacing period" if existing is None else "Edit pacing period")
         self.resizable(False, False)
@@ -946,24 +1035,29 @@ class PacingPeriodDialog(ctk.CTkToplevel):
 
         pad = dict(padx=12, pady=6)
 
+        # New periods (no `existing`) prefill Start/End from the caller's
+        # default_start/default_end -- the currently visible Detection-view
+        # window -- see AnnotationDialog above for the same convention.
         row = 0
         ctk.CTkLabel(self, text="Start (s):", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
-        self._ent_start = ctk.CTkEntry(self, width=110)
-        self._ent_start.insert(0, str((existing or {}).get("t_start", "")))
+        self._ent_start = ctk.CTkEntry(self, width=110, **input_style())
+        start_val = (existing or {}).get("t_start", default_start)
+        self._ent_start.insert(0, "" if start_val is None else f"{start_val:.3f}")
         self._ent_start.grid(row=row, column=1, sticky="w", **pad)
 
         row += 1
         ctk.CTkLabel(self, text="End (s):", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
-        self._ent_end = ctk.CTkEntry(self, width=110)
-        self._ent_end.insert(0, str((existing or {}).get("t_end", "")))
+        self._ent_end = ctk.CTkEntry(self, width=110, **input_style())
+        end_val = (existing or {}).get("t_end", default_end)
+        self._ent_end.insert(0, "" if end_val is None else f"{end_val:.3f}")
         self._ent_end.grid(row=row, column=1, sticky="w", **pad)
 
         row += 1
         ctk.CTkLabel(self, text="Note:", anchor="e").grid(
             row=row, column=0, sticky="e", **pad)
-        self._ent_note = ctk.CTkEntry(self, width=220)
+        self._ent_note = ctk.CTkEntry(self, width=220, **input_style())
         self._ent_note.insert(0, (existing or {}).get("note", ""))
         self._ent_note.grid(row=row, column=1, sticky="w", **pad)
 
@@ -972,9 +1066,13 @@ class PacingPeriodDialog(ctk.CTkToplevel):
         btn_frame.grid(row=row, column=0, columnspan=2, pady=(4, 10))
         ctk.CTkButton(btn_frame, text="OK", width=90,
                       command=self._ok).pack(side="left", padx=6)
-        ctk.CTkButton(btn_frame, text="Cancel", width=90,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      command=self.destroy).pack(side="left", padx=6)
+        ctk.CTkButton(
+            btn_frame,
+            text="Cancel",
+            width=90,
+            command=self.destroy,
+            **button_style("secondary"),
+        ).pack(side="left", padx=6)
 
         self._ent_start.focus_set()
         self.bind("<Return>", lambda _: self._ok())
@@ -1022,18 +1120,32 @@ class PacingPeriodManagerDialog(ctk.CTkToplevel):
         self.geometry("580x420")
         self.resizable(True, True)
         self.grab_set()
+        self.configure(fg_color=PANEL)
         self._app = parent
 
         bar = ctk.CTkFrame(self, fg_color="transparent")
         bar.pack(side="top", fill="x", padx=10, pady=(8, 4))
-        ctk.CTkButton(bar, text="＋  Add pacing period", width=150,
-                      command=self._add).pack(side="left", padx=(0, 6))
-        ctk.CTkButton(bar, text="✏  Edit selected", width=130,
-                      fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                      command=self._edit).pack(side="left", padx=2)
-        ctk.CTkButton(bar, text="🗑  Delete selected", width=140,
-                      fg_color=RED, hover_color=RED_DARK, text_color="white",
-                      command=self._delete).pack(side="left", padx=(6, 0))
+        ctk.CTkButton(
+            bar,
+            text="＋  Add pacing period",
+            width=150,
+            command=self._add,
+            **button_style("primary"),
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            bar,
+            text="✏  Edit selected",
+            width=130,
+            command=self._edit,
+            **button_style("secondary"),
+        ).pack(side="left", padx=2)
+        ctk.CTkButton(
+            bar,
+            text="🗑  Delete selected",
+            width=140,
+            command=self._delete,
+            **button_style("danger"),
+        ).pack(side="left", padx=(6, 0))
 
         self._list_frame = ctk.CTkScrollableFrame(self, fg_color=CARD)
         self._list_frame.pack(side="top", fill="both", expand=True,
@@ -1068,7 +1180,7 @@ class PacingPeriodManagerDialog(ctk.CTkToplevel):
             var = tk.BooleanVar(value=False)
             self._row_vars.append(var)
             ctk.CTkCheckBox(row, text="", variable=var, width=30,
-                            checkbox_width=16, checkbox_height=16
+                            checkbox_width=16, checkbox_height=16, font=FONT_SMALL
                             ).pack(side="left", padx=(4, 0))
             dur = pp["t_end"] - pp["t_start"]
             for txt, w in [
@@ -1083,13 +1195,24 @@ class PacingPeriodManagerDialog(ctk.CTkToplevel):
 
     def _add(self) -> None:
         t_max = float(self._app._time[-1]) if self._app._time is not None else 1e6
+        # Prefill from the Detection view's currently visible window -- see
+        # AnnotationManagerDialog._add() for the same convention.
+        default_start = default_end = None
+        if self._app._time is not None:
+            try:
+                win = float(self._app.ent_window.get())
+            except Exception:
+                win = 2.0
+            default_start = self._app.ui.nav_pos
+            default_end   = min(t_max, default_start + win)
         def _save(period: dict) -> None:
             self._app._pacing_periods.append(period)
             self._app._session_dirty = True
             self._app._draw_detail()
             self._app._update_pacing_count()
             self._refresh()
-        PacingPeriodDialog(self, on_save=_save, t_max=t_max)
+        PacingPeriodDialog(self, on_save=_save, t_max=t_max,
+                           default_start=default_start, default_end=default_end)
 
     def _selected_indices(self) -> "list[int]":
         return [i for i, v in enumerate(self._row_vars) if v.get()]
@@ -1159,7 +1282,7 @@ class MLTrainingDialog(ctk.CTkToplevel):
                      text_color=TEXT, anchor="w").pack(fill="x", padx=20, pady=(20, 4))
         ctk.CTkLabel(
             self, text="Trains a classifier from recordings marked "
-                       "“Verified for training” (sidebar switch, "
+                       "“Verified for training” (Signal quality panel, Method = ML Detector, "
                        "saved with the session). Verify a few recordings "
                        "with clean, corrected R-peaks, then train.",
             font=FONT_SMALL, text_color=MUTED, anchor="w", justify="left",
@@ -1205,15 +1328,18 @@ class MLTrainingDialog(ctk.CTkToplevel):
         # Not packed yet -- _maybe_show_confusion_matrix() packs/unpacks it.
 
         self.btn_train = ctk.CTkButton(
-            self, text="▶  Train Model", command=self._train,
-            fg_color=GREEN, hover_color=GREEN_DARK, text_color="white",
-            font=FONT_BTN_PRIMARY, height=36, corner_radius=8)
+            self,
+            text="▶  Train Model",
+            command=self._train,
+            **button_style("primary"),
+        )
         self.btn_train.pack(fill="x", padx=20, pady=(0, 8))
 
         ctk.CTkButton(
-            self, text="Close", command=self.destroy,
-            fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-            font=FONT_BTN_SEC, height=30, corner_radius=8,
+            self,
+            text="Close",
+            command=self.destroy,
+            **button_style("secondary"),
         ).pack(fill="x", padx=20, pady=(0, 20))
 
         self._refresh_stats()
@@ -1322,10 +1448,11 @@ class MLTrainingDialog(ctk.CTkToplevel):
                          font=FONT_HINT, text_color=MUTED, width=140,
                          anchor="e").pack(side="left", padx=4)
             ctk.CTkButton(
-                row, text="🗑", width=28, height=22,
-                fg_color=RED, hover_color=RED_DARK, text_color="white",
-                font=FONT_HINT,
+                row,
+                text="🗑",
+                width=28,
                 command=lambda fp=fp, filepath=filepath: self._remove_file(fp, filepath),
+                **button_style("danger"),
             ).pack(side="left", padx=(4, 6))
 
     def _remove_file(self, fingerprint: str, filepath: "Optional[str]") -> None:
@@ -1353,152 +1480,21 @@ class MLTrainingDialog(ctk.CTkToplevel):
         finally:
             self.btn_train.configure(state="normal", text="▶  Train Model")  # type: ignore[union-attr]
         if result.get("ok"):
+            prev_acc, prev_f1 = result.get("previous_accuracy"), result.get("previous_f1")
+            if prev_acc is not None:
+                # A previous model existed and was just overwritten (kept as
+                # a .bak on disk, see MLPeakModel.save) -- show the delta so
+                # a regression is visible immediately.
+                stats = (f"(accuracy {prev_acc:.2f}→{result['accuracy']:.2f}, "
+                         f"F1 {prev_f1:.2f}→{result['f1']:.2f} vs. previous model)")
+            else:
+                stats = f"(accuracy={result['accuracy']:.2f}, F1={result['f1']:.2f})"
             self._lbl_result.configure(
-                text=f"✓ {result['message']}  (accuracy={result['accuracy']:.2f}, "
-                     f"F1={result['f1']:.2f})",
+                text=f"✓ {result['message']}  {stats}",
                 text_color=GREEN)
         else:
             self._lbl_result.configure(text=f"✗ {result['message']}", text_color=ORANGE)
         self._refresh_stats()
-
-
-class CustomContextDialog(ctk.CTkToplevel):
-    """Modal dialog: define/edit a user-owned "custom" experimental context.
-
-    EXPERIMENTAL_CONTEXTS (ecg.core.models) ships 4 fixed mouse contexts
-    with no user-editable option -- e.g. for a specific strain/substrain
-    whose normal ranges differ from those 4 presets. Saving here plugs the
-    result into that same dict under the "custom" key, so every panel that
-    already reads reference ranges via app._current_ref() picks it up with
-    no further wiring once "Custom" is selected in the Parameters dialog.
-    """
-
-    FIELDS = [
-        ("hr",   "Heart rate",        "bpm"),
-        ("rr",   "RR interval",       "ms"),
-        ("sdnn", "SDNN",              "ms"),
-        ("rmssd","RMSSD",             "ms"),
-        ("pnn6", "pNN6",              "%"),
-        ("lf",   "LF power",          "%"),
-        ("hf",   "HF power",          "%"),
-        ("lfhf", "LF/HF ratio",       ""),
-        ("sd1",  "Poincaré SD1",      "ms"),
-        ("sd2",  "Poincaré SD2",      "ms"),
-        ("pr",   "PR interval",       "ms"),
-        ("qrs",  "QRS duration",      "ms"),
-        ("qt",   "QT interval",       "ms"),
-        ("qtc",  "QTc (corrected)",   "ms"),
-    ]
-
-    def __init__(self, parent, on_saved: "Optional[Callable[[], None]]" = None):
-        super().__init__(parent)
-        self._on_saved = on_saved
-        self.title("🧪  Custom Experimental Context")
-        self.geometry("480x680")
-        self.minsize(420, 400)
-        self.resizable(True, True)
-        self.configure(fg_color=BG)
-        self.grab_set()
-        self.focus_force()
-
-        # Start from whatever "custom" context already exists (a previous
-        # save), else from telemetry_awake as a reasonable starting point --
-        # never fabricated from nothing.
-        base = EXPERIMENTAL_CONTEXTS.get("custom") or EXPERIMENTAL_CONTEXTS["telemetry_awake"]
-
-        ctk.CTkLabel(self, text="🧪  Custom Experimental Context", font=FONT_TITLE,
-                     text_color=TEXT, anchor="w").pack(fill="x", padx=20, pady=(20, 4))
-        ctk.CTkLabel(
-            self, text="Define your own reference ranges (e.g. for a specific "
-                       "strain). Once saved, select \"Custom\" in the Parameters "
-                       "dialog to use these bounds everywhere the app shows a "
-                       "reference band.",
-            font=FONT_SMALL, text_color=MUTED, anchor="w", justify="left",
-            wraplength=430).pack(fill="x", padx=20, pady=(0, 10))
-
-        name_row = ctk.CTkFrame(self, fg_color="transparent")
-        name_row.pack(fill="x", padx=20, pady=(0, 10))
-        name_row.columnconfigure(1, weight=1)
-        ctk.CTkLabel(name_row, text="Name", font=FONT_SMALL, text_color=MUTED,
-                     width=110, anchor="w").grid(row=0, column=0, sticky="w")
-        self._ent_name = ctk.CTkEntry(name_row, font=FONT_LABEL, height=28,
-                                      fg_color=CARD, border_color=BORDER2, text_color=TEXT)
-        self._ent_name.insert(0, base.label if base.label != "Telemetry — awake mouse" else "Custom")
-        self._ent_name.grid(row=0, column=1, sticky="ew", padx=(8, 0))
-
-        scroll = ctk.CTkScrollableFrame(self, fg_color=CARD, corner_radius=8,
-                                        scrollbar_button_color=BORDER,
-                                        scrollbar_button_hover_color=BORDER2)
-        scroll.pack(fill="both", expand=True, padx=20, pady=(0, 10))
-        scroll.columnconfigure(1, weight=1)
-        scroll.columnconfigure(2, weight=1)
-
-        hdr = ctk.CTkFrame(scroll, fg_color="transparent")
-        hdr.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(2, 6))
-        hdr.columnconfigure(1, weight=1); hdr.columnconfigure(2, weight=1)
-        ctk.CTkLabel(hdr, text="", width=118).grid(row=0, column=0)
-        ctk.CTkLabel(hdr, text="Low", font=FONT_HINT, text_color=MUTED).grid(row=0, column=1)
-        ctk.CTkLabel(hdr, text="High", font=FONT_HINT, text_color=MUTED).grid(row=0, column=2)
-
-        self._entries: "dict[str, tuple[ctk.CTkEntry, ctk.CTkEntry]]" = {}
-        for i, (attr, label, unit) in enumerate(self.FIELDS, start=1):
-            lbl_txt = f"{label}  ({unit})" if unit else label
-            ctk.CTkLabel(scroll, text=lbl_txt, font=FONT_SMALL, text_color=TEXT,
-                        anchor="w", width=140, wraplength=138, justify="left"
-                        ).grid(row=i, column=0, sticky="w", padx=(4, 4), pady=3)
-            e_lo = ctk.CTkEntry(scroll, font=FONT_LABEL, height=26,
-                                fg_color=BG, border_color=BORDER2, text_color=TEXT)
-            e_lo.insert(0, str(getattr(base, f"{attr}_lo")))
-            e_lo.grid(row=i, column=1, sticky="ew", padx=3, pady=3)
-            e_hi = ctk.CTkEntry(scroll, font=FONT_LABEL, height=26,
-                                fg_color=BG, border_color=BORDER2, text_color=TEXT)
-            e_hi.insert(0, str(getattr(base, f"{attr}_hi")))
-            e_hi.grid(row=i, column=2, sticky="ew", padx=3, pady=3)
-            self._entries[attr] = (e_lo, e_hi)
-
-        self._lbl_error = ctk.CTkLabel(self, text="", font=FONT_SMALL,
-                                       text_color=ORANGE, anchor="w",
-                                       wraplength=430, justify="left")
-        self._lbl_error.pack(fill="x", padx=20, pady=(0, 4))
-
-        btn_row = ctk.CTkFrame(self, fg_color="transparent")
-        btn_row.pack(fill="x", padx=20, pady=(0, 20))
-        ctk.CTkButton(btn_row, text="Cancel", command=self.destroy,
-                     fg_color=BORDER, hover_color=BORDER2, text_color=MUTED,
-                     font=FONT_BTN_SEC, height=32, corner_radius=8
-                     ).pack(side="left", fill="x", expand=True, padx=(0, 6))
-        ctk.CTkButton(btn_row, text="✔  Save", command=self._save,
-                     fg_color=GREEN, hover_color=GREEN_DARK, text_color="white",
-                     font=FONT_BTN_PRIMARY, height=32, corner_radius=8
-                     ).pack(side="left", fill="x", expand=True, padx=(6, 0))
-
-    def _save(self) -> None:
-        values: "dict[str, float]" = {}
-        for attr, label, _unit in self.FIELDS:
-            e_lo, e_hi = self._entries[attr]
-            try:
-                lo = float(e_lo.get()); hi = float(e_hi.get())
-            except ValueError:
-                self._lbl_error.configure(text=f"⚠ {label}: enter numeric values.")
-                return
-            if lo >= hi:
-                self._lbl_error.configure(text=f"⚠ {label}: low must be less than high.")
-                return
-            values[f"{attr}_lo"] = lo
-            values[f"{attr}_hi"] = hi
-
-        name = self._ent_name.get().strip() or "Custom"
-        ctx = ContextRanges(label=name, description="User-defined custom context.",
-                            **values)
-        try:
-            save_custom_context(ctx)
-        except Exception as exc:
-            self._lbl_error.configure(text=f"⚠ Could not save: {exc}")
-            return
-        EXPERIMENTAL_CONTEXTS["custom"] = ctx
-        if self._on_saved is not None:
-            self._on_saved()
-        self.destroy()
 
 
 class MethodAgreementDialog(ctk.CTkToplevel):
@@ -1552,10 +1548,12 @@ class MethodAgreementDialog(ctk.CTkToplevel):
         # below so it always reserves its slice of the cavity -- packing
         # it last (side="top", default) let a tall methods/breakdown/list
         # stack squeeze it down past the window's bottom edge.
-        ctk.CTkButton(self, text="Close", command=self.destroy,
-                     fg_color=BORDER, hover_color=BORDER2, text_color=TEXT,
-                     font=FONT_BTN_SEC, height=32, corner_radius=8
-                     ).pack(side="bottom", fill="x", padx=16, pady=16)
+        ctk.CTkButton(
+            self,
+            text="Close",
+            command=self.destroy,
+            **button_style("secondary"),
+        ).pack(side="bottom", fill="x", padx=16, pady=16)
 
         # ── Methods compared ─────────────────────────────────────────
         methods_card = ctk.CTkFrame(self, fg_color=CARD, corner_radius=8)
@@ -1623,10 +1621,13 @@ class MethodAgreementDialog(ctk.CTkToplevel):
                 ctk.CTkLabel(row, text=f"t = {t:.3f} s", font=FONT_SMALL,
                              text_color=TEXT, anchor="w").pack(
                                  side="left", padx=(10, 4), pady=6)
-                ctk.CTkButton(row, text="→ View", width=70, height=24,
-                             font=FONT_SMALL, fg_color=BORDER, hover_color=BORDER2,
-                             text_color=TEXT, command=lambda t=t: self._jump_to(t)
-                             ).pack(side="right", padx=(4, 10), pady=4)
+                ctk.CTkButton(
+                    row,
+                    text="→ View",
+                    width=70,
+                    command=lambda t=t: self._jump_to(t),
+                    **button_style("secondary"),
+                ).pack(side="right", padx=(4, 10), pady=4)
             if len(times) > self.MAX_ROWS:
                 ctk.CTkLabel(
                     scroll, text=f"… {len(times) - self.MAX_ROWS} more not shown "
@@ -1646,7 +1647,7 @@ class MethodAgreementDialog(ctk.CTkToplevel):
             app.ui.nav_pos = max(0.0, min(t - win / 2, max(0.0, sig_dur - win)))
             app._sync_nav_pos_entry()
             try:
-                app.tabs.set("📈 Detection")
+                app.tabs.set(TAB_DETECTION)
             except Exception as e:
                 log.debug("tabs.set Detection failed: %s", e)
             app._draw_detail()
@@ -1731,14 +1732,16 @@ class CohortTrendsDialog(ctk.CTkToplevel):
         colors["Ungrouped"] = MUTED
 
         specs = [
-            ("hr_mean", "Heart rate (bpm)"),
-            ("sdnn",    "SDNN (ms)"),
-            ("rmssd",   "RMSSD (ms)"),
+            ("hr_mean", "Heart rate (bpm)", "HR"),
+            ("sdnn",    "SDNN (ms)",        "SDNN"),
+            ("rmssd",   "RMSSD (ms)",       "RMSSD"),
         ]
         axes = fig.subplots(3, 1, sharex=True)
-        for ax, (key, ylabel) in zip(axes, specs):
+        for ax, (key, ylabel, short) in zip(axes, specs):
+            n_present = 0
             for name, items in groups.items():
                 pts = [(dt, r[key]) for r, dt in items if r.get(key) is not None]
+                n_present += len(pts)
                 if not pts:
                     continue
                 xs, ys = zip(*pts)
@@ -1747,6 +1750,16 @@ class CohortTrendsDialog(ctk.CTkToplevel):
                     ax.plot(xs, ys, "-", color=col, alpha=0.5, lw=1.2, zorder=2)
                 ax.scatter(xs, ys, color=col, s=28, zorder=3, label=name,
                           edgecolors=PLOT["bg"], linewidths=0.6)
+            # Most existing registry rows predate SDNN/RMSSD being saved at
+            # all -- say so, instead of leaving a sparse plot that reads as
+            # a bug rather than old data waiting to be backfilled.
+            n_missing = len(rows) - n_present
+            if n_missing:
+                ax.text(0.99, 0.05,
+                        f"{short} missing for {n_missing} of {len(rows)} "
+                        "recordings — save session again to backfill",
+                        transform=ax.transAxes, ha="right", va="bottom",
+                        fontsize=7, color=PLOT["muted"], style="italic")
             ax.set_facecolor(PLOT["axes"])
             ax.set_ylabel(ylabel, color=PLOT["muted"], fontsize=9)
             ax.tick_params(colors=PLOT["muted"], labelsize=8)
@@ -1756,14 +1769,341 @@ class CohortTrendsDialog(ctk.CTkToplevel):
 
         # One shared legend on the top subplot -- the colour mapping is
         # identical across all three, repeating it three times would just
-        # be noise.
+        # be noise. Anchored above the axes (not "upper left" inside it) so
+        # it never overprints the earliest data points.
         handles, labels = axes[0].get_legend_handles_labels()
         if handles:
             by_label = dict(zip(labels, handles))
             axes[0].legend(by_label.values(), by_label.keys(),
-                          framealpha=0, loc="upper left", fontsize=7,
-                          ncol=min(4, len(by_label)))
+                          framealpha=0, loc="lower left",
+                          bbox_to_anchor=(0.0, 1.02, 1.0, 0.08), mode="expand",
+                          fontsize=7, ncol=min(4, len(by_label)))
 
         axes[-1].set_xlabel("Saved at", color=PLOT["muted"], fontsize=9)
         fig.autofmt_xdate(rotation=25)
+
+
+class CalibrationDialog(ctk.CTkToplevel):
+    """Cohort calibration of the CSI / CPI gains ks / kp (Time course >
+    Autonomic > Calibrate ks/kp...), after Candia-Rivera et al.,
+    J Physiol 2025.
+
+    Reads the event-locked rows saved to the cohort registry (label and
+    project filters, one method / window configuration at a time), and
+    shows, per event or per subject mean: the paired Wilcoxon Z(k) of CSI
+    (from ΔD and ΔSD2) and of CPI (from ΔD and ΔSD1) for k = 1..20 with
+    the knee marked, the counts, and the pre vs post tests of CSI and CPI
+    at the CURRENT gains (Bonferroni over the two indices). The label
+    filter opens on the label with the most events (one condition
+    contrast, as the paper's rest vs dobutamine); "All labels" pools them
+    and says so. "Apply" writes the knees into the Autonomic view's
+    entries -- after a confirmation when a knee sits on a reversed Z(k)
+    stretch or labels are pooled -- and nothing is recomputed until
+    ⟳ Compute is pressed there; the tests at gains chosen on these events
+    are then marked in-sample. All statistics are pure helpers in
+    ecg.ui.event_locked_view; this window only reads its widgets and
+    draws. Non-modal, so the main window stays usable.
+    """
+
+    ALL = "All labels"
+
+    def __init__(self, parent, ks: float, kp: float,
+                 config: "Optional[tuple]" = None, project: str = "",
+                 on_apply: "Optional[Callable[[float, float], None]]" = None) -> None:
+        super().__init__(parent)
+        self.title("Calibrate ks / kp — cohort registry")
+        self.geometry("1080x860")
+        self.minsize(820, 620)
+        self.resizable(True, True)
+        self.configure(fg_color=PANEL)
+        self.lift()
+        self.focus_force()
+        self._app = parent
+        self._ks, self._kp = float(ks), float(kp)
+        self._on_apply = on_apply
+        self._want_config = (config_of(config[0], config[1])
+                             if config is not None else None)
+        self._rows: "list[dict]" = []
+        self._frame = registry_frame([])
+        self._configs: "dict[str, tuple]" = {}
+        self._cal = None
+        self._apply_values: "tuple[float, float]" = (self._ks, self._kp)
+        self._build(project)
+        self._reload()
+
+    # ── UI ───────────────────────────────────────────────────────────────
+
+    def _build(self, project: str) -> None:
+        ctk.CTkLabel(self, text="⚖  Calibrate ks / kp on the cohort registry",
+                     font=FONT_BTN_PRIMARY, text_color=TEXT, anchor="w"
+                     ).pack(fill="x", padx=16, pady=(14, 2))
+        ctk.CTkLabel(
+            self, text=CALIBRATION_RULE_NOTE + "  " + PSEUDO_REPLICATION_NOTE,
+            font=FONT_SMALL, text_color=MUTED, anchor="w", justify="left",
+            wraplength=1020).pack(fill="x", padx=16, pady=(0, 8))
+
+        # ── Filters ──
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=16, pady=(0, 4))
+        ctk.CTkLabel(bar, text="Label:", font=FONT_SMALL, text_color=MUTED).pack(side="left")
+        self._cb_label = ctk.CTkComboBox(
+            bar,
+            width=180,
+            state="readonly",
+            values=[self.ALL] + list_event_labels(),
+            command=lambda _v: self._reload(),
+            **combo_style(),
+        )
+        self._cb_label.set(self._default_label(project))
+        self._cb_label.pack(side="left", padx=(6, 14))
+        ctk.CTkLabel(bar, text="Project:", font=FONT_SMALL, text_color=MUTED).pack(side="left")
+        self._ent_project = ctk.CTkEntry(
+            bar,
+            width=160,
+            placeholder_text="(all projects)",
+            **input_style(),
+        )
+        if project:
+            self._ent_project.insert(0, project)
+        self._ent_project.pack(side="left", padx=(6, 4))
+        self._ent_project.bind("<Return>", lambda _e: self._reload())
+        ctk.CTkButton(
+            bar,
+            text="↻ Load",
+            width=70,
+            command=self._reload,
+            **button_style("secondary"),
+        ).pack(side="left", padx=(0, 14))
+        ctk.CTkLabel(bar, text="Configuration:", font=FONT_SMALL,
+                     text_color=MUTED).pack(side="left")
+        self._cb_config = ctk.CTkComboBox(
+            bar,
+            width=230,
+            state="readonly",
+            values=["—"],
+            command=lambda _v: self._recompute(),
+            **combo_style(),
+        )
+        self._cb_config.pack(side="left", padx=(6, 0))
+
+        agg = ctk.CTkFrame(self, fg_color="transparent")
+        agg.pack(fill="x", padx=16, pady=(2, 4))
+        ctk.CTkLabel(agg, text="Aggregation:", font=FONT_SMALL,
+                     text_color=MUTED).pack(side="left")
+        self._agg_var = tk.StringVar(value=DEFAULT_AGGREGATION)
+        for key, label in AGGREGATIONS.items():
+            ctk.CTkRadioButton(agg, text=label, value=key, variable=self._agg_var,
+                               font=FONT_SMALL, command=self._recompute
+                               ).pack(side="left", padx=(10, 0))
+        self._lbl_counts = ctk.CTkLabel(agg, text="", font=FONT_SMALL,
+                                        text_color=TEXT, anchor="e")
+        self._lbl_counts.pack(side="right")
+        # Valid events per label of the project (the label filter's choices).
+        self._lbl_labels = ctk.CTkLabel(self, text="", font=FONT_HINT,
+                                        text_color=MUTED, anchor="w", justify="left",
+                                        wraplength=1020)
+        self._lbl_labels.pack(fill="x", padx=16, pady=(0, 2))
+
+        # ── Bottom bar (packed before the flexible middle, so it always shows) ──
+        bottom = ctk.CTkFrame(self, fg_color="transparent")
+        bottom.pack(side="bottom", fill="x", padx=16, pady=(4, 14))
+        self._btn_apply = ctk.CTkButton(
+            bottom,
+            text="Apply",
+            command=self._apply,
+            **button_style("primary"),
+        )
+        self._btn_apply.pack(side="left")
+        ctk.CTkButton(
+            bottom,
+            text="📋  Copy results",
+            command=self._copy,
+            **button_style("secondary"),
+        ).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            bottom,
+            text="Export cohort CSV…",
+            command=self._export,
+            **button_style("secondary"),
+        ).pack(side="left", padx=(8, 0))
+        ctk.CTkButton(
+            bottom,
+            text="Close",
+            command=self.destroy,
+            width=90,
+            **button_style("secondary"),
+        ).pack(side="right")
+        # Copy / export feedback (the Apply note below stays visible).
+        self._lbl_status = ctk.CTkLabel(bottom, text="", font=FONT_HINT,
+                                        text_color=GREEN, anchor="w")
+        self._lbl_status.pack(side="left", padx=(12, 0))
+        self._lbl_apply = ctk.CTkLabel(
+            self, text=("Apply writes the knee values into the Autonomic view's ks / kp "
+                        "entries; it does not recompute anything until you press "
+                        "⟳ Compute there (and then ⟳ Compute event-locked)."),
+            font=FONT_HINT, text_color=MUTED, anchor="w", justify="left", wraplength=1020)
+        self._lbl_apply.pack(side="bottom", fill="x", padx=16)
+
+        # ── Z(k) plot + results ──
+        plot_card = ctk.CTkFrame(self, fg_color=PANEL, corner_radius=6)
+        plot_card.pack(fill="both", expand=True, padx=16, pady=(4, 4))
+        self._fig = Figure(figsize=(9.6, 3.6), dpi=96, facecolor=PLOT["bg"],
+                           layout="constrained")
+        self._canvas = FigureCanvasTkAgg(self._fig, master=plot_card)
+        self._canvas.get_tk_widget().pack(fill="both", expand=True, padx=4, pady=4)
+        self._txt = ctk.CTkTextbox(self, font=FONT_MONO, fg_color=CARD, text_color=TEXT,
+                                   border_width=0, height=250, wrap="none")
+        self._txt.pack(fill="x", padx=16, pady=(0, 4))
+
+    # ── data ─────────────────────────────────────────────────────────────
+
+    def _filters(self) -> "tuple[Optional[str], Optional[str]]":
+        lab = self._cb_label.get()
+        proj = self._ent_project.get().strip()
+        return (None if lab == self.ALL else lab), (proj or None)
+
+    def _reload(self) -> None:
+        """Read the registry with the label / project filters, list its
+        configurations, then recompute."""
+        label, project = self._filters()
+        self._rows = list_event_rows(label=label, project_name=project, valid_only=True)
+        self._frame = registry_frame(self._rows)
+        counts = self._label_counts(project)
+        self._lbl_labels.configure(
+            text=("Valid events per label: "
+                  + ", ".join(f"{lab} ({n})" for lab, n in counts.items())
+                  + ("   ⚠ “All labels” pools different condition contrasts — the "
+                     "paper calibrated on one (rest vs dobutamine)."
+                     if label is None and len(counts) > 1 else ""))
+            if counts else "",
+            text_color=ORANGE if (label is None and len(counts) > 1) else MUTED)
+        opts = config_options(self._frame)
+        self._configs = {f"{config_label(cfg)}   ({n} events)": cfg for cfg, n in opts}
+        names = list(self._configs) or ["—"]
+        current = self._configs.get(self._cb_config.get())
+        pick = next((n for n, c in self._configs.items() if c == current), None)
+        if pick is None and self._want_config is not None:
+            pick = next((n for n, c in self._configs.items() if c == self._want_config), None)
+        self._cb_config.configure(values=names)
+        self._cb_config.set(pick or names[0])
+        try:                                    # labels saved since the dialog opened
+            self._cb_label.configure(values=[self.ALL] + list_event_labels())
+        except Exception as exc:
+            log.debug("CalibrationDialog: label list: %s", exc)
+        self._recompute()
+
+    def _recompute(self) -> None:
+        cfg = self._configs.get(self._cb_config.get())
+        agg = self._agg_var.get()
+        try:
+            cal = cohort_calibration(self._frame, self._ks, self._kp,
+                                     aggregation=agg, config=cfg)
+        except Exception as exc:
+            log.exception("CalibrationDialog: calibration failed")
+            self._set_text(f"  Calibration failed: {exc}")
+            return
+        self._cal = cal
+        c = cal.counts
+        self._lbl_counts.configure(
+            text=(f"n events = {c['n_events']}  ·  n subjects = {c['n_subjects']}  ·  "
+                  f"n recordings = {c['n_recordings']}"),
+            text_color=TEXT if c["n_events"] else ORANGE)
+        self._fig.clear()
+        self._fig.patch.set_facecolor(PLOT["bg"])
+        draw_calibration(self._fig, cal)
+        self._canvas.draw_idle()
+        if not self._rows:
+            label, project = self._filters()
+            filt = " matching the filters" if (label or project) else ""
+            self._set_text(
+                f"  No valid event-locked row in the cohort registry{filt}.\n\n"
+                "  For each recording: Time course > Autonomic > ⟳ Compute, then below it "
+                "⟳ Compute event-locked, then 💾 Save to cohort registry (with the "
+                "Subject ID and Project set in the Recording sheet: click the file name in the header).")
+        else:
+            self._set_text(calibration_text(cal))
+        ks, kp, text, enabled = apply_plan(cal)
+        self._apply_values = (ks, kp)
+        self._btn_apply.configure(text=text, state="normal" if enabled else "disabled")
+
+    def _set_text(self, text: str) -> None:
+        self._txt.configure(state="normal")
+        self._txt.delete("1.0", "end")
+        self._txt.insert("1.0", text)
+        self._txt.configure(state="disabled")
+
+    # ── actions ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _label_counts(project: "Optional[str]") -> "dict[str, int]":
+        """Valid registry events per label (of *project*, None = all), most
+        first."""
+        from ecg.ui.event_locked_view import label_counts
+        try:
+            return label_counts(registry_frame(
+                list_event_rows(project_name=project or None, valid_only=True)))
+        except Exception as exc:
+            log.debug("CalibrationDialog: label counts: %s", exc)
+            return {}
+
+    def _default_label(self, project: str) -> str:
+        """The label with the most valid events (one contrast), else All."""
+        lab = default_calibration_label(self._label_counts(project.strip() or None))
+        return lab if lab is not None else self.ALL
+
+    def _apply(self) -> None:
+        if self._cal is not None:
+            caveats = apply_caveats(self._cal)
+            if caveats and not messagebox.askyesno(
+                    "Apply these gains?",
+                    "\n\n".join(caveats)
+                    + "\n\nWrite them into the Autonomic view anyway?",
+                    icon="warning", parent=self):
+                return
+        ks, kp = self._apply_values
+        if self._on_apply is not None:
+            self._on_apply(ks, kp)
+        self._ks, self._kp = float(ks), float(kp)
+        self._recompute()
+        ins = in_sample(self._cal) if self._cal is not None else {}
+        self._lbl_apply.configure(
+            text=(f"✓ ks = {ks:g}, kp = {kp:g} written to the Autonomic view — not "
+                  "applied yet: press ⟳ Compute there to recompute CSI / CPI. The "
+                  "tests below are now at these gains"
+                  + (" — IN-SAMPLE (chosen on these same events, so their p-values "
+                     "are optimistic): select another project or label to test them."
+                     if any(ins.values()) else ".")),
+            text_color=ORANGE if any(ins.values()) else GREEN)
+
+    def _copy(self) -> None:
+        if self._cal is None:
+            return
+        df = tests_frame(self._cal)
+        tsv = self._app._df_to_tsv(df) if hasattr(self._app, "_df_to_tsv") else df.to_csv(sep="\t", index=False)
+        knees = "\t".join(f"knee_{k}\t{v:g}" for k, v in self._cal.knees.items())
+        self.clipboard_clear()
+        self.clipboard_append(tsv + "\n" + knees)
+        self._lbl_status.configure(text="Results copied as TSV — paste into Excel ✓")
+
+    def _export(self) -> None:
+        cfg = self._configs.get(self._cb_config.get())
+        rows = [r for r in self._rows if cfg is None or row_config(r) == cfg]
+        if not rows:
+            messagebox.showinfo("Nothing to export", "No registry row matches the filters.",
+                                parent=self)
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = filedialog.asksaveasfilename(
+            parent=self, defaultextension=".csv",
+            initialfile=f"event_locked_cohort_{ts}.csv",
+            filetypes=[("CSV", "*.csv"), ("All files", "*.*")],
+            title="Export the cohort's event-locked rows as CSV")
+        if not path:
+            return
+        try:
+            n = export_event_rows_csv(path, rows)
+        except OSError as exc:
+            messagebox.showerror("Export failed", str(exc), parent=self)
+            return
+        self._lbl_status.configure(text=f"Exported {n} row(s) → {Path(path).name} ✓")
 

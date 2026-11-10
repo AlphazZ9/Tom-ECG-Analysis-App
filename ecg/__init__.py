@@ -5,8 +5,7 @@ Package layout
 --------------
 ecg/
   core/
-    models.py        — physiology constants, experimental-context reference
-                       ranges, dataclasses, typed dicts
+    models.py        — physiology constants, dataclasses, typed dicts
     filtering.py     — bandpass, notch, normalise, downsample helpers
     detection.py     — peak detection, RR artifact handling, rhythm /
                        abnormal-event classification
@@ -23,7 +22,7 @@ ecg/
     plots.py         — style_axes, CanvasSlot (matplotlib ↔ Tk bridge)
     dialogs.py       — ThemeDialog, ArtifactReviewDialog, Annotation dialogs
     wave_editor.py   — WaveTemplateMiniEditor
-    sidebar.py       — CollapsibleSection
+    popover.py       — Popover (Recording sheet, Filters, ⋯ menu, Report > More)
     app.py           — ECGApp (main CTk window)
 """
 

@@ -23,11 +23,40 @@ except ImportError:
     h5py = None       # type: ignore[assignment]
     H5_AVAILABLE = False
 
+_DROP = object()   # _json_safe(): value not representable in JSON
+
+
+def _json_safe(val: Any) -> Any:
+    """*val* as plain JSON types (numpy scalars unwrapped, tuples/arrays as
+    lists, dicts with str keys), or _DROP when it holds anything else."""
+    if val is None or isinstance(val, (bool, str)):
+        return val
+    if isinstance(val, np.generic):
+        val = val.item()
+    if isinstance(val, (bool, int, float, str)):
+        return val
+    if isinstance(val, np.ndarray):
+        val = val.tolist()
+    if isinstance(val, (list, tuple)):
+        items = [_json_safe(v) for v in val]
+        return _DROP if any(v is _DROP for v in items) else items
+    if isinstance(val, dict):
+        out = {str(k): _json_safe(v) for k, v in val.items()}
+        return _DROP if any(v is _DROP for v in out.values()) else out
+    return _DROP
+
+
 def _serialise_results(results: dict) -> dict:
     """Convert analysis results dict to a plain JSON-compatible form.
 
     DataFrames become {orient:'list'} dicts; numpy arrays become lists;
     other primitives are passed through unchanged.
+
+    A DataFrame's ``attrs`` are kept too (JSON-representable entries
+    only): they carry what the table alone cannot say -- why a spectrum
+    was withheld (hrv_freq ``withheld_reason``), the non-linear beat
+    truncation and withheld pair metrics, the RR exclusion counts -- and
+    a restored session must still disclose them.
     """
     out: dict = {}
     for key, val in results.items():
@@ -35,6 +64,10 @@ def _serialise_results(results: dict) -> dict:
             out[key] = None
         elif isinstance(val, pd.DataFrame):
             out[key] = {"__dataframe__": True, "data": val.to_dict(orient="list")}
+            attrs = {k: v for k, v in ((str(k), _json_safe(v)) for k, v in val.attrs.items())
+                     if v is not _DROP}
+            if attrs:
+                out[key]["attrs"] = attrs
         elif isinstance(val, np.ndarray):
             out[key] = {"__ndarray__": True, "data": val.tolist(), "dtype": str(val.dtype)}
         else:
@@ -50,7 +83,10 @@ def _deserialise_results(raw: dict) -> dict:
         if val is None:
             out[key] = None
         elif isinstance(val, dict) and val.get("__dataframe__"):
-            out[key] = pd.DataFrame(val["data"])
+            df = pd.DataFrame(val["data"])
+            if isinstance(val.get("attrs"), dict):
+                df.attrs.update(val["attrs"])
+            out[key] = df
         elif isinstance(val, dict) and val.get("__ndarray__"):
             out[key] = np.array(val["data"], dtype=val.get("dtype", "float64"))
         else:
