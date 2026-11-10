@@ -445,6 +445,7 @@ class SignalController:
         self.app._reset_kpis()
         self.app._reset_result_plots()
         self.app._reset_tab_status_labels()
+        self.app.analysis_ctrl.invalidate_autonomic(peaks_changed=False)
 
         if bundle["detected_ch"] != bundle["requested_ch"]:
             if self.app.ent_channel is not None:
@@ -687,6 +688,7 @@ class SignalController:
         self.app._reset_kpis()
         self.app._reset_result_plots()
         self.app._reset_tab_status_labels()
+        self.app.analysis_ctrl.invalidate_autonomic()
 
         # ── UI feedback for auto-detected channel / fs ────────────────────────
         def _subject_from_channel(name: str) -> Optional[str]:
@@ -764,6 +766,11 @@ class SignalController:
             self.app.lbl_sig_duration.configure(  # type: ignore[union-attr]
                 text=f"total duration: {dur:.1f} s", text_color=MUTED)
         self.app._draw_detail()
+        # HRV tab's RR/HR tachogram is live from rpeaks_ok/fs alone (see
+        # PlotController.refresh_live_rr) -- same "no Core Analysis
+        # dependency" reasoning as the Detection tab's own mini-strip just
+        # drawn above, so it doesn't need to wait for Analyze either.
+        self.app.plot_ctrl.refresh_live_rr()
 
         # Reset analysis window on new signal load and update feedback label
         self.app.analysis.t_start = 0.0
@@ -857,6 +864,18 @@ class SignalController:
 
         self.app._set_status(
             "Analysis window updated — click Analyze to refresh.", BLUE)
+        self._flag_autonomic_window()
+
+    def _flag_autonomic_window(self) -> None:
+        """An Autonomic result computed on another analysis window is now
+        stale: its status label says so (it is not dropped -- like the core
+        results, it stays until recomputed)."""
+        ctrl = getattr(self.app, "analysis_ctrl", None)
+        if ctrl is not None and hasattr(ctrl, "refresh_autonomic_status"):
+            try:
+                ctrl.refresh_autonomic_status()
+            except Exception as exc:
+                log.debug("autonomic status refresh failed: %s", exc)
 
     def reset_analysis_window(self) -> None:
         """Reset analysis window to full signal."""
@@ -878,6 +897,7 @@ class SignalController:
                 self.app.lbl_analysis_window.configure(  # type: ignore[union-attr]
                     text="", text_color=MUTED)
         self.app._set_status("Analysis window reset — full signal.", MUTED)
+        self._flag_autonomic_window()
 
     def compute_filter_preview_segment(
         self, t_start: float, t_end: float,
@@ -1020,6 +1040,7 @@ class SignalController:
         self.app.analysis.results              = None
         self.app.analysis.epoch_df             = None
         self.app.analysis.rolling_hrv_df       = None
+        self.app.analysis_ctrl.invalidate_autonomic(peaks_changed=False)
         self.app.analysis.t_start      = 0.0
         self.app.analysis.t_end        = 0.0
         if self.app.ui.hover_after_id is not None:

@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from ecg.ui.state import MIN_VIEW_WINDOW_S
 from ecg.ui.theme import AMBER, BLUE_DARK, BORDER, MUTED, TEXT
 
 if TYPE_CHECKING:
@@ -207,7 +208,7 @@ class NavigationController:
             win = float(app.ent_arr_win.get())
         except Exception:
             win = 3.0
-        app.analysis.arr_win = max(0.5, win)
+        app.analysis.arr_win = max(MIN_VIEW_WINDOW_S, win)
 
         padding = max(app.analysis.arr_win * 0.25, 0.5)
         ep_dur  = max(ev.duration_s, 0.1)
@@ -219,6 +220,15 @@ class NavigationController:
         if ep_dur + 2 * padding > app.analysis.arr_win:
             app.analysis.arr_win = min(ep_dur + 2 * padding, 30.0)
             t_start = max(0.0, ev.t_start - padding)
+
+        # draw_arr_detail() re-reads the window from the entry box, so write
+        # the (possibly expanded) window back -- otherwise the expansion
+        # above is silently undone and the long episode is cut off.
+        try:
+            app.ent_arr_win.delete(0, "end")
+            app.ent_arr_win.insert(0, f"{app.analysis.arr_win:.2f}")
+        except Exception as _exc:
+            log.debug("ent_arr_win update failed: %s", _exc)
 
         app.analysis.arr_nav_pos = t_start
         app._draw_arr_detail()
@@ -329,7 +339,7 @@ class NavigationController:
         cursor_x = float(event.xdata)
         factor   = 0.8 if event.button == "up" else 1.25   # up = zoom in
 
-        new_win  = max(0.5, min(float(app.signal.time[-1]), cur_win * factor))
+        new_win  = max(MIN_VIEW_WINDOW_S, min(float(app.signal.time[-1]), cur_win * factor))
         # Keep the point under the cursor stationary
         frac     = (cursor_x - x_min) / max(cur_win, 1e-6)
         new_xmin = cursor_x - frac * new_win

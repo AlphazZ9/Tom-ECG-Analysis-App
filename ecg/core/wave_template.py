@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import pickle
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
@@ -85,7 +84,8 @@ class WaveTemplate:
     def load(cls) -> "WaveTemplate":
         """Load template from disk, falling back to defaults on any error.
 
-        Migrates a legacy ``.pkl`` file to JSON on first run after upgrade.
+        Legacy pickle files are left untouched and never deserialised because
+        pickle can execute arbitrary code during loading.
         """
         obj = cls()
 
@@ -108,19 +108,12 @@ class WaveTemplate:
             except Exception as exc:
                 log.warning("WaveTemplate.load (JSON) failed: %s — trying legacy", exc)
 
-        # ── Fallback: migrate legacy pickle ─────────────────────────────
+        # Preserve old data but never execute pickle payloads during startup.
         if _WAVE_TEMPLATE_PATH_LEGACY.exists():
-            try:
-                with open(_WAVE_TEMPLATE_PATH_LEGACY, "rb") as fh:
-                    legacy = pickle.load(fh)
-                obj.__dict__.update(legacy)
-                obj.save()                          # write JSON
-                _WAVE_TEMPLATE_PATH_LEGACY.unlink() # remove old pickle
-                log.info("WaveTemplate migrated from pickle → JSON (%s)",
-                         WAVE_TEMPLATE_PATH)
-                return obj
-            except Exception as exc:
-                log.warning("WaveTemplate legacy migration failed: %s — using defaults", exc)
+            log.warning(
+                "Ignoring legacy pickle wave template at %s; recalibrate and "
+                "save it again to use the safe JSON format",
+                _WAVE_TEMPLATE_PATH_LEGACY)
 
         return obj
 

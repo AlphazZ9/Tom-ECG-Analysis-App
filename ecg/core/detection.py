@@ -22,14 +22,19 @@ Utilitaires partagés
   • detect_rr_artifacts        — doublets + bornes physio + ectopique
   • apply_artifact_decisions   — applique accept/remove
   • correct_rr_artifacts       — auto-correct
+  • active_removed_samples     — battements retirés encore absents (ruptures HRV)
+  • merge_artifact_reports     — rapport cumulatif (passes successives)
+  • drop_removed_peaks         — ré-applique les retraits (restauration de session)
   • recover_missed_beats        — battements manqués
   • classify_arrhythmias        — règle-basée
+  • arrhythmia_baseline_window  — fenêtre de référence de classify_arrhythmias (affichage)
+  • arrhythmia_baseline_info    — idem + valeur de référence et fiabilité
 """
 from __future__ import annotations
 
 import dataclasses
 import logging
-from typing import Callable, Optional
+from typing import Callable, Iterable, Optional
 
 import numpy as np
 from scipy.signal import find_peaks, savgol_filter, peak_prominences, peak_widths
@@ -37,7 +42,6 @@ from scipy.signal import find_peaks, savgol_filter, peak_prominences, peak_width
 from ecg.core.filtering import downsample_signal
 from ecg.core.models import (
     ArrhythmiaEvent,
-    EXPERIMENTAL_CONTEXTS,
     MouseECG,
 )
 
@@ -1568,6 +1572,15 @@ def detect_peaks_wavelet(
     thresh_amp : P10 des prominences (diagnostic interne ; le tracé du
                  seuil dans l'UI utilise le calcul propre d'apply_threshold).
     """
+    signal = np.asarray(signal, dtype=np.float64)
+    if len(signal) < 10:
+        # Same floor and same graceful empty-result contract as
+        # detect_peaks_sg_derivative/detect_peaks_envelope_max -- this
+        # detector was missing it, and pywt.cwt() raises ValueError on an
+        # empty array instead of returning "no peaks found", which crashed
+        # the whole detection pipeline instead of just finding nothing.
+        return np.array([], dtype=int), np.array([]), 0.0
+
     try:
         import pywt
     except ImportError as exc:
@@ -2184,6 +2197,14 @@ def detect_peaks_envelope_max(
 
 
 
+# detect_rr_artifacts Pass 2: how many times the premature-run re-check may
+# extend a run of flagged ectopic beats (see the loop at the end of Pass 2).
+# One pass already catches every beat of a couplet/triplet (its inner beats
+# are flagged as "both intervals short"); the bound only stops a sustained
+# rate change from cascading through many beats.
+_ECTOPIC_RUN_ITERATIONS = 3
+
+
 def detect_rr_artifacts(
     rpeaks:        np.ndarray,
     fs:            float,
@@ -2211,7 +2232,61 @@ def detect_rr_artifacts(
                   > rr_max_ms flags nothing: it almost always means a missed
                   beat or genuine pause/AV-block, not a spurious flanking
                   peak, so there is no peak here whose removal fixes anything.
-    Pass 2       : écart à la médiane locale (ectopic) — FIX ⑥ sans biais rr_bi.
+    Pass 2       : ectopic — SHORT-side evidence only, against the local
+                  median RR (ref, FIX ⑥ without rr_bi bias). An interval is
+                  "too short" when < ref × (1 − dev_threshold) and "long"
+                  when > ref × (1 + dev_threshold); intervals touching a
+                  peak already flagged by Pass 0/1 are already accounted
+                  for. Each too-short interval is attributed to ONE of its
+                  two beats:
+                    • a beat whose arrival AND departure are both too short
+                      (a spurious peak splitting a normal interval, or an
+                      inner beat of a premature run) is flagged;
+                    • the FIRST interval of the recording, when short, is
+                      ambiguous (beat 0 has no arrival interval): beat 1 is
+                      flagged only if its departure is long (a compensatory
+                      pause — beat 1 was premature), otherwise beat 0 is (a
+                      spurious leading detection, e.g. a filter-edge
+                      transient). The LAST interval mirrors this: beat n−2
+                      is flagged only if its arrival is long, otherwise the
+                      last beat is;
+                    • otherwise the beat ENDING the short interval — the
+                      premature beat — is flagged, unless the previous beat
+                      was just flagged (its removal already absorbs it);
+                    • premature runs: that skip is then re-checked against
+                      the updated sequence (up to _ECTOPIC_RUN_ITERATIONS
+                      times). A skipped beat whose own arrival was short is
+                      flagged as well when the interval it would arrive with
+                      after its flagged predecessor(s) are removed is LONG —
+                      the predecessor was the first beat of a couplet /
+                      triplet, not a spurious split (whose removal leaves a
+                      normal interval) — unless that merged arrival spans
+                      about two beats or more (≥ 2·ref·(1 − dev_threshold))
+                      with no compensatory (long) departure after it, i.e.
+                      the beat is back on the rhythm. Every beat of
+                      [80, 80, 160] or [80, 80, 80, 200] among 120 ms beats
+                      is caught.
+                  A beat whose only short interval is its departure is the
+                  normal beat before a premature one and is never flagged
+                  (except at the recording edges, above).
+                  deviation = (ref − shortest attributed interval) / ref.
+                  A LONG interval alone never flags anything (a pause, a
+                  missed beat, the compensatory pause after a premature
+                  beat): removing a beat can only lengthen it further.
+                  Missed beats are handled by recover_missed_beats(), pauses
+                  are surfaced by classify_arrhythmias(), and analyse_core()
+                  excludes the out-of-range interval from HRV without
+                  bridging it -- and, given apply_artifact_decisions()'s
+                  break_samples as breaks, also the interval left
+                  spanning each removed real (premature) beat.
+
+    Each candidate dict: index, sample, type, rr_prev_ms, rr_next_ms,
+    rr_ref_ms, deviation, decision ("remove") and rr_long_ms -- for an
+    ectopic candidate the length above which an interval counts as long
+    against its local reference (rr_ref_ms × (1 + dev_threshold)), NaN
+    otherwise. apply_artifact_decisions() uses it to tell a removed real
+    beat (the interval spanning it is long) from a removed spurious split
+    (the merged interval is normal).
     """
     rpeaks = np.sort(np.asarray(rpeaks, dtype=int).flatten())
     n      = len(rpeaks)
@@ -2221,7 +2296,8 @@ def detect_rr_artifacts(
     rr_ms   = np.diff(rpeaks).astype(np.float64) / fs * 1000
     flagged: dict[int, dict] = {}
 
-    def _add(i: int, kind: str, deviation: float, ref: float) -> None:
+    def _add(i: int, kind: str, deviation: float, ref: float,
+             rr_long: float = float("nan")) -> None:
         if i in flagged:
             return
         rr_prev = float(rr_ms[i - 1]) if i > 0     else float("nan")
@@ -2230,6 +2306,7 @@ def detect_rr_artifacts(
             index=i, sample=int(rpeaks[i]), type=kind,
             rr_prev_ms=rr_prev, rr_next_ms=rr_next,
             rr_ref_ms=ref, deviation=deviation, decision="remove",
+            rr_long_ms=rr_long,
         )
 
     # Pré-passe 0 : doublets
@@ -2275,12 +2352,14 @@ def detect_rr_artifacts(
         # want to see. Left unflagged; classify_arrhythmias() already
         # surfaces overlong gaps as "pause" events for review.
 
-    # Pass 2 : ectopique (médiane locale sans biais rr_bi)
+    # Pass 2 : ectopique (médiane locale sans biais rr_bi) — short side only
     half         = window_beats // 2
     flagged_mask = np.zeros(n, dtype=bool)
     for idx in flagged:
         flagged_mask[idx] = True
 
+    # Local reference RR per unflagged beat (median of its neighbours' RRs)
+    refs = np.full(n, np.nan)
     for i in range(n):
         if flagged_mask[i]:
             continue
@@ -2298,13 +2377,101 @@ def detect_rr_artifacts(
         if len(nbr_rr) < 3:
             continue
         ref = float(np.median(nbr_rr))
-        if ref < 1e-3:
+        if ref >= 1e-3:
+            refs[i] = ref
+
+    # arr_short[i] / dep_short[i]: beat i's arrival (rr_ms[i-1]) / departure
+    # (rr_ms[i]) interval is too short against beat i's own reference.
+    # Intervals touching a Pass 0/1 peak are excluded (already accounted
+    # for); NaN refs compare False, so beats without a reference never flag.
+    short_lim = refs * (1.0 - dev_threshold)
+    long_lim  = refs * (1.0 + dev_threshold)
+    open_iv   = ~(flagged_mask[:-1] | flagged_mask[1:])
+    arr_short = np.zeros(n, dtype=bool)
+    dep_short = np.zeros(n, dtype=bool)
+    arr_short[1:]  = open_iv & (rr_ms < short_lim[1:])
+    dep_short[:-1] = open_iv & (rr_ms < short_lim[:-1])
+
+    def _add_ectopic(i: int, short_iv: "Optional[float]" = None,
+                     ref: "Optional[float]" = None) -> None:
+        # short_iv/ref: the attributed short interval and its reference when
+        # beat i's own masks don't hold them (recording-edge cases below).
+        if short_iv is None:
+            short_iv = min(
+                rr_ms[i - 1] if arr_short[i] else np.inf,
+                rr_ms[i]     if dep_short[i] else np.inf,
+            )
+        if ref is None or not np.isfinite(ref):
+            ref = refs[i]
+        dev = (ref - short_iv) / ref
+        _add(i, "ectopic", round(float(dev), 3), round(float(ref), 1),
+             rr_long=round(float(ref) * (1.0 + dev_threshold), 1))
+        flagged_mask[i] = True
+
+    # Both intervals short: this beat alone explains both of them.
+    for i in np.flatnonzero(arr_short & dep_short):
+        _add_ectopic(int(i))
+
+    # Recording edges. A short FIRST interval is ambiguous -- beat 0 has no
+    # arrival interval, so blaming the beat that ends it (the rule below)
+    # deleted the real beat 1 whenever beat 0 itself was spurious (e.g. a
+    # filter-edge transient). Beat 1 is premature only if a compensatory
+    # (long) departure follows it; otherwise beat 0 goes. The LAST interval
+    # mirrors this: beat n-2 goes only if it arrived after a long interval
+    # (it is then the displaced one between two on-rhythm beats), otherwise
+    # the last beat does (premature or a spurious trailing detection).
+    if open_iv[0] and (arr_short[1] or dep_short[0]) \
+            and not (flagged_mask[0] or flagged_mask[1]):
+        ref_edge = refs[1] if np.isfinite(refs[1]) else refs[0]
+        beat = 1 if rr_ms[1] > long_lim[1] else 0
+        _add_ectopic(beat, float(rr_ms[0]), ref_edge)
+    last = n - 2   # index of the last interval (beats n-2 → n-1)
+    if open_iv[last] and (dep_short[n - 2] or arr_short[n - 1]) \
+            and not (flagged_mask[n - 2] or flagged_mask[n - 1]):
+        ref_edge = refs[n - 2] if np.isfinite(refs[n - 2]) else refs[n - 1]
+        beat = n - 2 if rr_ms[last - 1] > long_lim[n - 2] else n - 1
+        _add_ectopic(beat, float(rr_ms[last]), ref_edge)
+
+    # Premature arrival: the beat ending the short interval, unless the
+    # previous beat is already flagged (its removal absorbs the interval).
+    for i in np.flatnonzero(arr_short):
+        if flagged_mask[i] or flagged_mask[i - 1]:
             continue
-        dev_arr = abs(rr_ms[i - 1] - ref) / ref if i > 0     else 0.0
-        dev_dep = abs(rr_ms[i]     - ref) / ref if i < n - 1 else 0.0
-        dev     = max(dev_arr, dev_dep)
-        if dev > dev_threshold:
-            _add(i, "ectopic", round(dev, 3), round(ref, 1))
+        _add_ectopic(int(i))
+
+    # Premature runs: re-check the beats skipped above against the updated
+    # sequence. Removing a spurious peak that split a normal interval leaves
+    # a NORMAL merged interval, so the next beat is genuine; removing the
+    # first beat of a couplet/triplet leaves a LONG one (two short coupling
+    # intervals merged), so the next beat is premature too and must go as
+    # well -- otherwise the surviving premature beat and its compensatory
+    # pause enter HRV as if they were normal intervals. A merged arrival of
+    # about two beats or more is the exception: the beat is then back on
+    # the rhythm (as after a single displaced beat) unless a compensatory
+    # (long) departure shows it still belongs to the run -- e.g. the last
+    # beat of [80, 80, 80, 200]. Each iteration can extend a run by one
+    # beat; bounded so a sustained rate change can't cascade.
+    double_lim = 2.0 * refs * (1.0 - dev_threshold)
+    for _ in range(_ECTOPIC_RUN_ITERATIONS):
+        newly: list[int] = []
+        for i in np.flatnonzero(arr_short & ~flagged_mask):
+            if not flagged_mask[i - 1]:
+                continue
+            j = i - 1
+            while j >= 0 and flagged_mask[j]:
+                j -= 1
+            if j < 0:
+                continue   # nothing left before it (beat 0 was the spurious one)
+            merged_ms = float(rpeaks[i] - rpeaks[j]) / fs * 1000
+            if merged_ms <= long_lim[i]:
+                continue   # predecessor was a spurious split: this beat is normal
+            comp_pause = i < n - 1 and rr_ms[i] > long_lim[i]
+            if merged_ms < double_lim[i] or comp_pause:
+                newly.append(int(i))
+        if not newly:
+            break
+        for i in newly:
+            _add_ectopic(i)
 
     candidates = sorted(flagged.values(), key=lambda c: c["index"])
     log.info(
@@ -2317,31 +2484,216 @@ def detect_rr_artifacts(
     return candidates
 
 
+def _removal_is_break(cand: dict, corrected: np.ndarray,
+                      fs: Optional[float]) -> bool:
+    """True when removing *cand* deleted a REAL beat, so the interval now
+    spanning it is not a normal-to-normal interval (an HRV break).
+
+    Only an ectopic removal can be one. A duplicate / non-physiological
+    peak (closer than Min R-R to another) is a spurious detection: removing
+    it gives back the true sinus-to-sinus interval, exactly like a manual
+    deletion in edit mode. An ectopic candidate is a real premature beat
+    when the interval spanning it in the *corrected* peaks is LONG against
+    its local reference (``rr_long_ms``: coupling + compensatory interval,
+    ≈ 2 RR); when that merged interval is normal the removed peak was a
+    spurious split of one sinus interval, not a beat. A removed peak with
+    no kept peak on one side (recording edge) is spanned by no interval.
+    Without ``rr_long_ms`` or *fs* every ectopic removal is a break -- the
+    conservative choice: one interval too many excluded, never a non-NN
+    interval let into HRV.
+    """
+    if cand.get("type") != "ectopic":
+        return False
+    s = int(cand["sample"])
+    j = int(np.searchsorted(corrected, s))
+    if j == 0 or j >= len(corrected):
+        return False
+    rr_long = cand.get("rr_long_ms")
+    try:
+        rr_long = float(rr_long) if rr_long is not None else float("nan")
+    except (TypeError, ValueError):
+        rr_long = float("nan")
+    if fs is None or not np.isfinite(rr_long) or float(fs) <= 0:
+        return True
+    span_ms = float(corrected[j] - corrected[j - 1]) / float(fs) * 1000.0
+    return span_ms > rr_long
+
+
+def _artifact_counts(types: "list[str]") -> dict:
+    return dict(
+        n_duplicate = sum(1 for t in types if t == "duplicate"),
+        n_nonphysio = sum(1 for t in types if t == "nonphysio"),
+        n_ectopic   = sum(1 for t in types if t == "ectopic"),
+    )
+
+
 def apply_artifact_decisions(
     rpeaks:     np.ndarray,
     candidates: list[dict],
+    fs:         Optional[float] = None,
 ) -> tuple[np.ndarray, dict]:
-    """Apply accept/remove decisions from a review pass."""
-    remove_samples = {c["sample"] for c in candidates if c["decision"] == "remove"}
-    keep_mask  = np.array([int(p) not in remove_samples for p in rpeaks], dtype=bool)
+    """Apply accept/remove decisions from a review pass.
+
+    Report keys:
+        n_in, n_out      : peak counts before / after
+        removed_samples  : sorted list of int sample indices of every peak
+                           actually removed (JSON-safe)
+        removed_types    : the candidate type of each, same order
+        break_samples    : the subset whose removal deleted a REAL beat --
+                           the BREAKS the HRV functions need
+                           (``rr_interval_series(..., breaks=...)``): the
+                           interval left spanning a removed premature beat
+                           is not a normal-to-normal interval and is
+                           excluded from HRV rather than treated as one.
+                           Removing a spurious detection (duplicate, non-
+                           physiological, split) restores a true NN
+                           interval and is not a break (see
+                           _removal_is_break; *fs* is needed to tell a
+                           split from a premature beat).
+        n_duplicate, n_nonphysio, n_ectopic : removed peaks per type
+        n_kept           : candidates the user chose to keep
+    """
+    rpeaks = np.asarray(rpeaks)
+    remove_by_sample = {int(c["sample"]): c for c in candidates if c["decision"] == "remove"}
+    keep_mask  = np.array([int(p) not in remove_by_sample for p in rpeaks], dtype=bool)
     corrected  = rpeaks[keep_mask]
+    corr_sorted = np.sort(corrected.astype(np.int64))
+    removed_samples = sorted(int(p) for p in rpeaks[~keep_mask])
+    removed_types   = [str(remove_by_sample[s].get("type", "unknown")) for s in removed_samples]
+    break_samples   = [s for s in removed_samples
+                       if _removal_is_break(remove_by_sample[s], corr_sorted, fs)]
     report = dict(
-        n_in        = len(rpeaks),
-        n_out       = int(keep_mask.sum()),
-        n_duplicate = sum(1 for c in candidates
-                         if c["decision"] == "remove" and c["type"] == "duplicate"),
-        n_nonphysio = sum(1 for c in candidates
-                         if c["decision"] == "remove" and c["type"] == "nonphysio"),
-        n_ectopic   = sum(1 for c in candidates
-                         if c["decision"] == "remove" and c["type"] == "ectopic"),
-        n_kept      = sum(1 for c in candidates if c["decision"] == "keep"),
+        n_in            = len(rpeaks),
+        n_out           = int(keep_mask.sum()),
+        removed_samples = removed_samples,
+        removed_types   = removed_types,
+        break_samples   = break_samples,
+        **_artifact_counts(removed_types),
+        n_kept          = sum(1 for c in candidates if c["decision"] == "keep"),
     )
     log.info(
-        "apply_artifact_decisions: %d → %d peaks  (−%d removed, %d kept by user)",
-        report["n_in"], report["n_out"],
-        report["n_in"] - report["n_out"], report["n_kept"],
+        "apply_artifact_decisions: %d → %d peaks  (−%d removed, %d HRV breaks, "
+        "%d kept by user)",
+        report["n_in"], report["n_out"], report["n_in"] - report["n_out"],
+        len(break_samples), report["n_kept"],
     )
     return corrected, report
+
+
+def _report_removals(report: "Optional[dict]") -> "dict[int, tuple[str, bool]]":
+    """{sample: (type, is_break)} of an artifact report's removed peaks.
+    Reports saved before removed_types / break_samples existed carry no
+    type ("unknown") and no break."""
+    if not report:
+        return {}
+    samples = [int(s) for s in (report.get("removed_samples") or [])]
+    types   = list(report.get("removed_types") or [])
+    if len(types) != len(samples):
+        types = ["unknown"] * len(samples)
+    breaks  = {int(s) for s in (report.get("break_samples") or [])}
+    return {s: (str(t), s in breaks) for s, t in zip(samples, types)}
+
+
+def merge_artifact_reports(
+    prev:        "Optional[dict]",
+    new:         "Optional[dict]",
+    rpeaks:      np.ndarray,
+    tol_samples: int = 1,
+) -> "Optional[dict]":
+    """Cumulative artifact report: the removals of *prev* and *new* (an
+    earlier pass and this one) whose peak is still absent from *rpeaks* --
+    the current, full corrected peak set -- with every count recomputed
+    from them, so the displayed "removed" figures and the HRV breaks always
+    describe the same removals.
+
+    A second auto-correction pass on already-corrected peaks removes
+    nothing new, and a reviewed removal stays in effect after a later
+    Analyze; both used to reset the counts to the last pass only while the
+    breaks persisted. A removed peak within *tol_samples* of a current peak
+    is back (re-detected, or re-added by hand) and is dropped.
+
+    n_out = len(rpeaks), n_in = n_out + the removals still in effect;
+    n_kept comes from *new* when given. Returns None when there is neither
+    report, or when *new* is None and none of *prev*'s removals remain
+    (a stale report). With *new* given the report is kept even with
+    nothing removed ("correction applied, no artifact").
+    """
+    if prev is None and new is None:
+        return None
+    removals = _report_removals(prev)
+    removals.update(_report_removals(new))
+    rp = np.asarray(rpeaks, dtype=np.int64).flatten() if rpeaks is not None else np.array([], np.int64)
+    still = active_removed_samples(list(removals), rp, tol_samples).tolist()
+    if new is None and not still:
+        return None
+    types = [removals[s][0] for s in still]
+    base  = dict(new if new is not None else prev)   # type: ignore[arg-type]
+    base.update(
+        n_out           = int(len(rp)),
+        n_in            = int(len(rp)) + len(still),
+        removed_samples = [int(s) for s in still],
+        removed_types   = types,
+        break_samples   = [int(s) for s in still if removals[s][1]],
+        **_artifact_counts(types),
+    )
+    base.setdefault("n_kept", 0)
+    return base
+
+
+def drop_removed_peaks(
+    rpeaks:          np.ndarray,
+    removed_samples: "Optional[Iterable[int]]",
+    tol_samples:     int = 1,
+    protected:       "Optional[Iterable[int]]" = None,
+) -> np.ndarray:
+    """Re-apply earlier artifact removals to a freshly re-detected peak set
+    (session restore re-runs detection from the full candidate set, which
+    brings every removed beat back). For each removed sample the NEAREST
+    peak within *tol_samples* is dropped -- only that one, so a kept peak
+    a few samples from a removed duplicate survives. Peaks in *protected*
+    (added by hand) are never dropped. Returns the sorted remaining peaks.
+    """
+    rp = np.sort(np.asarray(rpeaks, dtype=np.int64).flatten())
+    if removed_samples is None or len(rp) == 0:
+        return rp
+    rs = np.unique(np.asarray(list(removed_samples), dtype=np.int64).flatten())
+    if len(rs) == 0:
+        return rp
+    keep = np.ones(len(rp), dtype=bool)
+    prot = {int(p) for p in (protected or [])}
+    right = np.clip(np.searchsorted(rp, rs), 0, len(rp) - 1)
+    left  = np.clip(right - 1, 0, len(rp) - 1)
+    nearest = np.where(np.abs(rp[left] - rs) <= np.abs(rp[right] - rs), left, right)
+    for s, k in zip(rs, nearest):
+        if abs(int(rp[k]) - int(s)) <= tol_samples and int(rp[k]) not in prot:
+            keep[k] = False
+    return rp[keep]
+
+
+def active_removed_samples(
+    removed_samples: "Optional[Iterable[int]]",
+    rpeaks:          np.ndarray,
+    tol_samples:     int = 1,
+) -> np.ndarray:
+    """The removed-peak samples (an artifact report's ``removed_samples``
+    or ``break_samples``) whose peak is still ABSENT from *rpeaks* --
+    sorted, unique, int64.
+
+    A removed beat can come back: every threshold change or manual edit
+    re-runs detection from the full candidate set. A removed sample within
+    *tol_samples* of a current peak is therefore dropped -- that beat is
+    back, so no interval spans it and it must not be used as an HRV break.
+    """
+    if removed_samples is None:
+        return np.array([], dtype=np.int64)
+    rs = np.unique(np.asarray(list(removed_samples), dtype=np.int64).flatten())
+    rp = np.sort(np.asarray(rpeaks, dtype=np.int64).flatten())
+    if len(rs) == 0 or len(rp) == 0:
+        return rs
+    right = np.clip(np.searchsorted(rp, rs), 0, len(rp) - 1)
+    left  = np.clip(right - 1, 0, len(rp) - 1)
+    nearest = np.minimum(np.abs(rp[right] - rs), np.abs(rp[left] - rs))
+    return rs[nearest > tol_samples]
 
 
 def correct_rr_artifacts(
@@ -2356,7 +2708,7 @@ def correct_rr_artifacts(
     """Auto-correct : detect + apply default 'remove' decisions."""
     candidates = detect_rr_artifacts(rpeaks, fs, rr_min_ms, rr_max_ms,
                                      window_beats, dev_threshold, signal=signal)
-    return apply_artifact_decisions(rpeaks, candidates)
+    return apply_artifact_decisions(rpeaks, candidates, fs=fs)
 
 
 # ════════════════════════════════════════════════════════════
@@ -2446,10 +2798,122 @@ def recover_missed_beats(
 #  ARRHYTHMIA CLASSIFICATION
 # ════════════════════════════════════════════════════════════
 
+# Fixed thresholds -- these used to come from the (now-removed)
+# experimental-context selector's default "telemetry_awake" context, so
+# bradycardia/pause and AV-delay detection sensitivity is unchanged.
+_BRADY_RR_HI_HR_LO_BPM = 450.0   # bradycardia/pause RR-interval cutoff basis
+_AV_DELAY_PR_HI_MS     = 55.0    # sustained-PR-prolongation cutoff
+
+
+def _baseline_rr_mask(t_peaks: np.ndarray,
+                      baseline_s: float) -> "tuple[np.ndarray, float]":
+    """RR intervals classify_arrhythmias() takes its baseline HR from.
+
+    t_peaks : sorted peak times (s). Returns (mask over the
+    len(t_peaks) - 1 RR intervals, effective window length in s).
+
+    The window is measured from the FIRST peak passed in, not from t=0:
+    callers pass the analysis-window subset of the recording, whose first
+    beat can sit minutes in. An absolute ``t < baseline_s`` test then
+    matched no beat at all and the baseline silently became the median of
+    every interval -- inverting brady/tachy calls on a recording that slows
+    down or speeds up inside the window.
+    """
+    t_rel  = t_peaks[:-1] - float(t_peaks[0])
+    span_s = float(t_peaks[-1] - t_peaks[0])
+    bl_len = float(baseline_s)
+    mask   = t_rel < bl_len
+    if mask.sum() < 10:
+        # Too few beats for a stable median -- widen to 20% of the span.
+        bl_len = max(span_s * 0.20, float(baseline_s))
+        mask   = t_rel < bl_len
+    if mask.sum() < 5:
+        # Still too few: the baseline is the median of every interval.
+        mask   = np.ones(len(t_rel), dtype=bool)
+        bl_len = span_s
+    return mask, bl_len
+
+
+# The baseline is only a meaningful reference when the analysed beats span
+# at least this many baseline windows: below that the baseline window covers
+# most (or all) of what is being classified, so a slowdown or speed-up
+# inside it drags the reference along and brady/tachy calls get muted or
+# inverted (e.g. a 25 s window with a 30 s baseline compares every beat with
+# the median of the whole window, event included). Classification still
+# runs; the baseline is flagged unreliable and the UI says so.
+_BASELINE_MIN_SPAN_FACTOR = 2.0
+
+
+def arrhythmia_baseline_info(
+    rpeaks:     np.ndarray,
+    fs:         float,
+    baseline_s: float = 30.0,
+) -> dict:
+    """The baseline classify_arrhythmias() uses for the same rpeaks / fs /
+    baseline_s, so a caller can shade exactly that window and warn when it
+    is not a meaningful reference.
+
+    Returns a dict with:
+        t_start, t_end : absolute window (s) -- starts at the first peak
+                         passed in; t_end is clamped to the last peak
+        length_s       : effective window length (baseline_s, or widened)
+        span_s         : analysed span, first to last peak (s)
+        n_intervals    : RR intervals in the window
+        baseline_rr_ms, baseline_hr : the baseline itself
+        reliable       : False when span_s < _BASELINE_MIN_SPAN_FACTOR ×
+                         length_s, i.e. the baseline window covers most of
+                         the analysed beats (always False when it fell back
+                         to the median of every interval)
+    For fewer than 5 peaks -- classify_arrhythmias() then returns no events
+    and computes no baseline -- the times and baseline are NaN and
+    reliable is False.
+    """
+    nan = float("nan")
+    if len(rpeaks) < 5:
+        return {"t_start": nan, "t_end": nan, "length_s": nan, "span_s": nan,
+                "n_intervals": 0, "baseline_rr_ms": nan, "baseline_hr": nan,
+                "reliable": False}
+    peaks   = np.sort(np.asarray(rpeaks, dtype=int))
+    t_peaks = peaks / fs
+    mask, bl_len = _baseline_rr_mask(t_peaks, baseline_s)
+    rr_ms   = np.diff(peaks).astype(float) / fs * 1000   # as classify_arrhythmias
+    bl_rr   = float(np.median(rr_ms[mask]))
+    t0      = float(t_peaks[0])
+    span_s  = float(t_peaks[-1]) - t0
+    return {
+        "t_start":        t0,
+        "t_end":          t0 + min(bl_len, span_s),
+        "length_s":       float(bl_len),
+        "span_s":         span_s,
+        "n_intervals":    int(mask.sum()),
+        "baseline_rr_ms": bl_rr,
+        "baseline_hr":    60_000.0 / max(bl_rr, 1.0),
+        "reliable":       bool(span_s >= _BASELINE_MIN_SPAN_FACTOR * bl_len),
+    }
+
+
+def arrhythmia_baseline_window(
+    rpeaks:     np.ndarray,
+    fs:         float,
+    baseline_s: float = 30.0,
+) -> "tuple[float, float]":
+    """Absolute (t_start, t_end) in seconds of the stretch that
+    classify_arrhythmias() takes its baseline HR from, for the same
+    rpeaks / fs / baseline_s -- so a plot can shade exactly that window.
+
+    Starts at the first peak passed in; t_end is clamped to the last peak.
+    Returns (nan, nan) for fewer than 5 peaks, where classify_arrhythmias()
+    returns no events and computes no baseline. See
+    arrhythmia_baseline_info() for the full description (and whether the
+    baseline is a meaningful reference).
+    """
+    info = arrhythmia_baseline_info(rpeaks, fs, baseline_s)
+    return info["t_start"], info["t_end"]
+
+
 def classify_arrhythmias(
     rpeaks:          np.ndarray,
     fs:              float,
-    context_key:     str   = "telemetry_awake",
     baseline_s:      float = 30.0,
     brady_pct:       float = 20.0,
     min_brady_beats: int   = 10,
@@ -2458,15 +2922,37 @@ def classify_arrhythmias(
 ) -> list[ArrhythmiaEvent]:
     """Rule-based arrhythmia classification for mouse ECG.
 
+    baseline_s : length (s) of the reference window whose median RR sets
+        the baseline HR every bradycardia/tachycardia run is compared
+        against. It is RELATIVE to the start of the analysed beats -- the
+        first baseline_s seconds after the first peak passed in, not the
+        first baseline_s seconds of the recording -- since callers pass the
+        analysis-window subset of the peaks. When that window holds fewer
+        than 10 RR intervals it widens to max(20% of the analysed span,
+        baseline_s), still measured from the first peak; with fewer than 5
+        even then, the median of every interval is used.
+        arrhythmia_baseline_window() returns the resulting window (absolute
+        times) for plotting. When the analysed span is shorter than
+        _BASELINE_MIN_SPAN_FACTOR (2) × that window, the baseline covers
+        most of the beats being classified: classification still runs, but
+        a warning is logged and every bradycardia/tachycardia event gets
+        ``baseline_reliable=False`` (arrhythmia_baseline_info() reports the
+        same condition for callers, even when no such event is found).
+
     pr_ms : optional per-beat PR interval (ms), same length and order as
         rpeaks (i.e. pr_ms[i] is the PR interval measured at rpeaks[i]),
-        typically sourced from analyse_intervals()'s output. When provided,
-        enables sustained-PR-prolongation detection ("av_delay" kind) --
-        see the caller for the alignment safety check, since this function
-        trusts positional correspondence and does not re-verify it.
-        When None (Interval delineation hasn't been run), AV-delay
-        detection is silently skipped -- every other event kind is
-        unaffected, matching this function's behaviour before pr_ms existed.
+        NaN where no PR was measured for that beat. analyse_intervals()
+        returns fewer rows than peaks (edge beats and the last beat are
+        dropped), so its PR_ms column must be mapped onto rpeaks with
+        analysis.align_interval_column_to_peaks() first -- passing the raw
+        column positionally would shift every value to the wrong beat.
+        When provided, enables sustained-PR-prolongation detection
+        ("av_delay" kind). This function trusts positional correspondence
+        and only guards against a length mismatch (AV-delay detection is
+        then skipped). When None (Interval delineation hasn't been run),
+        AV-delay detection is silently skipped -- every other event kind
+        is unaffected, matching this function's behaviour before pr_ms
+        existed.
     """
     def _prog(pct: int, msg: str) -> None:
         if progress_cb:
@@ -2475,24 +2961,35 @@ def classify_arrhythmias(
     if len(rpeaks) < 5:
         return []
 
-    ctx     = EXPERIMENTAL_CONTEXTS.get(context_key)
-    rpeaks  = np.sort(np.array(rpeaks, dtype=int))
+    # argsort rather than np.sort so pr_ms (indexed like the caller's
+    # rpeaks) can be put in the same order below.
+    rpeaks_in  = np.asarray(rpeaks, dtype=int)
+    peak_order = np.argsort(rpeaks_in, kind="stable")
+    rpeaks  = rpeaks_in[peak_order]
     t_peaks = rpeaks / fs
     rr_ms   = np.diff(rpeaks).astype(float) / fs * 1000
     n       = len(rr_ms)
     events: list[ArrhythmiaEvent] = []
 
-    # Baseline HR individuel
-    bl_mask = t_peaks[:-1] < baseline_s
-    if bl_mask.sum() < 10:
-        bl_mask = t_peaks[:-1] < max(float(t_peaks[-1]) * 0.20, baseline_s)
-    baseline_rr_ms = float(np.median(rr_ms[bl_mask])) if bl_mask.sum() >= 5 \
-                     else float(np.median(rr_ms))
+    # Individual baseline HR -- window measured from the first analysed
+    # peak, not from t=0 (see _baseline_rr_mask).
+    bl_mask, bl_len_s = _baseline_rr_mask(t_peaks, baseline_s)
+    baseline_rr_ms = float(np.median(rr_ms[bl_mask]))
     baseline_hr    = 60_000.0 / max(baseline_rr_ms, 1.0)
+    span_s         = float(t_peaks[-1] - t_peaks[0])
+    # Same rule as arrhythmia_baseline_info() (see _BASELINE_MIN_SPAN_FACTOR).
+    baseline_reliable = span_s >= _BASELINE_MIN_SPAN_FACTOR * bl_len_s
     log.info(
-        "classify_arrhythmias: baseline=%.1f bpm  (%.1f ms, %d beats, %.0f s window)",
-        baseline_hr, baseline_rr_ms, int(bl_mask.sum()), baseline_s,
+        "classify_arrhythmias: baseline=%.1f bpm  (%.1f ms, %d beats, "
+        "%.0f s window from t=%.1f s)",
+        baseline_hr, baseline_rr_ms, int(bl_mask.sum()), bl_len_s,
+        float(t_peaks[0]),
     )
+    if not baseline_reliable:
+        log.warning(
+            "classify_arrhythmias: baseline window (%.0f s) covers most of the "
+            "%.0f s analysed — bradycardia/tachycardia calls are unreliable",
+            bl_len_s, span_s)
 
     # HR glissant (médiane symétrique sur 5 battements)
     ROLL_HALF  = 2
@@ -2527,6 +3024,7 @@ def classify_arrhythmias(
             severity=sev,
             baseline_hr=round(baseline_hr, 1),
             delta_pct=round(delta, 1),
+            baseline_reliable=baseline_reliable,
         ))
 
     def _find_runs_ind(mask: np.ndarray, kind: str, sev: str) -> None:
@@ -2554,7 +3052,7 @@ def classify_arrhythmias(
         return float(np.median(window)) if len(window) else float(rr_ms[i])
 
     local_med  = np.array([_lmed(i) for i in range(n)])
-    rr_hi_ctx  = 60_000.0 / (ctx.hr_lo if ctx else 180.0)
+    rr_hi_ctx  = 60_000.0 / _BRADY_RR_HI_HR_LO_BPM
 
     for i, rr in enumerate(rr_ms):
         if rr > 2.0 * local_med[i] and rr > rr_hi_ctx * 1.5:
@@ -2603,13 +3101,14 @@ def classify_arrhythmias(
 
     # AV conduction delay -- only possible when per-beat PR data was passed
     # in (see this function's docstring). pr_ms is indexed like rpeaks
-    # (length n+1); slice to n and treat pr_ms[i] as the PR measured at the
+    # (length n+1; reordered with peak_order, a no-op for already-sorted
+    # peaks); slice to n and treat pr_ms[i] as the PR measured at the
     # LEADING beat of RR-interval i, matching every other run-detection mask
     # in this function (brady_ind, tachy_ind, esv_mask all index by interval,
-    # not by beat).
-    if pr_ms is not None and ctx is not None and len(pr_ms) == len(rpeaks):
-        pr_arr = np.asarray(pr_ms, dtype=float)[:n]
-        pr_hi  = ctx.pr_hi
+    # not by beat). NaN PR (beat not delineated) never counts toward a run.
+    if pr_ms is not None and len(pr_ms) == len(rpeaks):
+        pr_arr = np.asarray(pr_ms, dtype=float)[peak_order][:n]
+        pr_hi  = _AV_DELAY_PR_HI_MS
         av_mask = np.isfinite(pr_arr) & (pr_arr > pr_hi)
 
         def _emit_av(run_start: int, run_end: int) -> None:
@@ -2684,14 +3183,14 @@ def classify_arrhythmias(
 
     log.info(
         "classify_arrhythmias: %d events (brady=%d tachy=%d pause=%d esv=%d irr=%d) "
-        "baseline=%.0f bpm  context=%s",
+        "baseline=%.0f bpm",
         len(merged),
         sum(1 for e in merged if e.kind == "bradycardia"),
         sum(1 for e in merged if e.kind == "tachycardia"),
         sum(1 for e in merged if e.kind == "pause"),
         sum(1 for e in merged if e.kind == "esv_run"),
         sum(1 for e in merged if e.kind == "irregular_run"),
-        baseline_hr, context_key,
+        baseline_hr,
     )
     _prog(100, "Abnormal-event classification done")
     return merged

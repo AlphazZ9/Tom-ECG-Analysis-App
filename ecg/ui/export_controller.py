@@ -22,8 +22,13 @@ from matplotlib.figure import Figure
 from openpyxl import Workbook
 from tkinter import filedialog, messagebox
 
-from ecg.core.models import EXPERIMENTAL_CONTEXTS
-from ecg.io.export import ExcelExporter, PrismExporter
+from ecg.io.export import ExcelExporter, PrismExporter, autonomic_pdf_line
+from ecg.core.analysis import (
+    hrv_freq_withheld_reason, rr_exclusion_report, rr_timeseries,
+    successive_valid_pairs,
+)
+from ecg.core.models import MouseECG, QTC_FORMULA_LABELS, normalize_qtc_formula
+from ecg.ui.event_locked_view import event_table_frame, export_event_params
 from ecg.ui.plots import style_axes
 from ecg.ui.theme import (
     PLOT, GREEN, ORANGE, RED, ORANGE_DARK,
@@ -40,6 +45,43 @@ class ExportController:
     def __init__(self, app: "ECGApp") -> None:
         self.app = app
 
+    def autonomic_export_data(self) -> "tuple":
+        """(AutonomicResult, SPWVD dict, event table, event params) of HRV >
+        Autonomic for the exporters -- all None without an Autonomic
+        result; the event parts None without an event-locked result."""
+        a = self.app.analysis
+        res = getattr(a, "autonomic_result", None)
+        if res is None:
+            return None, None, None, None
+        el = getattr(a, "event_locked", None)
+        if el is None:
+            return res, a.autonomic_spwvd, None, None
+        return res, a.autonomic_spwvd, event_table_frame(el), export_event_params(el)
+
+    def hrv_window(self) -> "Optional[tuple]":
+        """The analysis window the core HRV results were computed on (None
+        without results) -- the exports compare it with the Autonomic
+        result's own span."""
+        a = self.app.analysis
+        if a.results is None:
+            return None
+        win = getattr(a, "analysed_window", None)
+        return tuple(win) if win is not None else (a.t_start, a.t_end)
+
+    def autonomic_only(self) -> bool:
+        """True when only HRV > Autonomic results exist (Analyze not run):
+        Export Excel then writes them alone (they need only the peaks)."""
+        a = self.app.analysis
+        return a.results is None and getattr(a, "autonomic_result", None) is not None
+
+    def _needs_analyze(self, message: str) -> str:
+        """*message*, plus where the Autonomic-only results can be exported
+        when they exist (Export Excel)."""
+        if self.autonomic_only():
+            return (message + "\n\nThe HRV > Autonomic results need only the peaks: "
+                    "Export Excel saves them alone before Analyze.")
+        return message
+
     def export_figures(self) -> None:
         """Export curated publication-ready PNG figures to a chosen folder.
 
@@ -48,7 +90,7 @@ class ExportController:
         """
         app = self.app
         if app.analysis.results is None:
-            messagebox.showwarning("No results", "Click Analyze first.")
+            messagebox.showwarning("No results", self._needs_analyze("Click Analyze first."))
             return
 
         folder = filedialog.askdirectory(title="Choose export folder for figures")
@@ -62,22 +104,34 @@ class ExportController:
         _os.makedirs(out_dir, exist_ok=True)
 
         def _rr_clean(fig: "matplotlib.figure.Figure") -> None:
-            """Clean RR + HR tachogram — no spike annotation markers."""
+            """Clean RR + HR tachogram — no spike annotation markers.
+
+            Like the HRV-tab tachogram, every interval is drawn: valid ones
+            as the line, intervals excluded from HRV as hollow red markers
+            with the line broken around them (mean/SD from valid ones)."""
             r = app.analysis.results
             if r is None:
                 return
-            rdf = r.get("rr_df")
-            if rdf is None or rdf.empty:
+            rts = rr_timeseries(r)
+            if rts.empty or not rts["valid"].any():
                 return
-            from ecg.core.filtering import downsample_for_display
-            t_all  = rdf["Time_s"].values.astype(float)
-            rr_all = rdf["RR_ms"].values.astype(float)
-            hr_all = rdf["HR_bpm"].values.astype(float)
-            t_ds   = downsample_for_display(t_all)
-            rr_ds  = downsample_for_display(rr_all)
-            hr_ds  = downsample_for_display(hr_all)
-            rr_mean = float(rr_all.mean()); rr_sd = float(rr_all.std())
-            hr_mean = float(hr_all.mean())
+            from ecg.core.filtering import downsample_xy_for_display
+            t_all  = rts["Time_s"].to_numpy(dtype=float)
+            rr_all = rts["RR_ms"].to_numpy(dtype=float)
+            hr_all = rts["HR_bpm"].to_numpy(dtype=float)
+            valid  = rts["valid"].to_numpy(dtype=bool)
+            excl   = ~valid & np.isfinite(rr_all)
+            t_ds, rr_ds    = downsample_xy_for_display(t_all, np.where(valid, rr_all, np.nan))
+            t_ds_hr, hr_ds = downsample_xy_for_display(t_all, np.where(valid, hr_all, np.nan))
+            rr_v = rr_all[valid]
+            rr_mean = float(rr_v.mean()); rr_sd = float(rr_v.std())
+            hr_mean = float(hr_all[valid].mean())
+            # Same display range as plot_rr: a far-off excluded interval is
+            # drawn at the edge instead of squashing the valid trace.
+            rr_hi_b = float((r.get("hr") or {}).get("rr_max_ms", MouseECG.RR_MAX_MS))
+            rr_ex = np.clip(rr_all[excl], 0.5 * float(rr_v.min()),
+                            max(2.0 * float(rr_v.max()), 1.5 * rr_hi_b))
+            t_ex  = t_all[excl]
             from matplotlib.gridspec import GridSpec as _GS
             _gs = _GS(2, 1, figure=fig, left=0.08, right=0.98,
                       top=0.93, bottom=0.09, hspace=0.22)
@@ -89,12 +143,21 @@ class ExportController:
             axes[0].axhline(rr_mean, color="#388E3C", ls="--", lw=0.9, alpha=0.5)
             axes[0].axhspan(rr_mean - rr_sd, rr_mean + rr_sd,
                             alpha=0.07, color="#388E3C", zorder=0)
+            if len(t_ex):
+                axes[0].plot(t_ex, rr_ex, "o", ls="none", ms=4.5, mfc="none",
+                             mec=RED, mew=1.1, zorder=4,
+                             label=f"excluded ({int((~valid).sum())})")
+                axes[0].legend(loc="upper right", fontsize=7, framealpha=0,
+                               labelcolor=PLOT.get("text", GRAY_LIGHT))
             axes[0].set_ylabel("RR (ms)")
             axes[0].set_title(
                 f"RR Intervals  ·  mean {rr_mean:.1f} ms  ·  SD {rr_sd:.1f} ms",
                 loc="left", fontsize=9)
-            axes[1].plot(t_ds, hr_ds, color=ORANGE_DARK, lw=0.9, zorder=2)
+            axes[1].plot(t_ds_hr, hr_ds, color=ORANGE_DARK, lw=0.9, zorder=2)
             axes[1].axhline(hr_mean, color=ORANGE_DARK, ls="--", lw=0.9, alpha=0.5)
+            if len(t_ex):
+                axes[1].plot(t_ex, 60_000.0 / rr_ex, "o", ls="none", ms=4.0,
+                             mfc="none", mec=RED, mew=1.0, zorder=4)
             axes[1].set_ylabel("HR (bpm)")
             axes[1].set_xlabel("Time (s)")
             axes[1].set_title(f"Instantaneous HR  ·  mean {hr_mean:.0f} bpm",
@@ -106,11 +169,12 @@ class ExportController:
             ("rr_hist",       "02_rr_histogram",     None),
             ("psd",           "03_psd",              None),
             ("poincare",      "04_poincare",         None),
-            ("radar",         "05_hrv_radar",        None),
             ("beat",          "06_beat_template",    None),
             ("beat_dist",     "07_beat_morphology",  None),
             ("intervals",     "08_intervals",        None),
             ("rolling_hrv",   "09_rolling_hrv",      None),
+            ("autonomic",     "10_autonomic_csi_cpi", None),
+            ("event_locked",  "11_event_locked",     None),
         ]
 
         saved, skipped = 0, 0
@@ -170,24 +234,40 @@ class ExportController:
             subject      = app.ent_subject.get(),
             sig_quality  = app.detection.sig_quality,
             epoch_df     = app.analysis.epoch_df,
+            qtc_formula  = app._qtc_formula(),
         )
 
     def write_excel(self, destination) -> None:
-        """Write the formatted workbook to *destination* (path or BytesIO)."""
+        """Write the formatted workbook to *destination* (path or BytesIO).
+        With an HRV > Autonomic result, its Autonomic / Autonomic_Series
+        (/ Autonomic_LFHF / EventLocked) sheets and Cover disclosure are
+        added (the Cover then states the span the indices cover against
+        the core results' analysis window). Without core results, an
+        Autonomic result is written alone (``autonomic_only``)."""
         app = self.app
-        wb = self.build_excel_workbook()
+        res, spwvd, ev_table, ev_params = self.autonomic_export_data()
+        if self.autonomic_only():
+            wb = ExcelExporter.build_autonomic_workbook(
+                app.ent_subject.get(), app.signal.filepath, app.signal.fs, app.signal.time)
+        else:
+            wb = self.build_excel_workbook()
         ExcelExporter.add_annotations_sheet(wb, app.analysis.annotations)
+        if res is not None:
+            ExcelExporter.add_autonomic_sheets(wb, res, spwvd, ev_table, ev_params,
+                                               hrv_window=self.hrv_window())
         wb.save(destination)
 
     def export_excel(self) -> None:
         app = self.app
-        if not app.analysis.results:
+        only = self.autonomic_only()
+        if not app.analysis.results and not only:
             messagebox.showwarning("No results", "Run analysis first.")
             return
         ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+        kind = "ECG_autonomic" if only else "ECG"
         path = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
-            initialfile=f"{app.ent_subject.get()}_ECG_{ts}.xlsx",
+            initialfile=f"{app.ent_subject.get()}_{kind}_{ts}.xlsx",
             filetypes=[("Excel", "*.xlsx")],
         )
         if not path:
@@ -197,12 +277,14 @@ class ExportController:
         except Exception as exc:
             messagebox.showerror("Export failed", str(exc))
             return
-        app._set_status(f"Excel saved — {os.path.basename(path)}  ✓", GREEN)
+        what = "Excel (Autonomic only — Analyze not run)" if only else "Excel"
+        app._set_status(f"{what} saved — {os.path.basename(path)}  ✓",
+                        ORANGE if only else GREEN)
 
     def export_zip(self) -> None:
         app = self.app
         if not app.analysis.results:
-            messagebox.showwarning("No results", "Run analysis first.")
+            messagebox.showwarning("No results", self._needs_analyze("Run analysis first."))
             return
         sub  = app.ent_subject.get()
         ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -219,7 +301,6 @@ class ExportController:
             ("rr",        "01_rr_hr"),
             ("rr_hist",   "02_rr_hist"),
             ("psd",       "03_psd"),
-            ("radar",     "04_radar"),
             ("poincare",  "05_poincare"),
             ("intervals", "06_intervals"),
             ("beat",      "07_beat"),
@@ -231,6 +312,13 @@ class ExportController:
                 xl_buf.seek(0)
                 zf.writestr(f"{sub}_ECG_{ts}.xlsx", xl_buf.read())
 
+                # The Autonomic figures only once computed (their placeholder
+                # would otherwise be saved).
+                for slot_key, filename in (("autonomic", "08_autonomic_csi_cpi"),
+                                           ("event_locked", "09_event_locked")):
+                    slot = app._slots.get(slot_key)
+                    if slot is not None and getattr(slot, "_draw_fn", None) is not None:
+                        figure_keys.append((slot_key, filename))
                 for slot_key, filename in figure_keys:
                     slot = app._slots.get(slot_key)
                     if slot and slot.fig:
@@ -252,7 +340,7 @@ class ExportController:
         """Generate a one-page PDF summary: ECG strip + KPI table + interpretation."""
         app = self.app
         if app.analysis.results is None:
-            messagebox.showwarning("No results", "Click Analyze first.")
+            messagebox.showwarning("No results", self._needs_analyze("Click Analyze first."))
             return
         try:
             import matplotlib.backends.backend_pdf as _pdf_backend
@@ -274,7 +362,6 @@ class ExportController:
             return
 
         r   = app.analysis.results
-        ctx = EXPERIMENTAL_CONTEXTS.get(app.analysis.exp_context)
 
         # ── Collect metrics ───────────────────────────────────────────────
         def _safe(df, col):
@@ -293,16 +380,14 @@ class ExportController:
         metrics: "list[tuple[str,str,str]]" = []   # (label, value, status)
 
         def _row(label, v, unit, key):
+            # `key` used to look up an experimental-context reference range
+            # to grade a ✓/~/↑/↓ status; kept as a no-op parameter (every
+            # call site still passes one) now that the context system --
+            # and with it the "normal range" this status was graded
+            # against -- has been removed.
             if v is None:
                 return
-            lo, hi = app._current_ref(key)
-            margin = (hi - lo) * 0.15
-            if lo <= v <= hi:
-                status = "✓"
-            elif lo - margin <= v <= hi + margin:
-                status = "~"
-            else:
-                status = "↑" if v > hi else "↓"
+            status = ""
             if unit in ("—",):
                 val_str = f"{v:.2f}"
             elif unit == "%":
@@ -322,6 +407,10 @@ class ExportController:
             lf = _safe(fd, "HRV_LF"); hf = _safe(fd, "HRV_HF")
             if lf: _row("LF%",    lf*100, "%", "LF_pct")
             if hf: _row("HF%",    hf*100, "%", "HF_pct")
+        elif hrv_freq_withheld_reason(r):
+            # Missing LF/HF rows explained (the reason is in the Summary
+            # report and the Excel Cover sheet).
+            metrics.append(("LF / HF", "withheld", ""))
         if nl is not None and not nl.empty:
             _row("SD1",    _safe(nl,"HRV_SD1"),       "ms", "SD1")
             _row("SD2",    _safe(nl,"HRV_SD2"),       "ms", "SD2")
@@ -339,25 +428,48 @@ class ExportController:
         fg   = PLOT.get("text", GRAY_LIGHT)
         mut  = PLOT.get("muted","#6B7280")
 
+        # HRV > Autonomic computed: its method / window / ks / kp and the
+        # rat-calibration caveat go in the header (one more line).
+        auto_res, _sp, _evt, auto_ev = self.autonomic_export_data()
+        auto_line = (autonomic_pdf_line(dict(auto_res.params),
+                                        (auto_ev or {}).get("n_events"))
+                     if auto_res is not None else "")
+        sep_y = 0.881 if auto_line else 0.897
+
         fig  = _mpl_figure.Figure(figsize=(11.7, 8.3), facecolor=bg)   # A4 landscape
         gs   = gridspec.GridSpec(
-            4, 2, figure=fig,
-            left=0.06, right=0.96, top=0.88, bottom=0.05,
+            3, 2, figure=fig,
+            left=0.06, right=0.96, top=0.855 if auto_line else 0.87, bottom=0.05,
             hspace=0.55, wspace=0.30,
-            height_ratios=[2.0, 1.4, 1.3, 0.85],
+            height_ratios=[2.0, 1.4, 1.3],
         )
 
         # Title block
-        ctx_label = ctx.label if ctx else "Contexte inconnu"
-        qtc_label = "Mitchell" if app._qtc_formula() == "mitchell" else "Bazett"
-        fig.text(0.06, 0.94, f"ECG Report — {sub}",
+        qtc_label = QTC_FORMULA_LABELS[normalize_qtc_formula(app._qtc_formula())]
+        fig.text(0.06, 0.945, f"ECG Report — {sub}",
                  fontsize=15, color=fg, fontweight="bold", va="bottom")
-        fig.text(0.06, 0.91,
+        fig.text(0.06, 0.918,
                  f"Fichier : {app.signal.filepath or '—'}   |   "
                  f"Date : {datetime.now().strftime('%d/%m/%Y %H:%M')}   |   "
-                 f"Contexte : {ctx_label}   |   QTc : {qtc_label}",
+                 f"QTc : {qtc_label}",
                  fontsize=8, color=mut, va="bottom")
-        fig.add_artist(_mpl_lines.Line2D([0.06, 0.94], [0.905, 0.905],
+        # RR intervals behind every HRV value on this page, and the ones
+        # excluded (not bridged) -- same counts as the Excel Cover sheet.
+        rep = rr_exclusion_report(r)
+        if rep["n_intervals"] is not None:
+            rr_note = (f"RR : {rep['n_intervals']} intervals, "
+                       f"{rep['n_excluded']} excluded from HRV "
+                       f"({float(rep['excluded_pct'] or 0.0):.1f} %")
+            if rep["n_excluded"]:
+                rr_note += (f": {rep['n_too_short']} too short, "
+                            f"{rep['n_too_long']} too long, "
+                            f"{rep['n_spanning_removed']} spanning removed beats")
+            rr_note += f")   |   RR bounds : {rep['rr_min_ms']:.0f}–{rep['rr_max_ms']:.0f} ms"
+            fig.text(0.06, 0.902, rr_note, fontsize=8,
+                     color=ORANGE if rep["n_excluded"] else mut, va="bottom")
+        if auto_line:
+            fig.text(0.06, 0.886, auto_line, fontsize=8, color=ORANGE, va="bottom")
+        fig.add_artist(_mpl_lines.Line2D([0.06, 0.94], [sep_y, sep_y],
                                   transform=fig.transFigure,
                                   color=mut, lw=0.5))
 
@@ -429,82 +541,30 @@ class ExportController:
         ax_rr.set_title("Poincaré diagram", loc="left", fontsize=9, color=fg)
         ax_rr.set_xlabel("RR_n (ms)", fontsize=7, color=mut)
         ax_rr.set_ylabel("RR_n+1 (ms)", fontsize=7, color=mut)
-        if rdf is not None and "RR_ms" in rdf.columns:
-            rr_vals = rdf["RR_ms"].dropna().values
-            if len(rr_vals) > 2:
-                ax_rr.scatter(rr_vals[:-1], rr_vals[1:],
+        rts = rr_timeseries(r)
+        if not rts.empty:
+            # Successive VALID pairs only (same pairs as SD1/SD2): rr_df
+            # holds only the valid intervals, so pairing its consecutive
+            # rows would join the two sides of an excluded pause.
+            rr_a, rr_b = successive_valid_pairs(rts["RR_ms"].to_numpy(dtype=float),
+                                                rts["valid"].to_numpy(dtype=bool))
+            if len(rr_a) > 1:
+                ax_rr.scatter(rr_a, rr_b,
                               alpha=0.35, s=4, c=PLOT.get("signal", CYAN_BRIGHT))
-                lo = min(rr_vals.min(), rr_vals.min()) * 0.97
-                hi = max(rr_vals.max(), rr_vals.max()) * 1.03
+                lo = min(rr_a.min(), rr_b.min()) * 0.97
+                hi = max(rr_a.max(), rr_b.max()) * 1.03
                 ax_rr.plot([lo, hi], [lo, hi], "--", color=mut, lw=0.6)
         else:
             ax_rr.text(0.5, 0.5, "Données RR non disponibles",
                        ha="center", va="center", color=mut, fontsize=9,
                        transform=ax_rr.transAxes)
 
-        # Panel E — HRV radar (row 2, left) -- same normalization as the
-        # Frequency panel's radar chart (plot_controller.py plot_radar):
-        # each axis 0=ref-lo, 1=ref-hi against ITS OWN reference range, not
-        # min-maxed against each other. Duplicated here rather than shared
-        # because plot_radar() is written against the CanvasSlot draw-fn
-        # callback convention, not a plain fig -- matches this file's
-        # existing pattern of its own independent metric-status logic
-        # (_row() above) rather than reusing plot_hrv_tables()'s.
-        ax_radar = fig.add_subplot(gs[2, 0], polar=True)
-        ax_radar.set_facecolor(bg)
-        _RADAR_SPECS = [
-            ("SDNN",   td,  "HRV_SDNN",   "RR_SDNN"),
-            ("RMSSD",  td,  "HRV_RMSSD",  "RR_RMSSD"),
-            ("pNN6",   td,  "HRV_pNN6",   "RR_pNN6"),
-            ("LF",     fd,  "HRV_LFn",    "LF_pct"),
-            ("HF",     fd,  "HRV_HFn",    "HF_pct"),
-            ("LF/HF",  fd,  "HRV_LFHF",   "LFHF"),
-            ("SD1",    nl,  "HRV_SD1",    "SD1"),
-            ("SD2",    nl,  "HRV_SD2",    "SD2"),
-            ("SampEn", nl,  "HRV_SampEn", None),
-        ]
-        r_labels, r_norm = [], []
-        for label, df, col, ref_key in _RADAR_SPECS:
-            if df is None or df.empty or col not in df.columns:
-                continue
-            try:
-                v = float(df[col].values[0])
-            except Exception:
-                continue
-            if not np.isfinite(v):
-                continue
-            if col in ("HRV_LFn", "HRV_HFn"):
-                v *= 100.0
-            lo, hi = app._current_ref(ref_key) if ref_key is not None else (0.5, 2.5)
-            span = (hi - lo) or 1e-9
-            r_labels.append(label)
-            r_norm.append((v - lo) / span)
-        if len(r_labels) >= 3:
-            n_ax = len(r_labels)
-            angles = np.linspace(0, 2 * np.pi, n_ax, endpoint=False).tolist()
-            v_closed = r_norm + [r_norm[0]]
-            a_closed = angles + angles[:1]
-            y_lo = min(0.0, min(r_norm) - 0.05)
-            y_hi = max(1.0, max(r_norm) + 0.05)
-            ax_radar.fill(a_closed, [1.0] * (n_ax + 1), color=GREEN_MID, alpha=0.06, zorder=0)
-            ax_radar.plot(a_closed, v_closed, color=RED_MID, lw=1.3, zorder=3)
-            ax_radar.fill(a_closed, v_closed, color=RED_MID, alpha=0.15, zorder=2)
-            ax_radar.set_thetagrids(np.degrees(angles), r_labels, color=fg, fontsize=6.5)
-            ax_radar.set_ylim(y_lo, y_hi)
-            ax_radar.set_yticks([0.0, 0.5, 1.0])
-            ax_radar.set_yticklabels(["lo", "mid", "hi"], color=mut, fontsize=5.5)
-            ax_radar.grid(color=mut, alpha=0.3)
-            ax_radar.spines["polar"].set_color(mut)
-        else:
-            ax_radar.axis("off")
-            ax_radar.text(0.5, 0.5, "Not enough metrics for a radar profile",
-                          ha="center", va="center", color=mut, fontsize=8,
-                          transform=ax_radar.transAxes)
-        ax_radar.set_title("HRV profile (ref. lo–hi per metric)", loc="left",
-                           fontsize=9, color=fg, pad=4)
-
-        # Panel F — Abnormal-events summary (row 2, right)
-        ax_arr = fig.add_subplot(gs[2, 1])
+        # Panel E (row 2, full width) -- Abnormal-events summary. Used to
+        # share this row with an HRV radar chart (left) that normalised
+        # each metric against its experimental-context reference range;
+        # with that removed, this panel now spans the full row instead of
+        # leaving the left half blank.
+        ax_arr = fig.add_subplot(gs[2, :])
         ax_arr.set_facecolor(bg)
         ax_arr.axis("off")
         ax_arr.set_title("Abnormal events", loc="left", fontsize=9, color=fg, pad=4)
@@ -528,30 +588,6 @@ class ExportController:
                 y -= 0.13
                 if y < 0:
                     break
-
-        # Panel D — Context reference reminder (bottom, full width)
-        ax_ref = fig.add_subplot(gs[3, :])
-        ax_ref.set_facecolor(bg)
-        ax_ref.axis("off")
-        if ctx:
-            ax_ref.text(0.0, 1.0, f"Contexte : {ctx.label}",
-                        fontsize=8, color=fg, fontweight="bold",
-                        transform=ax_ref.transAxes, va="top")
-            ax_ref.text(0.0, 0.68, ctx.description,
-                        fontsize=7, color=mut,
-                        transform=ax_ref.transAxes, va="top", wrap=True)
-            # Mini reference bar
-            ref_text = (
-                f"HR {ctx.hr_lo:.0f}–{ctx.hr_hi:.0f} bpm   "
-                f"SDNN {ctx.sdnn_lo:.1f}–{ctx.sdnn_hi:.0f} ms   "
-                f"RMSSD {ctx.rmssd_lo:.1f}–{ctx.rmssd_hi:.0f} ms   "
-                f"PR {ctx.pr_lo:.0f}–{ctx.pr_hi:.0f} ms   "
-                f"QRS {ctx.qrs_lo:.0f}–{ctx.qrs_hi:.0f} ms   "
-                f"QTc {ctx.qtc_lo:.0f}–{ctx.qtc_hi:.0f} ms"
-            )
-            ax_ref.text(0.0, 0.28, f"Plages normales → {ref_text}",
-                        fontsize=7, color=mut,
-                        transform=ax_ref.transAxes, va="top")
 
         # ── Save PDF ─────────────────────────────────────────────────────
         try:
@@ -582,7 +618,7 @@ class ExportController:
         if app.analysis.results is None:
             messagebox.showwarning(
                 "No results",
-                "Click Analyze before exporting to Prism.")
+                self._needs_analyze("Click Analyze before exporting to Prism."))
             return
 
         sub  = app.ent_subject.get().strip() or "subject"
@@ -596,7 +632,6 @@ class ExportController:
         if not path:
             return
 
-        ctx             = EXPERIMENTAL_CONTEXTS.get(app.analysis.exp_context)
         beat_corr       = app.analysis.results.get("beat_corr")
         beat_peak_times = app.analysis.results.get("beat_peak_times")
         arr_events      = app.analysis.arrhythmia_events or []
@@ -604,6 +639,7 @@ class ExportController:
         seg_b           = app.analysis.last_seg_b
         notes           = app.session.recording_notes
         fs              = float(app.signal.fs) if app.signal.fs else 1000.0
+        auto_res, auto_sp, auto_ev, auto_evp = self.autonomic_export_data()
 
         try:
             n_tables = PrismExporter.build_and_write(
@@ -612,7 +648,6 @@ class ExportController:
                 rolling_hrv_df    = app.analysis.rolling_hrv_df,
                 epoch_df          = app.analysis.epoch_df,
                 subject           = sub,
-                context_label     = ctx.label if ctx else "",
                 arrhythmia_events = arr_events if arr_events else None,
                 beat_corr         = beat_corr,
                 beat_peak_times   = beat_peak_times,
@@ -620,6 +655,12 @@ class ExportController:
                 segment_b         = seg_b,
                 fs                = fs,
                 recording_notes   = notes,
+                qtc_formula       = app._qtc_formula(),
+                autonomic         = auto_res,
+                autonomic_spwvd   = auto_sp,
+                event_table       = auto_ev,
+                event_params      = auto_evp,
+                hrv_window        = self.hrv_window(),
             )
         except Exception as exc:
             log.warning("Prism export failed: %s", exc)
@@ -659,9 +700,14 @@ class ExportController:
         """Export RR intervals to a lightweight CSV (no Excel dependency)."""
         app = self.app
         if app.analysis.results is None:
-            messagebox.showwarning("No results", "Click Analyze first.")
+            messagebox.showwarning("No results", self._needs_analyze("Click Analyze first."))
             return
-        rdf = app.analysis.results.get("rr_df")
+        # Every interval, with a ``valid`` column (False = excluded from HRV:
+        # outside the RR bounds or spanning a removed beat) rather than
+        # rr_df's valid-only rows, so a pause is flagged, not dropped.
+        rdf = rr_timeseries(app.analysis.results)
+        if rdf.empty:
+            rdf = app.analysis.results.get("rr_df")
         if rdf is None or rdf.empty:
             messagebox.showwarning("No data", "RR DataFrame is empty.")
             return
@@ -677,7 +723,8 @@ class ExportController:
             return
         try:
             # Include quality flag if beat_corr is available
-            out = rdf[["Time_s", "RR_ms", "HR_bpm"]].copy()
+            out = rdf[[c for c in ("Time_s", "RR_ms", "HR_bpm", "valid")
+                       if c in rdf.columns]].copy()
             beat_corr = (app.analysis.results or {}).get("beat_corr")
             if beat_corr is not None and len(beat_corr) == len(out):
                 out["quality"] = np.where(beat_corr >= 0.90, "ok", "low")

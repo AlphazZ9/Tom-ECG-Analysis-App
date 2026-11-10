@@ -7,9 +7,8 @@ Nothing in this module may import from ecg.ui — it is UI-free by design.
 from __future__ import annotations
 
 import dataclasses
-import json
 from pathlib import Path
-from typing import Any, Optional, TypedDict, TYPE_CHECKING
+from typing import Optional, TypedDict, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -103,6 +102,19 @@ class MouseECG:
     PSD_XLIM:        float = 5.0   # Hz  — x-axis limit for PSD plot
     PSD_INTERP_FS:   float = 20.0  # Hz  — fixed interpolation rate (Nyquist >> 5 Hz)
 
+    # ── Spectral HRV across excluded RR intervals ──────────
+    # The spectrum is estimated on a uniformly resampled RR series, so an
+    # excluded stretch (pause, sub-bound anaesthetised run, removed beats)
+    # is filled in by the interpolator, not measured. A short hole costs a
+    # little VLF smoothing; a long one fabricates a ramp that swamps LF/HF.
+    # Spectral HRV is therefore WITHHELD (not computed) when either the
+    # longest run of consecutive excluded intervals exceeds
+    # SPECTRAL_MAX_GAP_S -- 2 s is ~1 cycle of the 0.4 Hz LF floor and
+    # ~16 mouse beats -- or excluded time exceeds this fraction of the
+    # analysed span.
+    SPECTRAL_MAX_GAP_S:         float = 2.0    # s
+    SPECTRAL_MAX_EXCLUDED_FRAC: float = 0.05   # 5 % of the analysed span
+
     FREQ_BAND_PRESETS: "list[tuple[str, tuple[float, float], tuple[float, float], tuple[float, float]]]" = [
         ("Mouse Thireau (default)", (0.00, 0.40), (0.40, 1.50), (1.50, 5.00)),
         ("Mouse LF/HF custom", (0.00, 0.40), (0.40, 2.00), (2.00, 5.00)),
@@ -113,7 +125,7 @@ class MouseECG:
     PR_NORMAL:  tuple = (30,  55)
     QRS_NORMAL: tuple = ( 8,  25)
     QT_NORMAL:  tuple = (30,  90)
-    QTC_NORMAL: tuple = (30, 100)
+    QTC_NORMAL: tuple = (30, 100)   # Mitchell QTc (QT/√(RR/100)) only
 
     # ── Absolute acceptance bounds for delineation filtering ─
     # Values outside these are physiologically impossible in mice;
@@ -126,162 +138,60 @@ class MouseECG:
     QRS_ABS_MAX: float = 35.0   # ms  (> 35 ms = pathological or error)
     QT_ABS_MIN:  float = 15.0   # ms
     QT_ABS_MAX:  float = 110.0  # ms
-    QTC_ABS_MIN: float = 15.0   # ms
-    QTC_ABS_MAX: float = 200.0  # ms  — raised from 140 ms for Mitchell correction
-    # Bazett at 700 bpm gave QTc = QT/sqrt(0.086) ≈ 3.4×QT, clipping valid data.
-    # Mitchell (cubic): QTc = QT/RR_s^(1/3) ≈ 2.3×QT at 700 bpm → max ~160 ms.
+    # No absolute QTc bounds: QTc is derived from a QT and an RR that are
+    # each already bounds-checked above, and its scale depends entirely on
+    # the formula (at RR = 120 ms, QT = 50 ms gives ~46 ms with Mitchell but
+    # ~144 ms with Bazett), so one fixed range can only be right for one of
+    # them. A former QTC_ABS_MAX of 200 ms silently NaN'd every Hodges value
+    # (QT + 1.75·(HR − 60) ≈ 820 ms at 500 bpm).
 
     # ── Epoch analysis ──────────────────────────────────────
     EPOCH_DEFAULT_S:  float = 60.0
     EPOCH_MIN_S:      float =  5.0
 
 
-# ════════════════════════════════════════════════════════════
-#  EXPERIMENTAL CONTEXT — per-condition reference ranges
-#
-#  References:
-#    Thireau et al. (2008)  Am J Physiol 294:H977    — télémétrie éveillée
-#    Baudrie et al. (2007)  Am J Physiol 293:H1996   — isoflurane
-#    Roth et al. (2019)     JOVE 150                 — kétamine/xylazine
-#    Kuhl et al. (2022)     Front Physiol            — surface électrodes
-# ════════════════════════════════════════════════════════════
-
-@dataclasses.dataclass
-class ContextRanges:
-    """Reference ranges for a single experimental context."""
-    label:        str
-    description:  str
-    # HR & RR
-    hr_lo:  float;  hr_hi:  float     # bpm
-    rr_lo:  float;  rr_hi:  float     # ms
-    # Time-domain HRV
-    sdnn_lo:  float;  sdnn_hi:  float   # ms
-    rmssd_lo: float;  rmssd_hi: float   # ms
-    pnn6_lo:  float;  pnn6_hi:  float   # %
-    # Frequency-domain
-    lf_lo:  float;  lf_hi:  float     # % power
-    hf_lo:  float;  hf_hi:  float     # % power
-    lfhf_lo: float; lfhf_hi: float    # ratio
-    # Non-linear
-    sd1_lo: float;  sd1_hi: float     # ms
-    sd2_lo: float;  sd2_hi: float     # ms
-    # Intervals
-    pr_lo:   float; pr_hi:   float    # ms
-    qrs_lo:  float; qrs_hi:  float    # ms
-    qt_lo:   float; qt_hi:   float    # ms
-    qtc_lo:  float; qtc_hi:  float    # ms
-
-
-# Context key → ContextRanges
-EXPERIMENTAL_CONTEXTS: "dict[str, ContextRanges]" = {
-    "telemetry_awake": ContextRanges(
-        label="Telemetry — awake mouse",
-        description=(
-            "Souris non contrainte, implant télémétriques. Condition de référence. "
-            "HR 450–650 bpm, VFC maximale, tonus vagal élevé. "
-            "(Thireau 2008, Baudrie 2007)"
-        ),
-        hr_lo=450,  hr_hi=650,
-        rr_lo=92,   rr_hi=133,
-        sdnn_lo=5,   sdnn_hi=20,
-        rmssd_lo=3,  rmssd_hi=18,
-        pnn6_lo=5,   pnn6_hi=60,
-        lf_lo=10,    lf_hi=50,
-        hf_lo=25,    hf_hi=70,
-        lfhf_lo=0.3, lfhf_hi=2.0,
-        sd1_lo=2,    sd1_hi=13,
-        sd2_lo=5,    sd2_hi=28,
-        pr_lo=30,    pr_hi=55,
-        qrs_lo=8,    qrs_hi=20,
-        qt_lo=30,    qt_hi=80,
-        qtc_lo=30,   qtc_hi=90,
-    ),
-    "isoflurane": ContextRanges(
-        label="Isoflurane (1–3%)",
-        description=(
-            "Anesthésie gazeuse, protocole oscillant entre 1% et 3%. "
-            "À 1% : dépression légère, HR ~450–520 bpm, VFC partiellement préservée. "
-            "À 3% : bradycardie marquée, HR peut descendre à 280 bpm, bloc AV possible. "
-            "Les plages couvrent toute la gamme 1–3%. (Baudrie 2007, Stypmann 2007)"
-        ),
-        hr_lo=280,  hr_hi=520,
-        rr_lo=115,  rr_hi=214,
-        sdnn_lo=0.5, sdnn_hi=10,
-        rmssd_lo=0.3,rmssd_hi=8,
-        pnn6_lo=0,   pnn6_hi=25,
-        lf_lo=5,     lf_hi=45,
-        hf_lo=12,    hf_hi=58,
-        lfhf_lo=0.2, lfhf_hi=4.0,
-        sd1_lo=0.2,  sd1_hi=6,
-        sd2_lo=1,    sd2_hi=16,
-        pr_lo=33,    pr_hi=72,
-        qrs_lo=8,    qrs_hi=24,
-        qt_lo=38,    qt_hi=112,
-        qtc_lo=38,   qtc_hi=118,
-    ),
-    "ketamine_xylazine": ContextRanges(
-        label="Ketamine / Xylazine",
-        description=(
-            "Anesthésie injectable. Bradycardie marquée, bloc AV fréquent, "
-            "QT allongé. HR 200–380 bpm. VFC quasi-abolie. "
-            "La xylazine (α2-agoniste) est le principal responsable. (Roth 2019)"
-        ),
-        hr_lo=200,  hr_hi=380,
-        rr_lo=158,  rr_hi=300,
-        sdnn_lo=0.5, sdnn_hi=5,
-        rmssd_lo=0.3,rmssd_hi=4,
-        pnn6_lo=0,   pnn6_hi=10,
-        lf_lo=5,     lf_hi=35,
-        hf_lo=10,    hf_hi=45,
-        lfhf_lo=0.3, lfhf_hi=4.0,
-        sd1_lo=0.2,  sd1_hi=3,
-        sd2_lo=1,    sd2_hi=8,
-        pr_lo=40,    pr_hi=80,
-        qrs_lo=8,    qrs_hi=25,
-        qt_lo=50,    qt_hi=120,
-        qtc_lo=45,   qtc_hi=130,
-    ),
-    "surface_electrodes": ContextRanges(
-        label="Surface electrodes",
-        description=(
-            "Souris contrainte ou légèrement sédatée, électrodes cutanées. "
-            "Signal plus bruité, amplitude variable. HR 300–550 bpm selon sédation. "
-            "VFC intermédiaire entre télémétrie et anesthésie profonde. (Kuhl 2022)"
-        ),
-        hr_lo=300,  hr_hi=550,
-        rr_lo=109,  rr_hi=200,
-        sdnn_lo=2,   sdnn_hi=12,
-        rmssd_lo=1,  rmssd_hi=10,
-        pnn6_lo=1,   pnn6_hi=35,
-        lf_lo=8,     lf_hi=45,
-        hf_lo=20,    hf_hi=60,
-        lfhf_lo=0.3, lfhf_hi=3.0,
-        sd1_lo=1,    sd1_hi=7,
-        sd2_lo=3,    sd2_hi=18,
-        pr_lo=30,    pr_hi=60,
-        qrs_lo=8,    qrs_hi=22,
-        qt_lo=35,    qt_hi=95,
-        qtc_lo=35,   qtc_hi=100,
-    ),
+# QTc correction formulas (computed by ecg.core.analysis.compute_qtc), in
+# selector order; the first is the default. Mitchell et al. 1998 (Am J
+# Physiol 274:H747) is Bazett normalised to a 100 ms mouse RR rather than
+# to a 1 s human RR. Bazett/Fridericia are kept for comparison with
+# human-calibrated studies. The QT–RR relation is weak in mice, so the
+# uncorrected QT should always be reported alongside any QTc.
+QTC_FORMULA_LABELS = {
+    "mitchell":   "Mitchell (QT/√(RR/100))",
+    "bazett":     "Bazett (QT/√RR, human)",
+    "fridericia": "Fridericia (QT/∛RR, human)",
 }
 
-# Map PARAM_INFO key → ContextRanges field pair (lo, hi attribute names)
-_CONTEXT_FIELD_MAP: "dict[str, tuple[str,str]]" = {
-    "HR_mean":  ("hr_lo",    "hr_hi"),
-    "RR_mean":  ("rr_lo",    "rr_hi"),
-    "RR_SDNN":  ("sdnn_lo",  "sdnn_hi"),
-    "RR_RMSSD": ("rmssd_lo", "rmssd_hi"),
-    "RR_pNN6":  ("pnn6_lo",  "pnn6_hi"),
-    "LF_pct":   ("lf_lo",    "lf_hi"),
-    "HF_pct":   ("hf_lo",    "hf_hi"),
-    "LFHF":     ("lfhf_lo",  "lfhf_hi"),
-    "SD1":      ("sd1_lo",   "sd1_hi"),
-    "SD2":      ("sd2_lo",   "sd2_hi"),
-    "PR_ms":    ("pr_lo",    "pr_hi"),
-    "QRS_ms":   ("qrs_lo",   "qrs_hi"),
-    "QT_ms":    ("qt_lo",    "qt_hi"),
-    "QTc_ms":   ("qtc_lo",   "qtc_hi"),
+# Selector labels / keys written by older versions (sessions, combobox
+# values). "Mitchell (∛RR)" was really Fridericia with RR in seconds, and
+# Hodges (QT + 1.75·(HR − 60), a human slope) gave ~820 ms at mouse heart
+# rates — both now map to the corrected Mitchell formula.
+_LEGACY_QTC_FORMULAS = {
+    "hodges":             "mitchell",
+    "hodges (linear hr)": "mitchell",
+    "mitchell (∛rr)":     "mitchell",
+    "bazett (√rr)":       "bazett",
 }
+
+
+def normalize_qtc_formula(value: object) -> str:
+    """Return a supported QTc formula key from a key, a current or legacy
+    selector label; old/unknown values default to Mitchell."""
+    formula = str(value).strip().lower()
+    for key, label in QTC_FORMULA_LABELS.items():
+        if formula == key or formula == label.lower():
+            return key
+    return _LEGACY_QTC_FORMULAS.get(formula, "mitchell")
+
+
+# The awake/isoflurane/ketamine-xylazine/custom experimental-context
+# selector and its per-metric reference bands (radar chart, Time Domain
+# table annotations, Rolling/Epochs/Intervals reference bands, PDF report)
+# were removed here -- not useful in practice. Where a context value fed a
+# real detection threshold (classify_arrhythmias' bradycardia/pause RR
+# cutoff), the value the default "telemetry_awake" context used to
+# provide is now a fixed constant instead, so detection behaviour is
+# unchanged.
 
 
 @dataclasses.dataclass
@@ -308,6 +218,10 @@ class FilterParams:
     clean_method: str   = "neurokit"
     no_filter:    bool  = True
     min_rr_ms:        float = MouseECG.MIN_RR_MS
+    # Upper RR bound for HRV: intervals longer than this are excluded (not
+    # bridged). The default (≈ 333 ms, 180 bpm) assumes an awake mouse --
+    # widen it for anaesthetised animals. min_rr_ms is the lower bound.
+    max_rr_ms:        float = MouseECG.RR_MAX_MS
     peak_distance_ms: float = MouseECG.PEAK_DISTANCE_MS
     thresh:           float = 0.5
     artifact_correction: bool = False   # OFF by default — use manual review instead
@@ -358,6 +272,7 @@ class FilterParams:
             clean_method = str(  d.get("clean_method",  "neurokit")),
             no_filter    = bool( d.get("no_filter",     True)),
             min_rr_ms        = float(d.get("min_rr_ms",         MouseECG.MIN_RR_MS)),
+            max_rr_ms        = float(d.get("max_rr_ms",         MouseECG.RR_MAX_MS)),
             peak_distance_ms = float(d.get("peak_distance_ms",  MouseECG.PEAK_DISTANCE_MS)),
             thresh           = float(d.get("thresh",            0.5)),
             artifact_correction = bool(d.get("artifact_correction", False)),
@@ -385,6 +300,7 @@ class FilterParams:
             clean_method = app.cb_clean.get(),  # type: ignore[union-attr]
             no_filter    = no_filter,
             min_rr_ms        = app._safe_float(app.ent_minrr, MouseECG.MIN_RR_MS),
+            max_rr_ms        = app._safe_float(getattr(app, "ent_maxrr", None), MouseECG.RR_MAX_MS),
             peak_distance_ms = float(getattr(app, '_peak_distance_ms', MouseECG.PEAK_DISTANCE_MS)),
             thresh           = float(app.sl_thr.get()),  # type: ignore[union-attr]
             artifact_correction = bool(app.sw_artifact.get()),
@@ -408,45 +324,6 @@ SESSION_VERSION = 6          # bump when the schema changes
 SESSION_SUFFIX  = ".ecgsession"   # file extension (content is now JSON)
 SESSION_DIR     = Path.home() / ".ecg_sessions"   # default cache folder
 
-# ── User-editable "custom" experimental context ────────────────────────────
-# EXPERIMENTAL_CONTEXTS above is a fixed set of 4 mouse contexts with no
-# user-editable option (e.g. for a specific strain/substrain whose normal
-# ranges differ from these). Rather than baking in more built-in presets
-# (which would just be more guessed numbers), this lets the user define
-# their own ContextRanges via the Parameters dialog; it plugs into the exact
-# same EXPERIMENTAL_CONTEXTS dict / _current_ref() mechanism every panel
-# already uses, so no downstream code needs to know "custom" is special.
-CUSTOM_CONTEXT_PATH = SESSION_DIR / "custom_context.json"
-
-
-def load_custom_context() -> "Optional[ContextRanges]":
-    """Load the user-defined custom ContextRanges from disk, if one was saved.
-
-    Returns None (not a default) when nothing has been saved yet, or the
-    saved data can't be read -- callers pick their own starting-point
-    defaults rather than this function fabricating physiological bounds.
-    """
-    if not CUSTOM_CONTEXT_PATH.exists():
-        return None
-    try:
-        with open(CUSTOM_CONTEXT_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return ContextRanges(**data)
-    except Exception:
-        return None
-
-
-def save_custom_context(ctx: "ContextRanges") -> None:
-    """Persist the user-defined custom ContextRanges to disk (survives restarts)."""
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CUSTOM_CONTEXT_PATH, "w", encoding="utf-8") as f:
-        json.dump(dataclasses.asdict(ctx), f, indent=2)
-
-
-_custom_ctx = load_custom_context()
-if _custom_ctx is not None:
-    EXPERIMENTAL_CONTEXTS["custom"] = _custom_ctx
-
 
 @dataclasses.dataclass
 class ArrhythmiaEvent:
@@ -460,9 +337,9 @@ class ArrhythmiaEvent:
                               # is passed in (from analyse_intervals()), a run
                               # of sustained PR prolongation is flagged as
                               # "av_delay" -- this is a heuristic conduction-
-                              # delay flag (median PR vs. the context's
-                              # reference range), NOT a definitive Mobitz I/
-                              # II/3rd-degree diagnosis: distinguishing those
+                              # delay flag (PR vs. a fixed cutoff, see
+                              # detection._AV_DELAY_PR_HI_MS), NOT a definitive
+                              # Mobitz I/II/3rd-degree diagnosis: distinguishing those
                               # would require seeing P waves on NON-conducted
                               # beats (no following QRS to anchor on), which
                               # this pipeline does not attempt.
@@ -475,6 +352,10 @@ class ArrhythmiaEvent:
     severity:    str          # "info" | "warning" | "alert"
     baseline_hr: float = 0.0  # individual baseline HR (bpm); 0 = not applicable
     delta_pct:   float = 0.0  # % deviation from baseline (negative = brady, positive = tachy)
+    # False on brady/tachy events when the baseline window covered most of
+    # the analysed beats (see detection.arrhythmia_baseline_info) -- the
+    # reference then includes the event itself, so the call is unreliable.
+    baseline_reliable: bool = True
 
     @property
     def duration_s(self) -> float:
@@ -491,8 +372,12 @@ class AnalysisResults(TypedDict, total=False):
     - merge-updates (r.update(freq_results)) stay type-checked.
 
     Keys populated by analyse_core (always present after a successful run):
-        hr, rr_ms, rr_df, hrv_time, hrv_freq, hrv_nonlin, intervals,
-        beat_template, beat_time, beat_matrix, beat_sd, beat_corr, peak_amps
+        hr, rr_ms, rr_valid, rr_t_s, rr_df, hrv_time, hrv_freq, hrv_nonlin,
+        intervals, beat_template, beat_time, beat_matrix, beat_sd,
+        beat_corr, peak_amps
+
+    (rr_valid / rr_t_s may be missing from results restored from a session
+    saved before they existed -- analysis.rr_timeseries() rebuilds both.)
 
     Keys added on demand by later analyse_* calls:
         hrv_freq    (analyse_hrv_freq)
@@ -500,9 +385,11 @@ class AnalysisResults(TypedDict, total=False):
         intervals   (analyse_intervals — overwrites the stub from analyse_core)
     """
     # ── Core (always set after analyse_core) ────────────────────────────
-    hr:            dict                          # mean/min/max/std/n
-    rr_ms:         "np.ndarray"                  # raw RR array (ms)
-    rr_df:         "pd.DataFrame"                # per-beat Time_s / RR_ms / HR_bpm
+    hr:            dict                          # mean/min/max/std/n/n_valid + RR exclusion counts and the RR bounds used (rr_min_ms/rr_max_ms)
+    rr_ms:         "np.ndarray"                  # raw RR array (ms) -- ALL intervals
+    rr_valid:      "np.ndarray"                  # bool mask over rr_ms: inside RR bounds and not spanning a removed beat (used for HRV)
+    rr_t_s:        "np.ndarray"                  # end time (s) of every interval in rr_ms (rpeaks[1:] / fs)
+    rr_df:         "pd.DataFrame"                # per-beat Time_s / RR_ms / HR_bpm (valid intervals only)
     hrv_time:      "pd.DataFrame"                # NeuroKit2 time-domain metrics
     # ── Populated on demand (empty DataFrame until explicitly computed) ──
     hrv_freq:      "pd.DataFrame"

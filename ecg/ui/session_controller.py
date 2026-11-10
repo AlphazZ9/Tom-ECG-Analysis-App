@@ -18,12 +18,13 @@ from tkinter import messagebox
 import numpy as np
 import pandas as pd
 
-from ecg.core.models import FilterParams, EXPERIMENTAL_CONTEXTS
+from ecg.core.models import FilterParams, QTC_FORMULA_LABELS, normalize_qtc_formula
+from ecg.core.analysis import recompute_qtc_column
 from ecg.io.loaders import load_mat_signal, _serialise_results, _deserialise_results
 from ecg.io.session import load_session, save_session, delete_session
 from ecg.io.db import _DB_AVAILABLE, upsert_recording, set_verified
 from ecg.core.ml_detector import save_training_sample, delete_training_sample
-from ecg.ui.theme import BLUE, GREEN, MUTED
+from ecg.ui.theme import GREEN, MUTED, ORANGE, RED
 
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
@@ -221,12 +222,18 @@ class SessionController:
             "pacing_periods":   list(state.get("pacing_periods", [])),
             "analysis_t_start": float(state.get("analysis_t_start", 0.0)),
             "analysis_t_end":   float(state.get("analysis_t_end",   0.0)),
-            "exp_context":      state.get("exp_context", "telemetry_awake"),
             "nav_pos":          float(state.get("nav_pos", 0.0)),
             "edit_mode":        bool(state.get("edit_mode", False)),
             "current_tab":      _TAB_KEY_MAP.get(
                 state.get("current_tab", "Detection"),
                 state.get("current_tab", "Detection")),
+            "qtc_formula":      normalize_qtc_formula(state.get("qtc_formula", "mitchell")),
+            # Raw: absent in sessions saved before the Autonomic view (then
+            # None -- the current parameters stay); normalised on apply,
+            # where an invalid key keeps the current value.
+            "autonomic_params": state.get("autonomic_params"),
+            # Same for the Event-locked panel (label filter, pre / post, z).
+            "event_locked_params": state.get("event_locked_params"),
         }
 
     def on_restore_session_done(self, bundle: dict, saved_at: str) -> None:
@@ -273,9 +280,19 @@ class SessionController:
         self.app.analysis.rolling_hrv_df  = bundle["rolling_hrv_df"]
         self.app.analysis.annotations     = list(bundle["annotations"])
         self.app.analysis.pacing_periods  = list(bundle["pacing_periods"])
+        # The peaks are re-detected below: any Autonomic result is stale.
+        # Its saved parameters are restored (old sessions: unchanged).
+        self.app.analysis_ctrl.invalidate_autonomic(peaks_changed=False)
+        self.app.analysis_ctrl.apply_autonomic_params(bundle.get("autonomic_params"))
+        ectl = getattr(self.app, "event_ctrl", None)
+        if ectl is not None:
+            ectl.apply_params(bundle.get("event_locked_params"))
 
         self.app.analysis.t_start = bundle["analysis_t_start"]
         self.app.analysis.t_end   = bundle["analysis_t_end"]
+        self.app.analysis.analysed_window = (
+            (self.app.analysis.t_start, self.app.analysis.t_end)
+            if bundle["results"] is not None else None)
         # Sync analysis window entry widgets with restored values
         if self.app.ent_analysis_t0 is not None:
             self.app._batch_ui_update(self.app.ent_analysis_t0, state="normal")
@@ -291,18 +308,26 @@ class SessionController:
             self.app._batch_ui_update(self.app.ent_analysis_t1, state="normal")
 
         # ── Restore UI state ─────────────────────────────────────────────
-        ctx = bundle["exp_context"]
-        if ctx in EXPERIMENTAL_CONTEXTS:
-            self.app.analysis.exp_context = ctx
-            try:
-                pass  # interpretation removed  # type: ignore[union-attr]
-                pass  # interpretation removed
-                pass  # interpretation removed
-            except Exception as e:
-                log.warning("Failed to restore context from session: %s", e)
-
         self.app.ui.nav_pos = bundle["nav_pos"]
         self.app._sync_nav_pos_entry()
+        formula = normalize_qtc_formula(bundle.get("qtc_formula", "mitchell"))
+        # App state is the formula in effect (survives a UI rebuild, read
+        # by the exports and the next session save); the selector mirrors it.
+        self.app.analysis.qtc_formula = formula
+        if self.app.cb_qtc_formula is not None:
+            self.app.cb_qtc_formula.set(QTC_FORMULA_LABELS[formula])
+        # Recompute the saved QTc from the saved QT/RR with the restored
+        # formula: sessions saved before the QTc formulas were corrected hold
+        # values from the old cube-root "Mitchell" (really Fridericia) or
+        # from Hodges (all NaN in mice), which both map to the corrected
+        # Mitchell formula now.
+        _results = self.app.analysis.results
+        if _results is not None and _results.get("intervals") is not None:
+            try:
+                _results["intervals"] = recompute_qtc_column(
+                    _results["intervals"], formula)
+            except Exception as _exc:
+                log.debug("restore QTc recompute failed: %s", _exc, exc_info=True)
 
         saved_edit = bundle["edit_mode"]
         if saved_edit != self.app.detection.edit_mode:
@@ -356,6 +381,21 @@ class SessionController:
                 self.app.ent_hp.insert(0, str(fp.hp))  # type: ignore[union-attr]
             except Exception as _exc:
                 log.debug("restore filter cutoff entries failed: %s", _exc, exc_info=True)
+            # Min / Max R-R as saved: the restored peaks were detected with
+            # this min_rr_ms, and [min_rr_ms, max_rr_ms] are the HRV bounds
+            # the next Analyze should use (the restored results record the
+            # bounds they were computed with in hr["rr_min_ms"/"rr_max_ms"]).
+            for attr, val in (("ent_minrr", f"{fp.min_rr_ms:g}"),
+                              ("ent_maxrr", f"{fp.max_rr_ms:g}")):
+                w = getattr(self.app, attr, None)
+                if w is None:
+                    continue
+                try:
+                    w.configure(state="normal")
+                    w.delete(0, "end")
+                    w.insert(0, val)
+                except Exception as _exc:
+                    log.debug("restore %s failed: %s", attr, _exc, exc_info=True)
             for w, val in (
                 (self.app.sw_notch, fp.notch_filter),
                 (self.app.sw_filtering, not fp.no_filter),
@@ -384,6 +424,17 @@ class SessionController:
                 log.debug("restore on_filtering_toggle failed: %s", _exc, exc_info=True)
 
         self.app._run_detection(thr)
+        # Re-detection rebuilt the peaks from the full candidate set, which
+        # brings back every beat the saved artifact correction removed --
+        # re-apply those removals, so the peaks (and the HRV breaks derived
+        # from them) match the restored results again.
+        n_reapplied = self.app.analysis_ctrl.reapply_artifact_removals()
+        if n_reapplied and self.app.lbl_npeaks is not None:
+            # after(0): run_detection queued its own (uncorrected) count first
+            _n = len(self.app.detection.rpeaks_ok)
+            self.app.after(0, lambda: self.app.lbl_npeaks.configure(  # type: ignore[union-attr]
+                text=f"Peaks detected: {_n}  (after correction)",
+                text_color=GREEN if _n > 10 else RED))
 
         # ── Enable analysis buttons ──────────────────────────────────────
         self.app._set_save_session_enabled(True)
@@ -391,9 +442,14 @@ class SessionController:
             True, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl"))
 
         n_beats = len(self.app.detection.rpeaks_ok) if self.app.detection.rpeaks_ok is not None else 0
+        # The restored results' RR-exclusion disclosure, in orange, as after
+        # Analyze (the persistent labels are re-derived below).
+        excl_note = (self.app.analysis_ctrl.exclusion_status_note()
+                     if self.app.analysis.results is not None else "")
         self.app._set_status(
             f"Session restored — {n_beats} beats  |  "
-            f"{n_samples / fs:.0f} s recording  |  results ready", GREEN)
+            f"{n_samples / fs:.0f} s recording  |  results ready{excl_note}",
+            ORANGE if excl_note else GREEN)
 
         # ── Render ───────────────────────────────────────────────────────
         self.app._draw_detail(self.app.ui.nav_pos)
@@ -408,13 +464,11 @@ class SessionController:
         if self.app.analysis.results is not None:
             self.app.after(100, self.app._draw_all_results)
             pass  # interpretation removed
-            if self.app.lbl_freq_status is not None:
-                fd = self.app.analysis.results.get("hrv_freq")
-                has_freq = fd is not None and not (hasattr(fd, "empty") and fd.empty)
-                self.app.lbl_freq_status.configure(  # type: ignore[union-attr]
-                    text="  Loaded from session ✓" if has_freq
-                    else "  Core done — click to compute LF / HF",
-                    text_color=GREEN if has_freq else BLUE)
+            # Analysis-window label (with its RR-exclusion line) and the
+            # Frequency / Non-linear labels -- including why a spectrum was
+            # withheld (its reason is restored with the hrv_freq attrs).
+            self.app.analysis_ctrl.refresh_result_labels(
+                freq_done_label="Loaded from session ✓")
         self.app._update_kpis()
         self.update_session_ui(has_session=True, saved_at=saved_at)
 
@@ -475,17 +529,21 @@ class SessionController:
             # Beat count stored for the restore-dialog display only
             "n_beats":         len(self.app.detection.rpeaks_ok) if self.app.detection.rpeaks_ok is not None else 0,
             # UI state that must survive a session restore
-            "exp_context":     self.app.analysis.exp_context,
             "nav_pos":         self.app.ui.nav_pos,
             "edit_mode":       self.app.detection.edit_mode,
             "current_tab":     self.safe_get_tab(),
+            "qtc_formula":    normalize_qtc_formula(self.app._qtc_formula()),
             "analysis_t_start": self.app.analysis.t_start,
             "analysis_t_end":   self.app.analysis.t_end,
         }
         if self.app.analysis.results is not None:
             state["results"] = _serialise_results(self.app.analysis.results)
-        if self.app.analysis.artifact_report is not None:
-            state["artifact_report"] = self.app.analysis.artifact_report
+        # Only the removals still in effect on the current peaks: restore
+        # re-detects the peaks and re-applies these, so it must not remove
+        # beats that have come back since (threshold change, re-detection).
+        artifact_report = self.app.analysis_ctrl.current_artifact_report()
+        if artifact_report is not None:
+            state["artifact_report"] = artifact_report
         if self.app.analysis.artifact_candidates:
             state["artifact_candidates"] = self.app.analysis.artifact_candidates
         if self.app.analysis.epoch_df is not None and not self.app.analysis.epoch_df.empty:
@@ -496,6 +554,12 @@ class SessionController:
             state["annotations"] = self.app.analysis.annotations
         if self.app.analysis.pacing_periods:
             state["pacing_periods"] = self.app.analysis.pacing_periods
+        # HRV > Autonomic parameters (window, method, ks, kp, LF/HF) as
+        # entered; the result itself is cheap to recompute and not saved.
+        state["autonomic_params"] = self.app.analysis_ctrl.autonomic_widget_params()
+        ectl = getattr(self.app, "event_ctrl", None)
+        if ectl is not None:
+            state["event_locked_params"] = ectl.widget_params()
         return state
 
     def save_for_training_only(self) -> None:
@@ -755,7 +819,7 @@ class SessionController:
         """Capture all editable widget values before a UI rebuild."""
         s: dict = {}
         for attr in ("ent_project_name", "ent_channel", "ent_subject", "ent_fs", "ent_t_start",
-                     "ent_t_end", "ent_lp", "ent_hp", "ent_minrr",
+                     "ent_t_end", "ent_lp", "ent_hp", "ent_minrr", "ent_maxrr",
                      "ent_epoch", "ent_overlap", "ent_thr", "ent_window",
                      "ent_sg_target_fs", "ent_sg_window_ms"):
             try:
@@ -780,7 +844,6 @@ class SessionController:
             s["cb_det_method"] = self.app.cb_det_method.get() if self.app.cb_det_method is not None else "SG + Derivative (10 kHz)"
         except Exception:
             s["cb_det_method"] = "SG + Derivative (10 kHz)"
-        s["exp_context"] = self.app.analysis.exp_context
         try:
             s["current_tab"] = self.app.tabs.get()
         except Exception:
@@ -791,12 +854,24 @@ class SessionController:
         s["left_panel_collapsed"]  = self.app.ui.left_panel_collapsed
         s["right_panel_collapsed"] = self.app.ui.right_panel_collapsed
         s["show_spike_markers"] = self.app.ui.show_spike_markers
+        # Autonomic parameters as typed (even before a Compute) -- read
+        # tolerantly, an unreadable entry keeps the stored value.
+        try:
+            s["autonomic_params"] = self.app.analysis_ctrl.autonomic_widget_params()
+        except Exception as exc:
+            log.debug("snapshot autonomic params failed: %s", exc, exc_info=True)
+        try:
+            ectl = getattr(self.app, "event_ctrl", None)
+            if ectl is not None:
+                s["event_locked_params"] = ectl.widget_params()
+        except Exception as exc:
+            log.debug("snapshot event-locked params failed: %s", exc, exc_info=True)
         return s
 
     def restore_ui_state(self, s: dict) -> None:
         """Restore widget values captured before a UI rebuild."""
         for attr in ("ent_project_name", "ent_channel", "ent_subject", "ent_fs", "ent_t_start",
-                     "ent_t_end", "ent_lp", "ent_hp", "ent_minrr",
+                     "ent_t_end", "ent_lp", "ent_hp", "ent_minrr", "ent_maxrr",
                      "ent_epoch", "ent_overlap", "ent_thr", "ent_window",
                      "ent_sg_target_fs", "ent_sg_window_ms"):
             val = s.get(attr)
@@ -873,16 +948,17 @@ class SessionController:
         if saved_show_spikes != self.app.ui.show_spike_markers:
             self.app._toggle_spike_markers()
 
-        # Restore experimental context
-        ctx = s.get("exp_context", "telemetry_awake")
-        if ctx in EXPERIMENTAL_CONTEXTS:
-            self.app.analysis.exp_context = ctx
-            try:
-                pass  # interpretation removed
-                pass  # interpretation removed
-                pass  # interpretation removed
-            except Exception as e:
-                log.warning("Failed to restore context from session: %s", e)
         saved_edit = s.get("edit_mode", False)
         if bool(saved_edit) != self.app.detection.edit_mode:
             self.app._toggle_edit_mode()
+        if "autonomic_params" in s:
+            try:
+                self.app.analysis_ctrl.apply_autonomic_params(s["autonomic_params"])
+            except Exception as exc:
+                log.debug("restore autonomic params failed: %s", exc, exc_info=True)
+        ectl = getattr(self.app, "event_ctrl", None)
+        if "event_locked_params" in s and ectl is not None:
+            try:
+                ectl.apply_params(s["event_locked_params"])
+            except Exception as exc:
+                log.debug("restore event-locked params failed: %s", exc, exc_info=True)
