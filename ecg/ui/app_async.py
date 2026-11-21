@@ -54,6 +54,94 @@ def recording_changed(app: Any, gen: int, what: str, msg: "str | None" = None) -
     return True
 
 
+def fit_progress_text(text: str, suffix: str = "", width: "int | None" = None,
+                      k: float = 1.0) -> str:
+    """*text* + *suffix* cut with "…" to the header's progress slot (the
+    stage message gives way, the percentage and time left stay)."""
+    from ecg.ui.app_toolbar import PROGRESS_SLOT_W
+    try:
+        import tkinter.font as tkfont
+        from ecg.ui.theme import FONT_HINT
+        font = tkfont.Font(font=FONT_HINT)
+        measure = font.measure
+    except Exception:            # no Tk (tests): about 6 px a character
+        measure = lambda t: 6 * len(t)      # noqa: E731
+    # *k*: screen pixels per measured unit (the label as drawn says it).
+    room = ((width or PROGRESS_SLOT_W) - 4) / (k or 1.0)
+    if measure(text + suffix) <= room:
+        return text + suffix
+    while text and measure(text + "…" + suffix) > room:
+        text = text[:-1]
+    return text.rstrip() + "…" + suffix
+
+
+def _drawn_ratio(label: "Any") -> "float | None":
+    """Screen pixels per tkfont-measured unit for the text of a CTkLabel."""
+    try:
+        import tkinter.font as tkfont
+        probe = "Frequency HRV 0123456789"
+        inner = label._label
+        old = inner.cget("text")
+        inner.configure(text=probe)
+        drawn = inner.winfo_reqwidth()
+        inner.configure(text=old)
+        font = label.cget("font")
+        f = font if isinstance(font, tkfont.Font) else tkfont.Font(font=font)
+        return drawn / f.measure(probe) if drawn > 0 else None
+    except Exception:
+        return None
+
+
+def freeze_button_width(button: "Any", busy_label: str) -> str:
+    """Keep *button* at the width it has now while it shows *busy_label*
+    (a longer "Checking for saved session…" otherwise widened it and moved
+    every command beside it); returns the label, cut with "…" to fit.
+    _stop_progress gives the button its own width back."""
+    try:
+        px = int(button.winfo_width())
+        if px <= 1 or not button.winfo_ismapped():
+            return busy_label
+        scale = float(button._get_widget_scaling()) if hasattr(button, "_get_widget_scaling") else 1.0
+        import tkinter.font as tkfont
+        font = button.cget("font")
+        f = font if isinstance(font, tkfont.Font) else tkfont.Font(font=font)
+        # In measured units: the label as drawn gives the ratio to screen
+        # pixels (the screen's font scaling cancels out).
+        own = f.measure(str(button.cget("text")))
+        lbl = getattr(button, "_text_label", None)
+        drawn = lbl.winfo_reqwidth() if lbl is not None else 0
+        k = drawn / own if own > 0 and drawn > 0 else 1.0
+        # No wider than its own label as drawn (CTk widens the button for
+        # any text past that).
+        pad = getattr(button, "_natural_pad", None)     # app_toolbar._fit_labels
+        if pad is None:
+            pad = px - drawn if drawn > 0 else int(round(24 * scale))
+        room = (px - pad) / k
+        label = busy_label
+        if f.measure(label) > room:
+            while label and f.measure(label + "…") > room:
+                label = label[:-1]
+            label = label.rstrip(" …") + "…"
+        if not hasattr(button, "_busy_own_width"):
+            button._busy_own_width = button.cget("width")
+        button.configure(width=int(round(px / scale)))
+        return label
+    except Exception as exc:          # a stub, a destroyed widget: leave it
+        log.debug("button width not frozen: %s", exc)
+        return busy_label
+
+
+def release_button_width(button: "Any") -> None:
+    own = getattr(button, "_busy_own_width", None)
+    if own is None:
+        return
+    try:
+        button.configure(width=own)
+        del button._busy_own_width
+    except Exception as exc:
+        log.debug("button width not restored: %s", exc)
+
+
 class AsyncMixin:
     """ECGApp background-job infrastructure: progress, _start_async, error dialog."""
 
@@ -112,7 +200,10 @@ class AsyncMixin:
             elapsed = time.time() - start
             eta = elapsed * (100 - pct) / pct
             suffix = f"   (~{eta:.0f}s left)"
-        self.lbl_progress.configure(text=f"{pct}%  {msg}{suffix}")
+        k = getattr(self, "_progress_k", None)
+        if k is None:
+            k = self._progress_k = _drawn_ratio(self.lbl_progress)
+        self.lbl_progress.configure(text=fit_progress_text(f"{pct}%  {msg}", suffix, k=k or 1.0))
 
     def _start_async(
         self: ECGApp,
@@ -152,11 +243,12 @@ class AsyncMixin:
             self._set_status("Another operation is already running — please wait", ORANGE)
             return
         original_text = original_label or button.cget("text")
-        button.configure(state="disabled", text=btn_busy_label)
+        button.configure(state="disabled", text=freeze_button_width(button, btn_busy_label))
         if status_msg:
             self._set_status(status_msg, ORANGE)
         self.progress.set(0)
-        self._prog_row.pack(side="bottom", fill="x", padx=SPACE_M, pady=(SPACE_XS, SPACE_S))
+        # Inside the header's fixed slot: shown without moving anything.
+        self._prog_row.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._async_start_time = time.time()
         self._last_prog_pct = 0
         self._last_prog_msg = ""
@@ -261,7 +353,7 @@ class AsyncMixin:
 
     def _stop_progress(self: ECGApp, button: ctk.CTkButton, original_label: str) -> None:
         self.progress.set(1.0)
-        self._prog_row.pack_forget()
+        self._prog_row.place_forget()
         self.lbl_progress.configure(text="")
         self._async_start_time = None
         # A UI rebuild (theme toggle) during the job destroyed *button*; its
@@ -270,5 +362,6 @@ class AsyncMixin:
         try:
             if button.winfo_exists():
                 button.configure(state="normal", text=original_label)
+                release_button_width(button)
         except tk.TclError as exc:
             log.debug("_stop_progress: button gone (UI rebuilt): %s", exc)

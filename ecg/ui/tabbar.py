@@ -8,6 +8,7 @@ drawn as a glyph next to the name, so a state never rests on colour alone.
 """
 from __future__ import annotations
 
+import math
 import tkinter as tk
 import tkinter.font as tkfont
 from typing import Callable, Optional
@@ -116,6 +117,20 @@ class TabBar(ctk.CTkFrame):
         label = ctk.CTkLabel(row, text=name, font=FONT_BODY, text_color=TEXT,
                              width=name_w, anchor="w")
         label.pack(side="left")
+        # The width as drawn, bold and regular: a measured width falls short
+        # where the bold is synthesised (no bold face of the font installed),
+        # and selecting the tab then widened its head and moved the others.
+        drawn = 0
+        for font in (FONT_CARD_TITLE, FONT_BODY):
+            try:
+                label.configure(font=font)
+                label._label.update_idletasks()
+                drawn = max(drawn, int(label._label.winfo_reqwidth()))
+            except (tk.TclError, AttributeError):
+                pass
+        scale = float(label._get_widget_scaling()) if hasattr(label, "_get_widget_scaling") else 1.0
+        if drawn and drawn / scale + 2 > name_w:
+            label.configure(width=int(math.ceil(drawn / scale)) + 2)
         # width=1: a CTkFrame otherwise holds its parent at 200 px. The
         # underline starts after the gap, as when the gap sat between heads.
         line = ctk.CTkFrame(head, width=1, height=3, fg_color=PANEL, corner_radius=0)

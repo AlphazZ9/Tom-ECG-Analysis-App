@@ -165,7 +165,8 @@ def test_all_pairs_workbook(tmp_path):
     assert hr1["n"] == 6 and hr1["Wilcoxon p"] == pytest.approx(st1["Wilcoxon p"])
     assert hr1["Median Δ (B − A)"] == pytest.approx(st1["Median Δ (B − A)"])
     assert summ[(summ["Pair"] == 2)]["n"].iloc[0] == 5           # row 102 left out
-    flat = book["Summary"].astype(str).to_numpy().ravel().tolist()
+    # str() per cell: pandas 3's astype(str) keeps empty cells as NaN.
+    flat = [str(v) for v in book["Summary"].to_numpy().ravel().tolist()]
     assert any("G has no partner" in v for v in flat)
     # A pair sheet: the four single-pair tables one below the other.
     sheet = book[names[1]]
@@ -173,8 +174,8 @@ def test_all_pairs_workbook(tmp_path):
     for title in ("Statistics", "About", "Rows checked", "Paired values"):
         assert title in col0
     assert any("not 'Pre Stim 5min' like the group" in v
-               for v in sheet.astype(str).to_numpy().ravel())
-    assert any("102" == v for v in sheet.astype(str).to_numpy().ravel())   # left out, listed
+               for v in map(str, sheet.to_numpy().ravel()))
+    assert any("102" == v for v in map(str, sheet.to_numpy().ravel()))   # left out, listed
 
 
 def test_sheet_names_are_valid_and_unique():

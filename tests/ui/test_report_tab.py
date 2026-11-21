@@ -110,7 +110,8 @@ def _sheets(app):
 
 def test_report_replaced_summary_in_the_tab_bar():
     assert TAB_ORDER == ("Signal & Detection", "Rhythm & HRV", "Time course",
-                         "Compare segments", "Morphology & Intervals", "Events", "Report")
+                         "Compare segments", "Morphology & Intervals", "Events", "Group",
+                         "Report")
     assert TAB_MODULES[TAB_REPORT] == ("core",)
 
 

@@ -10,6 +10,7 @@ Mixin of ECGApp (see ecg/ui/app.py).
 """
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 import customtkinter as ctk  # type: ignore[import-untyped]
 from ecg.core.autonomic import COV_METHODS
@@ -46,6 +47,8 @@ from ecg.ui.widgets import PillGroup
 # pyright: reportGeneralTypeIssues=false
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
+
+log = logging.getLogger("ecg")
 
 # The per-window metrics both windowed modes offer, as (key, label): the keys are
 # the column names of compute_rolling_hrv, and of compute_epochs but for its
@@ -143,12 +146,25 @@ class TabTimeCourseMixin:
         """Opening this tab shows its mode: what showing one checks runs as well,
         the too-short warning of Epochs, the default mode, above all. Report is
         brought up to date the moment it opens."""
+        # The figures of the tab shown that still wait for a draw: a slot in
+        # a scrolling page gets no <Map> when its tab comes back.
+        after_idle = getattr(self, "after_idle", None)
+        if after_idle is not None:
+            after_idle(self._flush_shown_slots)
         if self.tabs.get() == TAB_TIME_COURSE:
             self._show_time_mode(self.ui.time_course_mode)
         elif self.tabs.get() == TAB_COMPARE:
             self._refresh_compare_tab()
         elif self.tabs.get() == TAB_REPORT:
             self._refresh_report()
+
+    def _flush_shown_slots(self: ECGApp) -> None:
+        for slot in list(getattr(self, "_slots", {}).values()):
+            try:
+                if getattr(slot, "_pending", None) is not None and not slot._hidden():
+                    slot.flush()
+            except Exception as exc:          # a slot destroyed by a rebuild
+                log.debug("deferred figure not drawn: %s", exc)
 
     def _show_time_mode(self: ECGApp, mode: str) -> None:
         """Switch the visible mode: from the selector, or when a job's result

@@ -114,8 +114,9 @@ def test_current_names_pass_through_the_session_map():
 
 
 def test_every_tab_but_detection_lists_known_modules():
-    # Compare segments, computed on demand from the peaks, shares their state.
-    assert set(TAB_MODULES) == set(TAB_ORDER) - {TAB_DETECTION, "Compare segments"}
+    # Compare segments, computed on demand from the peaks, shares their state;
+    # Group reads a group table, not the recording open.
+    assert set(TAB_MODULES) == set(TAB_ORDER) - {TAB_DETECTION, "Compare segments", "Group"}
     for modules in TAB_MODULES.values():
         assert set(modules) <= set(MODULES)
 

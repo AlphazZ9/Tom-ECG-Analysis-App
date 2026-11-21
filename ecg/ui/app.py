@@ -66,6 +66,7 @@ from ecg.ui.tab_time_course import TabTimeCourseMixin
 from ecg.ui.tab_events import TabEventsMixin
 from ecg.ui.tab_morphology import TabMorphologyMixin
 from ecg.ui.tab_report import TabReportMixin
+from ecg.ui.tab_group import TabGroupMixin
 from ecg.ui.tab_keys import TAB_ORDER
 from ecg.ui.tabbar import TabBar
 from ecg.ui.context_strip import ContextStripMixin
@@ -87,6 +88,7 @@ class ECGApp(
     TabHrvMixin,
     TabTimeCourseMixin,
     TabEventsMixin,
+    TabGroupMixin,
     TabMorphologyMixin,
     TabReportMixin,
     ContextStripMixin,
@@ -206,6 +208,7 @@ class ECGApp(
         self._build_tab_compare()
         self._build_tab_morphology()
         self._build_tab_arrhythmias()
+        self._build_tab_group()
         self._build_tab_report()
         self._bind_tab_state_hints()
 

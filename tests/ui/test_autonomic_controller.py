@@ -501,7 +501,7 @@ def test_stop_progress_survives_a_button_destroyed_by_a_rebuild():
     calls = []
     stub = SimpleNamespace(
         progress=SimpleNamespace(set=lambda v: calls.append(("set", v))),
-        _prog_row=SimpleNamespace(pack_forget=lambda: calls.append("forget")),
+        _prog_row=SimpleNamespace(place_forget=lambda: calls.append("forget")),
         lbl_progress=SimpleNamespace(configure=lambda **kw: calls.append(kw)),
         _async_start_time=1.0)
     for button in (_Gone(), _Raises()):

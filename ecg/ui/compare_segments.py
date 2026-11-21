@@ -413,6 +413,12 @@ class CompareSegmentsMixin:
         sig = self._compare_signature()
         if sig is not None and sig == self._compare_built_for:
             return
+        # Built already for no recording: opening the tab again must not
+        # destroy and rebuild it (a visible flash, and the group card's
+        # table read again each time).
+        if (sig is None and getattr(self, "_compare_built_empty", False)
+                and self._compare_built_for is None and holder.winfo_children()):
+            return
         # The rows typed for this recording survive a rebuild for its new
         # peaks (not the comparison: it rests on the old ones), unless a
         # session / UI rebuild left a setup to apply instead.
@@ -432,6 +438,7 @@ class CompareSegmentsMixin:
         for child in holder.winfo_children():
             child.destroy()
         self._compare_built_for = sig
+        self._compare_built_empty = sig is None
         if sig is None:
             ctk.CTkLabel(holder, text="Open a file and detect the peaks to compare segments "
                                       "(the group card below works without one).",
@@ -827,10 +834,13 @@ class CompareSegmentsMixin:
         lbl_status = ctk.CTkLabel(seg_card, text="", font=FONT_SMALL, text_color=MUTED,
                                   anchor="w", justify="left")
         lbl_status.pack(fill="x", pady=(SPACE_S, 0))
-        progress_bar = ctk.CTkProgressBar(ctrl, height=8, mode="indeterminate",
+        # A slot of fixed size always in the row: the bar shows and hides in
+        # it without moving the controls.
+        progress_slot = ctk.CTkFrame(ctrl, fg_color="transparent", width=200, height=8)
+        progress_slot.pack(side="right", padx=(SPACE_M, 0))
+        progress_slot.pack_propagate(False)
+        progress_bar = ctk.CTkProgressBar(progress_slot, height=8, mode="indeterminate",
                                           progress_color=TEAL)
-        progress_bar.pack(side="right", padx=(SPACE_M, 0))
-        progress_bar.pack_forget()
         run_btn = ctk.CTkButton(ctrl, text="▶  Compare", **button_style("primary"))
         run_btn.pack(side="left")
         # Length of the non-overlapping blocks each segment is summarised by
@@ -1230,7 +1240,7 @@ class CompareSegmentsMixin:
                                            for l, lo, hi in windows],
                                   "block_s": float(block_s)}
             run_btn.configure(state="disabled")
-            progress_bar.pack(side="right", padx=(SPACE_M, 0))
+            progress_bar.place(relx=0, rely=0, relwidth=1, relheight=1)
             progress_bar.start()
             lbl_status.configure(text="  Computing…", text_color=ORANGE)
             # HRV inputs read on the main thread: the user's RR bounds and
@@ -1260,7 +1270,7 @@ class CompareSegmentsMixin:
                 return
             _state["inflight"] = None
             run_btn.configure(state="normal")
-            progress_bar.stop(); progress_bar.pack_forget()
+            progress_bar.stop(); progress_bar.place_forget()
             lbl_status.configure(text=f"⚠  Comparison failed — {exc}", text_color=RED)
 
         def _on_done(segs: "list[dict]", windows: "list[tuple[str, float, float]]",
@@ -1269,7 +1279,7 @@ class CompareSegmentsMixin:
                 return
             _state["inflight"] = None
             run_btn.configure(state="normal")
-            progress_bar.stop(); progress_bar.pack_forget()
+            progress_bar.stop(); progress_bar.place_forget()
             # The reference as it is NOW (the selector stays usable while
             # the worker runs), kept when it still exists for these
             # segments; then the cheap block-mean comparison of each
@@ -1466,10 +1476,23 @@ class CompareSegmentsMixin:
                 confirmoverwrite=False, filetypes=[("Excel workbook", "*.xlsx"), ("All files", "*.*")])
             if not path:
                 return
+            add_all = getattr(self, "_add_open_recording_to_group_table", None)
+            extra = ""
             try:
-                n, replaced = append_group_row(path, group_row(
-                    res_.subject, res_.filepath, res_.segs, res_.metrics,
-                    template=res_.template, flags=res_.flags, sex=_sex()))
+                if callable(add_all) and getattr(getattr(self, "signal", None), "filepath", None):
+                    # The whole experiment's table (Group tab): the segments
+                    # with the whole recording, time course and events.
+                    n, replaced, what = add_all(path, comparison=res_)
+                    extra = f" — {what.split(': ', 1)[-1]}"
+                    reload_ = getattr(self, "_grouptab_reload", None)
+                    gts = getattr(self, "_grouptab_state", None) or {}
+                    if callable(reload_) and gts.get("path") and os.path.normcase(
+                            os.path.abspath(gts["path"])) == os.path.normcase(os.path.abspath(path)):
+                        reload_()
+                else:
+                    n, replaced = append_group_row(path, group_row(
+                        res_.subject, res_.filepath, res_.segs, res_.metrics,
+                        template=res_.template, flags=res_.flags, sex=_sex()))
             except Exception as exc:
                 messagebox.showerror("Group table", str(exc), parent=win)
                 return
@@ -1482,7 +1505,7 @@ class CompareSegmentsMixin:
                 j, k = res_.pairs[0]
                 gst["a"], gst["b"] = res_.tags[j], res_.tags[k]
             _done(f"{res_.subject or 'recording'} {'updated in' if replaced else 'added to'} "
-                  f"{os.path.basename(path)} ({n} recording{'s' if n != 1 else ''})")
+                  f"{os.path.basename(path)} ({n} recording{'s' if n != 1 else ''}){extra}")
 
         run_btn.configure(command=_run_compare)
         lbl_exp = ctk.CTkLabel(res, text="", font=FONT_SMALL, text_color=MUTED,
@@ -1498,7 +1521,9 @@ class CompareSegmentsMixin:
                  "reference; the pair tested is chosen in the Group card below (the "
                  "reference vs the first segment compared with it, until you change it). "
                  "Columns are named after the segment labels: use "
-                 "the same labels and windows for every animal. A recording already in it is replaced."),
+                 "the same labels and windows for every animal. A recording already in it is replaced. "
+                 "Its whole-recording metrics, time course, annotations and event-locked "
+                 "results go to the same table, for the Group tab."),
                 ("Figures…", _export_figures,
                  "The tachograms and the Poincaré plots, 300 dpi PNG or vector PDF / SVG"),
                 ("📋  Copy table", _copy_table,

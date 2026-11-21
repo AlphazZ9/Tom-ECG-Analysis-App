@@ -36,7 +36,7 @@ python ecg_app.py       # backward-compatible entry point
 ecg-analysis            # after `pip install -e .`
 ```
 
-The app has five analysis tabs and a report, organised by question:
+The app has six analysis tabs and a report, organised by question:
 
 | Tab | The question | Holds |
 |-----|--------------|-------|
@@ -46,6 +46,7 @@ The app has five analysis tabs and a report, organised by question:
 | **Compare segments** | Is window B different from window A? | Two windows: metric table, RR tachograms or Poincaré, export, group table |
 | **Morphology & Intervals** | What does a beat look like and how long are its intervals? | Steps: mean beat, landmarks, intervals |
 | **Events** | What happened that should not have? | Event ribbon, event list, ECG zoom |
+| **Group** | Do the animals of the experiment differ, by group or sex? | Group table, animals, figure, statistics, Prism |
 | **Report** | What goes out? | Provenance, module states, Include, exports |
 
 Above every tab, the **context strip** says what the numbers rest on (window,
@@ -518,6 +519,66 @@ analyses, layouts, your info sheets — is copied as it is: Prism redraws the
 graphs and recomputes the tests when it opens the file. The status line and
 the project notes (sheet *ECG Analysis export*) say what was filled, added or
 left alone.
+
+### Group tab: all the animals of an experiment
+
+The **Group** tab compares the animals of one experiment. It reads a **group
+table** (.xlsx), not the recording open, so it works with no recording loaded.
+
+**Filling the table.** Open each recording, run what you need, then click
+**➕ Add open recording…** (Group tab) or **➕ Add to group table…** (Compare
+segments). Both write the same table:
+
+| Sheet | What | Comes from |
+|-------|------|------------|
+| Animals | subject, sex, group, use, file | the Recording sheet (sex from the file name), the Group tab |
+| Group | the segments, one row per recording | Compare segments (the last comparison) |
+| Whole | every metric of the analysed window | Analyze |
+| TimeCourse | the valid RR summed in 5 s bins | Analyze |
+| Annotations | label and start of each annotation | the annotations (the stimulation) |
+| Events | pre / post / Δ of each event-locked metric | Time course › Autonomic › Event-locked, saved to the registry |
+
+Adding a recording again replaces its lines (its group and *use* are kept). A
+table made before (Group sheet only) still opens.
+
+**Animals.** One line per recording: tick *Use* to keep it, type or pick its
+**Group** (Control, CNO…), correct its **Sex**. Changes are saved in the
+table at once (close it in Excel first).
+
+**Compare.** *By*: **No groups** (all animals together), **Group**, or
+**Sex** (an animal without a group or sex is left out, with a note). The
+control group (Control, Vehicle, Saline, Sham, WT…) comes first.
+*Analysis*:
+
+- **Pre/Post segments**: two segments of the Group sheet. Within each group,
+  Post vs Pre (Wilcoxon signed-rank, paired t beside it, Holm over the metrics);
+  between groups, the change Post − Pre (Mann-Whitney for two groups,
+  Kruskal-Wallis for more); the mixed ANOVA group × segment.
+- **Time course**: each animal aligned on its own annotation (*Time 0*, the
+  first one with that label), cut in bins (default 60 s, from −10 to +30 min),
+  HR, RR, SDNN or RMSSD, as the change from the animal's own baseline (every
+  bin before 0) when *Δ from baseline* is ticked. The figure shows mean ± SEM per
+  group (*Each animal* adds a thin line per animal). Tests: the test window (0–5 min)
+  against the baseline within each group, its change between groups, and the
+  mixed ANOVA group × time with the Greenhouse-Geisser correction (on the
+  animals with every bin; the others are named). A bin where valid RR cover
+  less than half of it is empty for that animal. The table keeps 5 s sums, so
+  any bin size that is a multiple of 5 s is exact.
+- **Whole recording**: each metric compared between groups (one group:
+  descriptive only).
+- **Event-locked**: per animal, the mean of its events (all, or one label),
+  post vs pre within each group and the change between groups.
+
+The **Results** table gives mean ± SEM (n) per group, the p and the Holm p
+(green: below 0.05). With n ≤ 5 per group a Wilcoxon cannot go below
+2 / 2ⁿ (0.125 at n = 4), and a note says so. **Statistics… (Excel)** saves the
+results, every number behind them (means, SEM, n, Welch / one-way ANOVA
+beside the rank tests), the ANOVA, the per-animal values and the settings.
+**Figure…** saves the figure (300 dpi PNG, PDF or SVG). **Prism… (new file /
+template)** writes, per group, one table per metric (one row per animal, Pre and Post or
+baseline and window), the changes by group (one column per group), and the time
+course as XY tables (time in min, one column per animal); or pours them into
+your template (see above).
 
 ---
 

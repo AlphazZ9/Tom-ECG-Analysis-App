@@ -138,7 +138,11 @@ def test_square_poincare_panels_zoom_together_without_reshaping(root):
         _wheel(slot, x, y, 120)
         root.update()
         slot.canvas.draw()
-    assert [ax.get_window_extent().bounds for ax in (a, b)] == boxes
+    # Same boxes to the pixel (float noise of 1e-13 px aside, which depends
+    # on the matplotlib version): the defect was 370 x 370 -> 652 x 267 px.
+    after = [ax.get_window_extent().bounds for ax in (a, b)]
+    assert all(v == pytest.approx(w, abs=0.5) for bx, by in zip(after, boxes)
+               for v, w in zip(bx, by))
     assert a.get_xlim() == b.get_xlim() and a.get_ylim() == b.get_ylim()
     span_x, span_y = np.ptp(a.get_xlim()), np.ptp(a.get_ylim())
     assert span_x == pytest.approx(span_y) and span_x < 0.5 * np.ptp(home)

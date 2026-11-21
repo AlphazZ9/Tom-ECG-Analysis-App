@@ -64,7 +64,7 @@ Security > Open Anyway*. Step-by-step help:
   trainable ML detector), reviews artifacts and scores signal quality.
   [Details](docs/METHODS.md#signal--r-peak-detection)
 - **Tabs** — Signal & Detection, Rhythm & HRV, Time course, Compare segments, Morphology &
-  Intervals, Events and Report. [Details](docs/METHODS.md#tabs)
+  Intervals, Events, Group (all the animals of an experiment) and Report. [Details](docs/METHODS.md#tabs)
 - **HRV** — time domain, frequency (mouse VLF / LF / HF bands, powers in
   ms²), non-linear (Poincaré, DFA, entropy, multiscale entropy), epochs and
   sliding windows. [Details](docs/METHODS.md#hrv-analysis)

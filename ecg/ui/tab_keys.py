@@ -15,15 +15,18 @@ TAB_TIME_COURSE   = "Time course"
 TAB_COMPARE       = "Compare segments"
 TAB_MORPHOLOGY    = "Morphology & Intervals"
 TAB_EVENTS        = "Events"
+TAB_GROUP         = "Group"
 TAB_REPORT        = "Report"
 
 # Left-to-right order in the tab bar.
 TAB_ORDER = (TAB_DETECTION, TAB_HRV, TAB_TIME_COURSE, TAB_COMPARE, TAB_MORPHOLOGY,
-             TAB_EVENTS, TAB_REPORT)
+             TAB_EVENTS, TAB_GROUP, TAB_REPORT)
 
 # The modules (ecg.ui.freshness) behind each tab's state. Signal & Detection is
 # not listed: its state is that of the peaks (ecg.ui.context_strip.tab_states),
-# nor is Compare segments, computed on demand from the peaks (the same state).
+# nor is Compare segments, computed on demand from the peaks (the same state),
+# nor Group, which reads a group table, not the recording open (its state is
+# whether a table is open, set by ecg.ui.tab_group).
 # Morphology & Intervals is the state of its measure: Analyze gives the mean beat,
 # not the intervals, and its step chips say the state of each step.
 TAB_MODULES = {

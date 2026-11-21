@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from ecg.core.segment_plan import segment_quality, unique_tags
+from ecg.io.group_stats import subject_text
 from ecg.io.subject_name import normalise_sex
 
 # The columns every group table has (the key of a row: subject and file).
@@ -110,14 +111,24 @@ def append_group_row(path: str, row: dict) -> "tuple[int, bool]":
     exist), replacing the row of the same subject and file. Returns (rows in
     the table, whether a row was replaced). Columns new to the table are
     added; the order of the existing ones is kept."""
-    if os.path.exists(path):
-        df = pd.read_excel(path, sheet_name="Group")
+    every = pd.read_excel(path, sheet_name=None) if os.path.exists(path) else {}
+    # The other sheets of the table (ecg.io.group_data: Animals, Whole,
+    # TimeCourse...) are written back as they were.
+    others = {k: v for k, v in every.items() if k != "Group"}
+    if every and "Group" not in every and not set(every) & {
+            "Animals", "Whole", "TimeCourse", "Annotations", "Events"}:
+        raise ValueError(f"{os.path.basename(path)} is not a group table (no 'Group' sheet)")
+    if "Group" in every:
+        df = every["Group"]
         for c in ID_COLUMNS:
             if c not in df.columns:
                 raise ValueError(f"{os.path.basename(path)} is not a group table "
                                  f"(no '{c}' column)")
-        same = ((df["subject"].astype(str) == str(row["subject"]))
-                & (df["file"].astype(str) == str(row["file"])))
+        # As text the way the table shows it: a subject read back as 243.0
+        # (a column with an empty cell is float) is "243", not "243.0", else
+        # the recording would come in a second time instead of replacing.
+        same = ((df["subject"].map(subject_text) == subject_text(row["subject"]))
+                & (df["file"].map(subject_text) == subject_text(row["file"])))
         replaced = bool(same.any())
         row = match_existing_tags(row, list(df.columns))
         df = df.loc[~same]
@@ -131,5 +142,11 @@ def append_group_row(path: str, row: dict) -> "tuple[int, bool]":
         df = df[cols]
     df = df.sort_values(["subject", "file"], kind="stable").reset_index(drop=True)
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
+        for name, other in others.items():
+            if name == "Animals":
+                other.to_excel(xw, sheet_name=name, index=False)
         df.to_excel(xw, sheet_name="Group", index=False)
+        for name, other in others.items():
+            if name != "Animals":
+                other.to_excel(xw, sheet_name=name, index=False)
     return len(df), replaced

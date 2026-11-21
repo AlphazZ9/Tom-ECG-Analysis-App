@@ -23,12 +23,43 @@ from ecg.ui.theme import (
 
 log = logging.getLogger("ecg")
 
+# Width of the header's progress slot (px): the bar and its stage label.
+PROGRESS_SLOT_W = 300
+
 # Mixin of ECGApp: `self: ECGApp` shows pyright the whole app surface, so a
 # typo in self.xxx is reported. It is deliberately not a supertype of this
 # class, which is the one check switched off here.
 # pyright: reportGeneralTypeIssues=false
 if TYPE_CHECKING:
     from ecg.ui.app import ECGApp
+
+
+def _fit_labels(button, labels) -> None:
+    """Once *button* is shown, widen it (if need be) so the longest of
+    *labels* (its busy labels) fits as its own label does: the ratio of the
+    measured text widths, applied to the width it takes, so the font
+    scaling of the screen cancels out."""
+    def _fit(_e=None) -> None:
+        try:
+            button.unbind("<Map>", bind_id)
+            font = button.cget("font")
+            f = font if isinstance(font, tkfont.Font) else tkfont.Font(font=font)
+            own = f.measure(str(button.cget("text")))
+            widest = max(f.measure(t) for t in labels)
+            scale = float(button._get_widget_scaling())
+            px = button.winfo_width() / scale
+            # Screen pixels per measured unit, from the label as drawn.
+            drawn = button._text_label.winfo_reqwidth() if button._text_label else 0
+            k = drawn / own if own > 0 and drawn > 0 else 1.0
+            if drawn > 0:
+                # What CTk adds around the text: a longer label fits in the
+                # widened button up to that padding (freeze_button_width).
+                button._natural_pad = button.winfo_width() - drawn
+            if own > 0 and widest > own and px > 1:
+                button.configure(width=int(round(px + (widest - own) * k / scale + 2)))
+        except Exception as exc:        # a font Tk cannot measure: as it was
+            log.debug("busy label width: %s", exc)
+    bind_id = button.bind("<Map>", _fit, add="+")
 
 
 class ToolbarMixin:
@@ -78,23 +109,6 @@ class ToolbarMixin:
         bar.pack(side="top", fill="x")
         ctk.CTkFrame(bar, height=1, fg_color=BORDER).pack(side="bottom", fill="x")
 
-        # Progress row -- child of `bar` itself (not the inline row below) so
-        # that _start_async's existing self._prog_row.pack(side="bottom",
-        # fill="x", ...) call spans the full toolbar width, unchanged. Not
-        # packed here -- _start_async/_stop_progress show/hide it dynamically.
-        self._prog_row = ctk.CTkFrame(bar, fg_color="transparent", height=20)
-        self.progress = ctk.CTkProgressBar(
-            self._prog_row, height=4, mode="determinate",
-            progress_color=COLOR_PRIMARY, fg_color=BORDER, corner_radius=2,
-        )
-        self.progress.set(0)
-        self.progress.pack(side="left", fill="x", expand=True, padx=(SPACE_M, SPACE_S))
-        self.lbl_progress = ctk.CTkLabel(
-            self._prog_row, text="", font=FONT_HINT,
-            text_color=MUTED, width=260, anchor="w",
-        )
-        self.lbl_progress.pack(side="left", padx=(0, SPACE_M))
-
         # The mockup's header: 10 px above and below 40 px commands, 24 px
         # side margins, controls 8 px apart, one blue primary (Analyze all).
         h_lg = int(round(BTN_H_LG * THEME.font_scale))
@@ -107,6 +121,26 @@ class ToolbarMixin:
         # the room from the file chip (packed last), never from a command.
         right = ctk.CTkFrame(row, fg_color="transparent")
         right.pack(side="right")
+
+        # Progress: a slot of fixed size between the file chip and the
+        # commands, always in the layout. _start_async places its content and
+        # _stop_progress removes it (place / place_forget inside a frame that
+        # does not propagate): nothing else in the window moves, where a row
+        # packed and unpacked under the header shifted every tab each time.
+        self._prog_slot = ctk.CTkFrame(row, fg_color="transparent", width=PROGRESS_SLOT_W,
+                                       height=h_lg)
+        self._prog_slot.pack(side="right", padx=(SPACE_M, SPACE_L))
+        self._prog_slot.pack_propagate(False)
+        self._prog_row = ctk.CTkFrame(self._prog_slot, fg_color="transparent")
+        self.progress = ctk.CTkProgressBar(
+            self._prog_row, height=4, mode="determinate",
+            progress_color=COLOR_PRIMARY, fg_color=BORDER, corner_radius=2,
+        )
+        self.progress.set(0)
+        self.progress.pack(side="top", fill="x", pady=(SPACE_S, SPACE_XS))
+        self.lbl_progress = ctk.CTkLabel(
+            self._prog_row, text="", font=FONT_HINT, text_color=MUTED, anchor="w", height=16)
+        self.lbl_progress.pack(side="top", fill="x")
 
         def cmd(parent, text, command, kind="secondary", width=0, **kw):
             b = ctk.CTkButton(parent, text=text, command=command, width=width,
@@ -145,6 +179,14 @@ class ToolbarMixin:
         self.btn_save_session = cmd(right, "Save Session", self._save_session,
                                     state="disabled")
         self.btn_save_session.configure(**disabled_style())
+
+        # Wide enough for their busy labels: the label swap while a job
+        # runs then moves nothing (app_async.freeze_button_width keeps the
+        # width; a longer label is cut to it).
+        for btn, labels in ((self.btn_preview, ("Loading…", "Restoring…")),
+                            (self.btn_run, ("Analysing…",)),
+                            (self.btn_save_session, ("Saving…",))):
+            _fit_labels(btn, labels)
 
         self.btn_toolbar_export = cmd(right, "Export…", self._show_export)
         self._bind_hover_tip(self.btn_toolbar_export,
