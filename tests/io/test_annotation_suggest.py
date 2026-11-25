@@ -125,3 +125,33 @@ def test_the_dialog_adds_the_ticked_suggestions(monkeypatch, tmp_path):
         assert added[0]["color"]
     finally:
         root.destroy()
+
+
+def test_keyboard_0_is_left_out_of_suggestions_and_markers(monkeypatch, tmp_path):
+    from ecg.io import loaders
+    from tests.io.test_spike2_loader import _FakeEventReader, _ecg
+    # MATLAB export: a '0' key among others.
+    p = tmp_path / "rec.mat"
+    codes = np.zeros((3, 4), dtype=np.uint8)
+    codes[:, 0] = [ord("0"), ord("1"), ord("0")]
+    scipy.io.savemat(str(p), {"Keyboard": {"title": "Keyboard", "times": np.array([5.0, 9.0, 20.0]),
+                                           "codes": codes}})
+    assert evc.read_event_channels(str(p)) == {"Keyboard": [(9.0, "1")]}
+    # Spike2 .smr: the markers (Compare segments' stim markers) and the suggestions.
+
+    class _Keys(_FakeEventReader):
+        def get_event_timestamps(self, _b, _s, i):
+            ts, _d, _l = super().get_event_timestamps(_b, _s, i)
+            labs = {"Keyboard": ["0", "a", "0"], "STIM": ["0", "0", "0"]}
+            return ts, None, np.array(labs[list(self.events)[i]][:len(ts)])
+    reader = _Keys([("Recording", 1000.0, _ecg(1000.0, 30))],
+                   {"Keyboard": [1_000_000, 2_000_000, 3_000_000],
+                    "STIM": [4_000_000, 5_000_000, 6_000_000]})
+    monkeypatch.setattr(loaders, "_spike2_reader", lambda _p: reader)
+    smr = tmp_path / "rec.smr"
+    smr.write_bytes(b"\x05\x00(C) CED 87")
+    loaders._MARKER_CACHE.clear()
+    m = loaders.read_spike2_markers(str(smr))
+    assert m["Keyboard"] == [2.0] and m["STIM"] == [4.0, 5.0, 6.0]   # only the keyboard
+    ev = evc.read_event_channels(str(smr))
+    assert ev["Keyboard"] == [(2.0, "a")] and len(ev["STIM"]) == 3

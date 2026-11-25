@@ -733,7 +733,8 @@ Choose **Event-locked** in the selector of Time course.
    stimulus…) with the **Annotations** chip of the Signal & Detection bar;
    its **start** time is the event onset. **✨ Suggest from channels…** (in the
    Annotations dialog) lists the events of the file's other channels — the
-   keyboard / marker channels (one per key or code) and the trains of
+   keyboard / marker channels (one per key or code; the key **0** is left out,
+   here and in the stimulation markers of Compare segments) and the trains of
    stimulus pulses of a TTL channel — for you to tick, rename and add
    (Spike2 .smr or its MATLAB export). A pacing / stimulation period is an
    annotation too (sessions saved with the former *Pacing* chip open with
