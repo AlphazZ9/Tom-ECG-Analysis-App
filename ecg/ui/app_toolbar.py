@@ -212,7 +212,12 @@ class ToolbarMixin:
         mark = self._app_mark(left)
         mark.pack(side="left", padx=(0, 10))
         ctk.CTkLabel(left, text="ECG Analysis", font=FONT_TITLE, text_color=TEXT,
-                     anchor="w").pack(side="left", padx=(0, 10))
+                     anchor="w").pack(side="left", padx=(0, 4))
+        # The version, so which build is running is never in doubt.
+        from ecg import __version__
+        self.lbl_app_version = ctk.CTkLabel(left, text=f"v{__version__}", font=FONT_SMALL,
+                                            text_color=MUTED, anchor="w")
+        self.lbl_app_version.pack(side="left", padx=(0, 10))
         self.lbl_topbar_project = ctk.CTkLabel(
             left, text="", width=0, font=FONT_SIDEBAR_HDR, text_color=MUTED, anchor="w")
         self.lbl_topbar_project.pack(side="left", padx=(0, SPACE_M))

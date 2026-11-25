@@ -98,7 +98,8 @@ class ECGApp(
 
     def __init__(self) -> None:
         super().__init__()
-        self.title("ECG Analysis")
+        from ecg import __version__
+        self.title(f"ECG Analysis {__version__}")
         self.geometry("1920x1080")
         # Width floor: the header's commands (packed first, see
         # _build_toolbar) need ~1100 px and the Signal & Detection bar about
