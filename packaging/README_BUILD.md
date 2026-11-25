@@ -21,18 +21,18 @@ Sur Mac : menu Pomme > « À propos de ce Mac ». « Puce Apple M... » = arm64,
 Depuis le dossier du projet, une fois le travail committé et poussé :
 
 ```bash
-git tag v6.2.0          # numéro de version au format vX.Y.Z
-git push origin v6.2.0
+git tag v6.2.1          # numéro de version au format vX.Y.Z
+git push origin v6.2.1
 ```
 
 Le workflow « Build apps » démarre tout seul (onglet **Actions** du dépôt
-GitHub). Comptez 10 à 20 minutes. À la fin, une **Release** `v6.2.0` est
+GitHub). Comptez 10 à 20 minutes. À la fin, une **Release** `v6.2.1` est
 créée dans l'onglet **Releases**, avec les trois zips attachés et des notes
 de version générées automatiquement (modifiables ensuite sur GitHub).
 
 Si une des trois plateformes échoue, la Release n'est pas créée : corriger,
-puis supprimer et recréer le tag (`git tag -d v6.2.0`,
-`git push origin :refs/tags/v6.2.0`, puis recommencer), ou choisir un
+puis supprimer et recréer le tag (`git tag -d v6.2.1`,
+`git push origin :refs/tags/v6.2.1`, puis recommencer), ou choisir un
 nouveau numéro.
 
 ### Méthode 2 : à la main (sans Release, pour tester)
