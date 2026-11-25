@@ -57,8 +57,8 @@ def _bounds(t_start: float, t_end: float) -> "tuple[float, Optional[float]]":
     return t0, t1
 
 
-def _events(times: Any, codes: Any, t0: float, t1: Optional[float]
-            ) -> "list[tuple[float, str]]":
+def _events(times: Any, codes: Any, t0: float, t1: Optional[float],
+            channel: str = "") -> "list[tuple[float, str]]":
     t = np.asarray(times, dtype=np.float64).flatten()
     n = len(t)
     labels = [""] * n
@@ -73,7 +73,8 @@ def _events(times: Any, codes: Any, t0: float, t1: Optional[float]
         elif n == 1:
             labels = [code_text(c.flatten()[0] if c.dtype.kind in "OUS" and c.size else c)]
     ok = np.isfinite(t) & _crop(np.nan_to_num(t, nan=-1.0), t0, t1)
-    out = [(round(float(x) - t0, 6), lab) for x, lab, k in zip(t, labels, ok) if k]
+    out = [(round(float(x) - t0, 6), lab) for x, lab, k in zip(t, labels, ok)
+           if k and not loaders.ignored_marker(channel, lab)]
     return sorted(out)[:MAX_EVENTS]
 
 
@@ -94,7 +95,8 @@ def _smr_events(filepath: str, t0: float, t1: Optional[float]) -> "dict[str, lis
         while key in out:
             key, k = f"{name} ({k})", k + 1
         out[key] = _events(t, None if lab is None else
-                           np.asarray([code_text(x) for x in lab], dtype=object), t0, t1)
+                           np.asarray([code_text(x) for x in lab], dtype=object), t0, t1,
+                           channel=name)
     return out
 
 
@@ -110,7 +112,8 @@ def _mat_struct_events(raw: "dict[str, Any]", t0: float, t1: Optional[float]
             name = str(getattr(v, "title", "") or key).strip() or key
             if name in out:
                 name = key
-            out[name] = _events(getattr(v, "times"), getattr(v, "codes", None), t0, t1)
+            out[name] = _events(getattr(v, "times"), getattr(v, "codes", None), t0, t1,
+                                channel=name)
         except Exception as exc:
             log.debug("mat marker channel %r not read: %s", key, exc)
     return out
@@ -137,7 +140,7 @@ def _h5_events(filepath: str, t0: float, t1: Optional[float]) -> "dict[str, list
             try:
                 name = (_h5_text(g["title"]) if "title" in g else "") or key
                 codes = np.asarray(g["codes"][()]) if "codes" in g else None
-                out[name] = _events(np.asarray(g["times"][()]), codes, t0, t1)
+                out[name] = _events(np.asarray(g["times"][()]), codes, t0, t1, channel=name)
             except Exception as exc:
                 log.debug("mat v7.3 marker channel %r not read: %s", key, exc)
     return out

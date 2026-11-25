@@ -495,6 +495,27 @@ _MARKER_CACHE: "dict[tuple, dict[str, list[float]]]" = {}
 MAX_MARKERS_PER_CHANNEL = 20000
 
 
+# Keyboard keys left out of the markers, the suggested annotations and the
+# stimulation events: '0' marks nothing in these recordings.
+IGNORED_KEYS = frozenset({"0"})
+
+
+def is_keyboard_channel(name: str) -> bool:
+    return "keyboard" in str(name).lower()
+
+
+def ignored_marker(channel: str, code: str) -> bool:
+    """Whether the marker *code* of *channel* is left out (a keyboard key
+    of IGNORED_KEYS)."""
+    return is_keyboard_channel(channel) and str(code).strip() in IGNORED_KEYS
+
+
+def _label_text(lab: Any) -> str:
+    if isinstance(lab, (bytes, bytearray)):
+        lab = lab.decode("latin-1", "replace")
+    return str(lab).strip("\x00 ").strip()
+
+
 def _spike2_markers_raw(reader) -> "dict[str, list[float]]":
     """{channel name: [times, s from the start of the file]} of every
     event / marker channel of a parsed Spike2RawIO (channels with no event
@@ -503,9 +524,13 @@ def _spike2_markers_raw(reader) -> "dict[str, list[float]]":
     for i, ev in enumerate(reader.header["event_channels"]):
         name = str(ev["name"])
         try:
-            ts, _dur, _lab = reader.get_event_timestamps(0, 0, i)
+            ts, _dur, lab = reader.get_event_timestamps(0, 0, i)
             t = reader.rescale_event_timestamp(ts, dtype="float64", event_channel_index=i)
             t = np.asarray(t, dtype=np.float64)
+            if lab is not None and len(lab) == len(t) and is_keyboard_channel(name):
+                keep = np.array([not ignored_marker(name, _label_text(x)) for x in lab],
+                                dtype=bool)
+                t = t[keep]
             t = np.sort(t[np.isfinite(t)])[:MAX_MARKERS_PER_CHANNEL]
         except Exception as exc:
             log.debug("Spike2 marker channel %r not read: %s", name, exc)
