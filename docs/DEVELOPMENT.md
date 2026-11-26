@@ -64,10 +64,15 @@ ecg-analysis            # after `pip install -e .`
 │   │   ├── event_locked.py   # pre / post window means, Wilcoxon, ks / kp
 │   │   │                     # calibration, per-subject aggregation
 │   │   ├── wave_template.py  # beat-template calibration & delineation
+│   │   ├── annotation_suggest.py # annotations suggested from marker /
+│   │   │                     # keyboard channels and stimulus pulses
 │   │   └── ml_detector.py    # classical-ML R-peak detector, trainable from
 │   │                         # reviewed recordings, hold-out confusion matrix
 │   ├── io/                # file formats and persistence
-│   │   ├── loaders.py        # .mat / HDF5 signal loading
+│   │   ├── loaders.py        # Spike2 .smr, .mat / HDF5 signal and marker loading
+│   │   ├── event_channels.py # marker, keyboard and stimulus channels of a file
+│   │   ├── group_data.py     # the group table (one animal per recording)
+│   │   ├── group_compare.py  # Group tab analyses and statistics
 │   │   ├── session.py        # session save/load (JSON)
 │   │   ├── export.py         # Excel and GraphPad Prism exporters
 │   │   └── db.py             # SQLite recording registry + event-locked
@@ -95,7 +100,12 @@ ecg-analysis            # after `pip install -e .`
 ├── setup.py               # `pip install -e .` packaging
 ├── requirements.txt
 ├── docs/                # User Guide, Methods, Glossary, this file
+│   └── archive/          # dated working notes (audits, hand-over), for the record
 ├── packaging/           # PyInstaller spec, constraints.txt, README_BUILD.md
+├── prototypes/qt_view/  # PySide6 + pyqtgraph prototype of the detection view
+│                        # and its benchmark (not part of the app)
+├── tests/               # pytest suite (core, io, ui), run by .github/workflows/tests.yml
+├── tools/               # build_icons.py (app icons from packaging/icon/)
 ├── Lancer ECG.bat / Lancer ECG.command  # one-click launchers
 └── README.md / README.fr.md
 ```

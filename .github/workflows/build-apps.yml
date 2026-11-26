@@ -1,7 +1,9 @@
 # Builds the standalone "Tom ECG Analysis" apps with PyInstaller
 # (packaging/ecg.spec) for Windows and macOS (Apple Silicon + Intel).
 #
-#   - push a tag vX.Y.Z  -> build + GitHub Release with the three zips
+#   - push a tag vX.Y.Z (or publish a Release on GitHub with a new tag)
+#     -> build + the three zips attached to that Release; the tag must match
+#     the version in ecg/__init__.py and setup.py (job "version")
 #   - Actions tab > "Build apps" > Run workflow -> build only (zips under
 #     the run's "Artifacts")
 #
@@ -21,8 +23,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # A tag must name the version written in the code: a tag put on the wrong
+  # commit (an older merge) stops here in seconds instead of building and
+  # publishing old software under the new number.
+  version:
+    name: Check the version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tag matches ecg/__init__.py and setup.py
+        if: github.ref_type == 'tag'
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          code=$(sed -nE 's/^__version__ = "([^"]+)"/\1/p' ecg/__init__.py)
+          setup=$(sed -nE 's/^ *version="([^"]+)",/\1/p' setup.py)
+          echo "tag ${tag} · ecg/__init__.py ${code} · setup.py ${setup}"
+          if [ "$tag" != "$code" ] || [ "$tag" != "$setup" ]; then
+            echo "::error::The tag ${GITHUB_REF_NAME} is on a commit whose version is ${code} (setup.py ${setup})." \
+                 "Merge the version change first, then tag the newest commit of the default branch."
+            exit 1
+          fi
+
   build:
     name: Build ${{ matrix.label }}
+    needs: version
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:

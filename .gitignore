@@ -7,3 +7,21 @@ __pycache__/
 build/
 dist/
 .scratch/
+.pytest_cache/
+.mypy_cache/
+.idea/
+*.log
+
+# System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Recordings and results stay out of the repository (patient-like data, size)
+*.mat
+*.smr
+*.smrx
+*.xlsx
+*.pzfx
+*.npz
+!tests/**/*.npz
