@@ -1745,9 +1745,8 @@ def detect_peaks_wavelet(
 
     log.info(
         "detect_peaks_wavelet: %d peaks  fs=%.0f  qrs_width=%.1fms  "
-        "scale_center=%.2f  n_trusted_template=%d  score_floor=%.2f",
-        len(peaks_out), fs, qrs_width_ms, scale_center,
-        details.get("n_trusted", 0), score_floor,
+        "scale_center=%.2f  score_floor=%.2f",
+        len(peaks_out), fs, qrs_width_ms, scale_center, score_floor,
     )
     return peaks_out, prominences, thresh_amp
 
