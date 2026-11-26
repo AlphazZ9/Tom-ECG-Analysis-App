@@ -1,5 +1,8 @@
 # ECG Analysis — Mouse Cardiac Electrophysiology Toolkit
 
+[![Tests](https://github.com/AlphazZ9/Tom-ECG-Analysis-App/actions/workflows/tests.yml/badge.svg?branch=sync-local-work)](https://github.com/AlphazZ9/Tom-ECG-Analysis-App/actions/workflows/tests.yml)
+[![Latest release](https://img.shields.io/github/v/release/AlphazZ9/Tom-ECG-Analysis-App)](https://github.com/AlphazZ9/Tom-ECG-Analysis-App/releases/latest)
+
 *[Version française](README.fr.md)*
 
 A desktop application for analysing **mouse** ECG recordings: it finds the
@@ -27,6 +30,13 @@ strain and experimental conditions.
    or `Lancer ECG.command` (macOS) — details [below](#one-click-launcher).
 3. **Or, for developers:** `pip install -r requirements.txt`, then
    `python ecg_app.py` (details in [Development](docs/DEVELOPMENT.md)).
+
+**Updating.** The version shows next to the app name in the header (e.g.
+*ECG Analysis v6.2.1*). For the downloaded app, take the zip of the
+[latest release](https://github.com/AlphazZ9/Tom-ECG-Analysis-App/releases/latest)
+and replace the old copy (your sessions and settings are kept: they are not
+inside the app). From the code (VS Code, launcher): `git checkout
+sync-local-work`, then `git pull`.
 
 **First launch warnings.** The apps are not signed, so the system warns once.
 Windows (SmartScreen): *More info > Run anyway*. macOS: right-click (or
@@ -59,8 +69,8 @@ Security > Open Anyway*. Step-by-step help:
 
 ## What it does
 
-- **Signal & R-peak detection** — loads MATLAB `.mat` files (v5/v6 and
-  v7.3 / Spike2), filters, detects R peaks with five methods (including a
+- **Signal & R-peak detection** — loads Spike2 `.smr` files and MATLAB `.mat`
+  files (v5/v6 and v7.3, Spike2 exports), filters, detects R peaks with five methods (including a
   trainable ML detector), reviews artifacts and scores signal quality.
   [Details](docs/METHODS.md#signal--r-peak-detection)
 - **Tabs** — Signal & Detection, Rhythm & HRV, Time course, Compare segments, Morphology &
@@ -88,11 +98,12 @@ Security > Open Anyway*. Step-by-step help:
 ## Typical workflow
 
 1. [Launch the app](docs/USER_GUIDE.md#launching-the-app) and
-   [load a recording](docs/USER_GUIDE.md#loading-a-recording) (`.mat` file,
-   choose the ECG channel).
+   [load a recording](docs/USER_GUIDE.md#loading-a-recording) (`.smr` or `.mat`
+   file, choose the ECG channel).
 2. [Detect the R peaks](docs/USER_GUIDE.md#r-peak-detection) and
    [check the detection](docs/USER_GUIDE.md#reading-the-detection-view):
-   correct missed or extra beats, review artifacts.
+   correct missed or extra beats, review artifacts, mark the stretches too
+   noisy to trust (left out of HR and HRV).
 3. Click **Analyze** and read the [HRV results](docs/USER_GUIDE.md#hrv-analysis).
 4. If needed, compute the
    [autonomic indices](docs/USER_GUIDE.md#autonomic-indices-csi--cpi--candia-rivera-et-al-2025)

@@ -1,5 +1,8 @@
 # ECG Analysis — Outil d'électrophysiologie cardiaque murine
 
+[![Tests](https://github.com/AlphazZ9/Tom-ECG-Analysis-App/actions/workflows/tests.yml/badge.svg?branch=sync-local-work)](https://github.com/AlphazZ9/Tom-ECG-Analysis-App/actions/workflows/tests.yml)
+[![Latest release](https://img.shields.io/github/v/release/AlphazZ9/Tom-ECG-Analysis-App)](https://github.com/AlphazZ9/Tom-ECG-Analysis-App/releases/latest)
+
 *[English version](README.md)*
 
 Application de bureau pour analyser des enregistrements ECG de **souris** :
@@ -27,6 +30,14 @@ les mesures selon la souche et les conditions de votre étude.
 3. **Ou, pour les développeurs :** `pip install -r requirements.txt` puis
    `python ecg_app.py` — voir [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
    (en anglais).
+
+**Mettre à jour.** La version s'affiche à côté du nom de l'application,
+dans l'en-tête (par ex. *ECG Analysis v6.2.1*). Pour l'application
+téléchargée, prenez le zip de la
+[dernière version](https://github.com/AlphazZ9/Tom-ECG-Analysis-App/releases/latest)
+et remplacez l'ancienne copie (sessions et réglages sont conservés : ils ne
+sont pas dans l'application). Depuis le code (VS Code, lanceur) :
+`git checkout sync-local-work`, puis `git pull`.
 
 **Premier lancement :** les applications ne sont pas signées, le système
 avertit une fois. Windows (SmartScreen) : *Informations complémentaires >
@@ -66,8 +77,8 @@ sécurité > Ouvrir quand même*. Pas à pas complet :
 
 ## Ce que fait l'application
 
-- **Signal et pics R** — fichiers MATLAB `.mat` (v5/v6 et v7.3/HDF5, exports Spike2), filtrage, cinq détecteurs dont un ML entraînable, correction des artefacts RR, score de qualité → [détails](docs/METHODES.md#signal--détection-des-pics-r)
-- **Onglets** — Signal & Detection, Rhythm & HRV, Time course, Compare segments, Morphology & Intervals, Events, Report → [détails](docs/METHODES.md#onglets)
+- **Signal et pics R** — fichiers Spike2 `.smr` et MATLAB `.mat` (v5/v6 et v7.3/HDF5, exports Spike2), filtrage, cinq détecteurs dont un ML entraînable, correction des artefacts RR, score de qualité → [détails](docs/METHODES.md#signal--détection-des-pics-r)
+- **Onglets** — Signal & Detection, Rhythm & HRV, Time course, Compare segments, Morphology & Intervals, Events, Group (tous les animaux d'une expérience), Report → [détails](docs/METHODES.md#onglets)
 - **VRC** — domaines temporel, fréquentiel (bandes souris, ms²) et non linéaire (Poincaré, DFA, entropie multi-échelle), époques et fenêtre glissante → [détails](docs/METHODES.md#analyse-vrc)
 - **Indices autonomiques CSI / CPI** (Candia-Rivera et al. 2025), LF / HF par SPWVD, statistiques avant / après un événement, calibration ks / kp ; les gains de l'article sont des valeurs rat, non validées chez la souris → [détails](docs/METHODES.md#indices-autonomiques-csi--cpi--candia-rivera-et-al-2025)
 - **Intervalles** — repères P/Q/R/S/J/T, PR, QRS, QT, QTc (Mitchell par défaut), médiane glissante de battements → [détails](docs/METHODES.md#délinéation-des-intervalles)
@@ -77,8 +88,8 @@ sécurité > Ouvrir quand même*. Pas à pas complet :
 
 ## Déroulement type
 
-1. [Ouvrir l'application](docs/USER_GUIDE.md#launching-the-app) et [charger un enregistrement](docs/USER_GUIDE.md#loading-a-recording) `.mat`.
-2. [Détecter les pics R](docs/USER_GUIDE.md#r-peak-detection) et [vérifier la détection](docs/USER_GUIDE.md#reading-the-detection-view) : corriger à la main si besoin et valider les artefacts.
+1. [Ouvrir l'application](docs/USER_GUIDE.md#launching-the-app) et [charger un enregistrement](docs/USER_GUIDE.md#loading-a-recording) `.smr` ou `.mat`.
+2. [Détecter les pics R](docs/USER_GUIDE.md#r-peak-detection) et [vérifier la détection](docs/USER_GUIDE.md#reading-the-detection-view) : corriger à la main si besoin, valider les artefacts et marquer les passages trop bruités (exclus de la FC et de la VRC).
 3. Cliquer sur **Analyze** et lire la [VRC](docs/USER_GUIDE.md#hrv-analysis).
 4. Si besoin, calculer les [indices autonomiques](docs/USER_GUIDE.md#autonomic-indices-csi--cpi--candia-rivera-et-al-2025) autour de vos annotations et mesurer les [intervalles](docs/USER_GUIDE.md#interval-delineation) PR / QRS / QT / QTc (vérifier les repères sur le battement moyen).
 5. Passer en revue les [événements anormaux](docs/USER_GUIDE.md#abnormal-events).

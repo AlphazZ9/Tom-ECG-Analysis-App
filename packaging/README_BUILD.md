@@ -16,7 +16,30 @@ Sur Mac : menu Pomme > « À propos de ce Mac ». « Puce Apple M... » = arm64,
 
 ## Publier une nouvelle version
 
-### Méthode 1 : tag (crée une Release avec les 3 zips)
+### Avant de publier
+
+1. Le numéro de version est changé dans `ecg/__init__.py`, `setup.py`,
+   `packaging/ecg.spec` (et ce fichier), et cette PR est **fusionnée**.
+2. Sur <https://github.com/AlphazZ9/Tom-ECG-Analysis-App/commits/sync-local-work>,
+   le commit le plus récent est bien cette fusion.
+
+Le build vérifie de lui-même que le tag (`v6.2.1`) correspond à la version
+écrite dans le code (tâche « Check the version ») : un tag posé sur un ancien
+commit échoue en quelques secondes, sans rien publier. Il suffit alors de
+supprimer la Release et le tag (voir plus bas), puis de recommencer.
+
+### Méthode 1 : depuis le site GitHub (le plus simple)
+
+1. Onglet **Releases** > **Draft a new release**.
+2. **Choose a tag** : taper `v6.2.1`, puis **Create new tag: v6.2.1 on
+   publish**.
+3. **Target** : `sync-local-work`.
+4. **Generate release notes**, puis **Publish release**.
+
+Le workflow « Build apps » démarre (onglet **Actions**) et, environ
+10 minutes plus tard, attache les trois zips à la Release.
+
+### Méthode 1 bis : tag en ligne de commande
 
 Depuis le dossier du projet, une fois le travail committé et poussé :
 
@@ -30,8 +53,9 @@ GitHub). Comptez 10 à 20 minutes. À la fin, une **Release** `v6.2.1` est
 créée dans l'onglet **Releases**, avec les trois zips attachés et des notes
 de version générées automatiquement (modifiables ensuite sur GitHub).
 
-Si une des trois plateformes échoue, la Release n'est pas créée : corriger,
-puis supprimer et recréer le tag (`git tag -d v6.2.1`,
+Si une des trois plateformes échoue, les zips ne sont pas attachés : corriger,
+puis supprimer la Release et le tag (sur GitHub : la Release > **Delete**,
+puis onglet **Tags** > le tag > **Delete**), ou en ligne de commande supprimer et recréer le tag (`git tag -d v6.2.1`,
 `git push origin :refs/tags/v6.2.1`, puis recommencer), ou choisir un
 nouveau numéro.
 
