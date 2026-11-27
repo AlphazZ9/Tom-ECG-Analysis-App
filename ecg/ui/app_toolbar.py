@@ -315,6 +315,7 @@ class ToolbarMixin:
     _RESULT_BTN_KINDS: "dict[str, str]" = {
         "btn_run_freq":       "primary",
         "btn_run_nonlin":     "primary",
+        "btn_run_dfa":        "secondary",
         "btn_run_ivl":        "primary",
         "btn_run_arrhythmia": "primary",
         "btn_save_session":   "secondary",

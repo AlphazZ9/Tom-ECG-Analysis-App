@@ -626,7 +626,13 @@ class CompareSegmentsMixin:
         ent_stim = ctk.CTkEntry(cfg_bar, width=80, placeholder_text="e.g. 1803",
                                 **input_style())
         ent_stim.pack(side="left", padx=(4, SPACE_S))
-        _markers = getattr(getattr(self, "signal", None), "markers", None) or {}
+        # The keys chosen to be ignored (Annotations > Suggest from
+        # channels…) are left out of the list; nothing is, by default.
+        from ecg.io import marker_prefs
+        _sig = getattr(self, "signal", None)
+        _markers = marker_prefs.keep_markers(
+            getattr(_sig, "markers", None) or {}, getattr(_sig, "marker_codes", None) or {},
+            marker_prefs.load_ignored_keys())
         _marker_opts: "dict[str, float]" = dict(marker_choices(_markers))
         cb_marker = None
         if _marker_opts:

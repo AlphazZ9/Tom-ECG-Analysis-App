@@ -149,9 +149,11 @@ Edit mode on) and drag over the stretch: it is shaded grey and hatched. Every
 RR interval touching it is left out of heart rate and HRV, as an interval
 across a removed beat is — so beats missed in the noise do not read as a
 slower heart rate. Right-click a noisy region to remove it; the **Noise** chip
-of the detection bar lists them all (add, edit, delete by times). Results
-computed before show as out of date: run **Analyze** again. Noisy regions are
-saved with the session.
+of the detection bar lists them all (add, edit, delete by times); **Ctrl+Z**
+undoes the last noisy-region change. Results computed before show as out of
+date: run **Analyze** again. Noisy regions are saved with the session. The
+frequency HRV (LF / HF) is computed on the stretches between noisy regions
+and averaged, never interpolated across them ([Methods](METHODS.md#hrv-analysis)).
 
 The **Signal quality** panel on the right of the plot gives the
 signal-quality score, built from how closely each beat matches the
@@ -313,6 +315,14 @@ elsewhere), `HRV_LFpeak (Hz)`.
 
 Sample entropy, DFA, and a multiscale entropy (MSEn) curve across coarse-graining
 scales, then RR asymmetry and the distribution of the valid RR intervals.
+
+**DFA α1 / α2** (and the multifractal DFA indices) are computed only when you
+click **Compute DFA**: NeuroKit's method fits every window size from 12 beats
+to a tenth of the recording, so its time grows with the square of the
+recording length (about 5 s for an hour, 1 min for 4 h, 40 min for 24 h;
+the app asks first when it is over a minute). Analyze or Recompute Non-linear
+clears it; the status line and the Excel Cover sheet say when it was not
+computed.
 
 Poincaré SD1/SD2, DFA α1/α2 and the asymmetry / fragmentation indices use
 **every valid beat of the analysis window**. Only the slow entropy block
@@ -733,12 +743,15 @@ Choose **Event-locked** in the selector of Time course.
    stimulus…) with the **Annotations** chip of the Signal & Detection bar;
    its **start** time is the event onset. **✨ Suggest from channels…** (in the
    Annotations dialog) lists the events of the file's other channels — the
-   keyboard / marker channels (one per key or code; the key **0** is left out,
-   here and in the stimulation markers of Compare segments) and the trains of
+   keyboard / marker channels (one per key or code) and the trains of
    stimulus pulses of a TTL channel — for you to tick, rename and add
-   (Spike2 .smr or its MATLAB export). A pacing / stimulation period is an
-   annotation too (sessions saved with the former *Pacing* chip open with
-   their periods as annotations).
+   (Spike2 .smr or its MATLAB export). Above the list, **Keyboard keys**
+   shows every key found with how many times it was pressed: untick a key
+   pressed by mistake, or one that marks nothing in your protocol, to ignore
+   it here and in the **Stim marker** list of Compare segments. The choice is
+   remembered; no key is ignored until you untick it. A pacing /
+   stimulation period is an annotation too (sessions saved with the former
+   *Pacing* chip open with their periods as annotations).
    Give events of the same kind the same label.
 2. **Compute the Autonomic indices** (⟳ Compute in the bar above).
 3. **Choose the events and windows.** **Events** = *All*, one label, or

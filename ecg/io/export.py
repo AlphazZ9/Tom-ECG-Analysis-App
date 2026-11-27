@@ -27,7 +27,7 @@ from ecg.core.models import (
 from ecg.core.models import QT_REPORTED, reported_intervals
 from ecg.core.detection import premature_summary_rows
 from ecg.core.analysis import (
-    HR_RANGE_TEXT, LEGACY_SPECTRAL_TEXT, SPECTRAL_METHOD_TEXT,
+    HR_RANGE_TEXT, LEGACY_SPECTRAL_TEXT, SPECTRAL_METHOD_TEXT, spectrum_segments_text,
     analysed_duration_s, analysis_provenance_rows, analysis_window_span,
     ensemble_short_text, hrv_freq_is_legacy, hrv_freq_withheld_reason,
     interval_disclosure_rows,
@@ -544,15 +544,18 @@ class ExcelExporter:
             _fd = results.get("hrv_freq")
             if _fd is not None and not _fd.empty:
                 # An older session's NeuroKit table is not in ms² / n.u.
+                _seg = spectrum_segments_text(_fd.attrs)
                 cover_rows.append(("Frequency HRV",
                                    LEGACY_SPECTRAL_TEXT if hrv_freq_is_legacy(cast(dict, results))
-                                   else SPECTRAL_METHOD_TEXT))
+                                   else SPECTRAL_METHOD_TEXT + (f"; {_seg}" if _seg else "")))
         # Beats behind the non-linear metrics (entropy block may be capped).
         _nl = results.get("hrv_nonlin")
         if _nl is not None and not _nl.empty:
             cover_rows.append(("Non-linear HRV",
                                nonlinear_subset_text(_nl.attrs)
                                or "all valid RR intervals of the analysis window"))
+            if _nl.attrs.get("dfa_computed") is False:
+                cover_rows.append(("DFA", "not computed (Rhythm & HRV > Compute DFA)"))
             # HRV_PI / HRV_GI of the HRV_NonLinear sheet (NeuroKit's, same
             # conventions as the text report's RR-asymmetry block).
             cover_rows.append(("HR asymmetry (HRV_PI, HRV_GI)", RR_ASYMMETRY_TEXT))
@@ -1425,6 +1428,11 @@ class PrismExporter:
         if freq_withheld:
             note_names.append("Frequency HRV")
             note_values.append(f"withheld — {freq_withheld}")
+        else:
+            _seg = spectrum_segments_text(getattr(results.get("hrv_freq"), "attrs", None))
+            if _seg:
+                note_names.append("Frequency HRV")
+                note_values.append("spectrum " + _seg)
         # Premature beats (RR-based): counts, per-hour rates, definition.
         for label, value in premature_summary_rows(premature_summary):
             note_names.append(label.strip())

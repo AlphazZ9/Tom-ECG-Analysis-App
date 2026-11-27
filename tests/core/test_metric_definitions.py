@@ -104,8 +104,9 @@ def test_entropy_subset_picks_the_block_with_fewest_exclusions():
 def test_capped_nonlinear_keeps_poincare_and_dfa_on_all_beats():
     rr = _modulated_rr(1200, seed=4)
     peaks = rpeaks_from_rr(list(rr), FS)
-    full = analysis.analyse_hrv_nonlinear(peaks, FS, max_beats=0)     # no cap
-    capped = analysis.analyse_hrv_nonlinear(peaks, FS, max_beats=400)
+    # DFA is on demand: asked for here, to compare it on all beats.
+    full = analysis.analyse_hrv_nonlinear(peaks, FS, max_beats=0, dfa=True)     # no cap
+    capped = analysis.analyse_hrv_nonlinear(peaks, FS, max_beats=400, dfa=True)
 
     assert full.attrs["entropy_capped"] is False
     assert capped.attrs["entropy_capped"] is True

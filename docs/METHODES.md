@@ -108,12 +108,33 @@ est devenu Sliding, *Beat Template* et *Intervals* sont Morphology & Intervals,
   **LFn / HFn** sont les unités normalisées de la Task Force, LF ou HF /
   (LF + HF) ; LF/HF = LF / HF. Le même estimateur sert à la VRC glissante et
   à la comparaison de segments.
+- **Longues suites d'intervalles exclus** (zone bruitée marquée à la main,
+  long artefact) : la spline ne comble jamais une suite de plus de 2 s.
+  Depuis la 6.2.3, la série est coupée à cet endroit ; chaque portion entre
+  deux coupures est rééchantillonnée et sa PSD de Welch calculée avec une
+  fenêtre commune (résolution ≈ 0,02 Hz, au plus la moitié de la plus longue
+  portion, jamais moins de 256 points = 12,8 s), puis les PSD sont moyennées
+  en pondérant par leur nombre de fenêtres de Welch (ce qui revient à mettre
+  en commun toutes les fenêtres de toutes les portions). Les portions plus
+  courtes sont laissées de côté ; la règle des 5 % de temps exclu s'applique
+  aux portions utilisées. La ligne d'état, le rapport Summary et la feuille
+  Cover d'Excel l'indiquent (« averaged over N stretches (X of Y s used) »).
+  Avant la 6.2.3, une seule de ces suites supprimait le spectre de toute la
+  fenêtre d'analyse. Sans suite de ce type, le spectre est exactement le
+  même qu'avant. Le décompte *spanning removed beats* (noms de colonnes
+  Excel et Prism conservés pour la compatibilité) inclut les intervalles des
+  zones bruitées.
 - **Non linéaire** — nuage de points de Poincaré avec ellipse SD1/SD2,
   entropie d'échantillon, DFA α1/α2, et une courbe d'**entropie
   multi-échelle (MSEn)** à travers les échelles de coarse-graining — détecte
   une perte de complexité que la SampEn à échelle unique peut manquer.
   SD1/SD2 de Poincaré, la DFA et les indices d'asymétrie / de fragmentation
-  utilisent **tous les battements valides de la fenêtre d'analyse**. Seul le
+  utilisent **tous les battements valides de la fenêtre d'analyse**. **La
+  DFA est calculée à la demande** (Compute DFA, depuis la 6.2.3), avec la
+  méthode et les échelles de NeuroKit (α1 : 4 à 11 battements ; α2 : chaque
+  entier de 12 battements à N/10, d'où un temps qui croît avec N²) ;
+  `ecg/core/fast_dfa.py` évalue les tendances de toutes les fenêtres d'un coup
+  et donne les chiffres de NeuroKit au bit près, environ 2,3 fois plus vite. Seul le
   bloc d'entropie, lent (O(N²)) — SampEn, ApEn, FuzzyEn, MSE, CD, … — est
   plafonné pour le temps de calcul, à **Entropy cap (RR)** intervalles
   valides (2000 par défaut, réglable dans l'onglet Non-linear ; 0 = pas de

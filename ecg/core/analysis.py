@@ -373,6 +373,162 @@ def hrv_spectrum(
     }
 
 
+def _gap_split(rr_ms: np.ndarray, valid: np.ndarray, max_gap_s: float
+               ) -> "list[tuple[int, int]]":
+    """[i0, i1) ranges of the intervals of *rr_ms* between the runs of
+    CONSECUTIVE excluded intervals that last more than *max_gap_s* (those
+    runs themselves left out). One range, the whole series, when there is
+    no such run."""
+    ok = np.asarray(valid, dtype=bool)
+    n = len(ok)
+    if n == 0:
+        return []
+    exc = ~ok
+    d = np.diff(np.r_[0, exc.astype(np.int8), 0])
+    starts, ends = np.flatnonzero(d == 1), np.flatnonzero(d == -1)
+    rr = np.where(np.isfinite(rr_ms), rr_ms, 0.0)
+    cs = np.r_[0.0, np.cumsum(rr)]
+    out, i0 = [], 0
+    for a, b in zip(starts, ends):
+        if (cs[b] - cs[a]) / 1000.0 > max_gap_s:
+            if a > i0:
+                out.append((i0, int(a)))
+            i0 = int(b)
+    if i0 < n:
+        out.append((i0, n))
+    return out
+
+
+def hrv_spectrum_gapped(
+    rr_ms:             np.ndarray,
+    valid:             np.ndarray,
+    t_s:               np.ndarray,
+    interp_fs:         float = MouseECG.PSD_INTERP_FS,
+    target_res_hz:     float = 0.02,
+    max_gap_s:         float = MouseECG.SPECTRAL_MAX_GAP_S,
+    max_excluded_frac: float = MouseECG.SPECTRAL_MAX_EXCLUDED_FRAC,
+    min_valid:         int = 60,
+) -> "tuple[Optional[dict], Optional[str]]":
+    """(spectrum, withheld reason) of an RR series with excluded intervals:
+    *rr_ms* every interval (ms), *valid* the mask of the kept ones, *t_s*
+    each interval's end time (s).
+
+    Without a run of excluded intervals longer than *max_gap_s* this is
+    ``hrv_spectrum`` of the valid intervals, under ``spectral_withheld_reason``
+    (results unchanged from earlier versions). With such runs -- a noisy
+    region marked by hand, a long artifact -- the spline is never asked to
+    bridge them: the series is cut there, each stretch between them is
+    resampled and its Welch PSD computed with one common window length (so
+    the frequency bins match: ≈0.02 Hz resolution, at most half the longest
+    stretch, never under 256 samples = 12.8 s),
+    and the PSDs are averaged weighted by their number of Welch windows (the
+    same as pooling every window of every stretch). Stretches shorter than
+    that window are left out. The excluded
+    -time rule then applies to the stretches used. The spectrum dict gets
+    ``n_segments``, ``segments_s`` (time used), ``span_s`` and
+    ``segments_left_out`` (1 stretch, the whole series, without long runs)."""
+    rr = np.asarray(rr_ms, dtype=np.float64).flatten()
+    ok = np.asarray(valid, dtype=bool).flatten()
+    t = np.asarray(t_s, dtype=np.float64).flatten()
+    n_valid = int(ok.sum())
+    if n_valid < min_valid:
+        return None, f"only {n_valid} valid RR intervals (need ≥ {min_valid})"
+    finite = np.isfinite(rr)
+    span_s = float(rr[finite].sum()) / 1000.0
+    ranges = _gap_split(rr, ok, max_gap_s)
+    if ranges == [(0, len(rr))]:
+        # No long run of excluded intervals: the whole series, as before.
+        reason = spectral_withheld_reason(rr, ok, max_gap_s, max_excluded_frac)
+        if reason:
+            return None, reason
+        spec = hrv_spectrum(rr[ok], t[ok], interp_fs, target_res_hz)
+        if spec is None:
+            return None, "RR series too short to resample for a spectrum"
+        spec.update(n_segments=1, segments_s=span_s, span_s=span_s, segments_left_out=0)
+        return spec, None
+    # Resample every stretch, then one common Welch window length.
+    series = []
+    for i0, i1 in ranges:
+        m = ok[i0:i1]
+        rr_k, t_k = rr[i0:i1][m], t[i0:i1][m]
+        if len(rr_k) < 4:
+            continue
+        order = np.argsort(t_k, kind="stable")
+        t_k, rr_k = t_k[order], rr_k[order]
+        keep = np.r_[True, np.diff(t_k) > 0]
+        t_k, rr_k = t_k[keep], rr_k[keep]
+        if len(rr_k) < 4:
+            continue
+        t_uni = np.arange(t_k[0], t_k[-1], 1.0 / interp_fs)
+        if len(t_uni) < 32:
+            continue
+        x = CubicSpline(t_k, rr_k)(t_uni)
+        series.append((i0, i1, x - x.mean()))
+    if not series:
+        return None, "no stretch between the excluded runs is long enough for a spectrum"
+    # The window: ≈0.02 Hz resolution, at most half the longest stretch, and
+    # never under 256 samples (12.8 s at 20 Hz: coarser bins could not
+    # separate the mouse bands). Shorter stretches are left out.
+    longest = max(len(x) for *_r, x in series)
+    nperseg = int(max(256, min(interp_fs / target_res_hz, longest // 2)))
+    noverlap = int(nperseg * 0.75)
+    used = [(i0, i1, x) for i0, i1, x in series if len(x) >= nperseg]
+    if not used:
+        return None, (f"no stretch between the runs of excluded RR intervals is long "
+                      f"enough for a spectrum (longest {longest / interp_fs:.1f} s, "
+                      f"need ≥ {nperseg / interp_fs:.1f} s)")
+    # The excluded-time rule on the stretches used (short holes the spline bridges).
+    in_used = np.zeros(len(rr), dtype=bool)
+    for i0, i1, _x in used:
+        in_used[i0:i1] = True
+    used_s = float(rr[in_used & finite].sum()) / 1000.0
+    if int((ok & in_used).sum()) < min_valid:
+        return None, (f"only {int((ok & in_used).sum())} valid RR intervals in the stretches "
+                      f"long enough for a spectrum (need ≥ {min_valid})")
+    reason = spectral_withheld_reason(rr[in_used], ok[in_used], max_gap_s, max_excluded_frac)
+    if reason:
+        return None, reason
+    acc, n_win, freqs = None, 0, None
+    for _i0, _i1, x in used:
+        freqs, p = _scipy_welch(x, fs=interp_fs, nperseg=nperseg, noverlap=noverlap,
+                                window="hann", scaling="density")
+        w = 1 + (len(x) - nperseg) // (nperseg - noverlap)
+        acc = p * w if acc is None else acc + p * w
+        n_win += w
+    psd = acc / n_win
+    return {
+        "freqs":     np.asarray(freqs, dtype=np.float64),
+        "psd":       np.asarray(psd, dtype=np.float64),
+        "nperseg":   nperseg,
+        "noverlap":  noverlap,
+        "n_points":  int(sum(len(x) for *_r, x in used)),
+        "interp_fs": float(interp_fs),
+        "df_hz":     float(freqs[1] - freqs[0]) if len(freqs) > 1 else float("nan"),
+        "n_segments": len(used),
+        "segments_s": used_s,
+        "span_s":    span_s,
+        "segments_left_out": len(ranges) - len(used),
+    }, None
+
+
+def spectrum_segments_text(attrs: "Optional[dict]") -> str:
+    """'averaged over 3 stretches without excluded runs > 2 s (…)' for a
+    spectrum hrv_spectrum_gapped cut at long excluded runs; '' otherwise."""
+    a = attrs or {}
+    n = int(a.get("psd_segments", 1) or 1)
+    if n <= 1 and not a.get("psd_segments_left_out"):
+        return ""
+    used, span = float(a.get("psd_segments_s", 0.0)), float(a.get("psd_span_s", 0.0))
+    left = int(a.get("psd_segments_left_out", 0) or 0)
+    how = f"averaged over {n} stretches" if n != 1 else "computed on 1 stretch"
+    text = (f"{how} between runs of excluded RR intervals > "
+            f"{MouseECG.SPECTRAL_MAX_GAP_S:g} s (noisy regions, long artifacts): "
+            f"{used:.0f} of {span:.0f} s used")
+    if left:
+        text += f"; {left} stretch{'es' if left != 1 else ''} too short left out"
+    return text
+
+
 def band_mask(freqs: np.ndarray, band: "tuple[float, float]") -> np.ndarray:
     """Bins of *freqs* inside the half-open band [lo, hi) -- the bins whose
     power is integrated into that band (and shaded on the PSD plot)."""
@@ -1751,20 +1907,16 @@ def analyse_hrv_freq(
             f"only {n_valid} valid RR intervals (need ≥ {MIN_BEATS_SPECTRAL})",
             rr_series)
 
-    reason = spectral_withheld_reason(rr_series["rr_ms"], rr_series["valid"])
-    if reason:
-        log.warning("analyse_hrv_freq: spectrum withheld — %s", reason)
-        return _withheld_frame(reason, rr_series)
-
     if progress_cb:
         progress_cb(10, f"Frequency-domain HRV (LF {lf[0]:g}–{lf[1]:g} Hz, "
                         f"HF {hf[0]:g}–{hf[1]:g} Hz)…")
 
     try:
-        spec = hrv_spectrum(rr_series["rri"], rr_series["rri_time"])
+        spec, reason = hrv_spectrum_gapped(rr_series["rr_ms"], rr_series["valid"],
+                                           rr_series["t_s"], min_valid=MIN_BEATS_SPECTRAL)
         if spec is None:
-            return _withheld_frame("RR series too short to resample for a spectrum",
-                                   rr_series)
+            log.warning("analyse_hrv_freq: spectrum withheld — %s", reason)
+            return _withheld_frame(str(reason), rr_series)
         result = pd.DataFrame([spectral_band_metrics(spec, vlf, lf, hf)])
         result.attrs.update(rr_exclusion_summary(rr_series))
         result.attrs.update({
@@ -1774,6 +1926,10 @@ def analyse_hrv_freq(
             "psd_noverlap":  spec["noverlap"],
             "psd_n_points":  spec["n_points"],
             "psd_interp_fs": spec["interp_fs"],
+            "psd_segments":  int(spec.get("n_segments", 1)),
+            "psd_segments_s": float(spec.get("segments_s", 0.0)),
+            "psd_span_s":    float(spec.get("span_s", 0.0)),
+            "psd_segments_left_out": int(spec.get("segments_left_out", 0)),
             "bands":         [list(map(float, vlf)), list(map(float, lf)),
                               list(map(float, hf))],
             "method":        SPECTRAL_METHOD_TEXT,
@@ -1800,7 +1956,7 @@ def entropy_subset(valid: np.ndarray, cap: int) -> "tuple[int, int]":
     return int(k[j]), int(k[j + cap - 1] + 1)
 
 
-def _full_window_pair_and_dfa(series: dict, fs: float) -> "pd.DataFrame":
+def _full_window_pair_and_dfa(series: dict, fs: float, dfa: bool = True) -> "pd.DataFrame":
     """NeuroKit's Poincaré, fragmentation, asymmetry and DFA (α1, α2, MFDFA)
     blocks of nk.hrv_nonlinear on EVERY valid interval of *series* -- the
     cheap part of the non-linear set, recomputed on the whole window when
@@ -1808,8 +1964,9 @@ def _full_window_pair_and_dfa(series: dict, fs: float) -> "pd.DataFrame":
     handling as nk.hrv_nonlinear (0.2.13); a block that raises (e.g. the
     asymmetry indices on zero variability) is left out."""
     assert nk is not None
+    from ecg.core.fast_dfa import hrv_dfa as fast_hrv_dfa
     from neurokit2.hrv.hrv_nonlinear import (   # NeuroKit 0.2.13 internals
-        _hrv_dfa, _hrv_nonlinear_fragmentation, _hrv_nonlinear_poincare,
+        _hrv_nonlinear_fragmentation, _hrv_nonlinear_poincare,
         _hrv_nonlinear_poincare_hra)
     from neurokit2.hrv.hrv_utils import _hrv_format_input
     rri, rri_time, rri_missing = _hrv_format_input(nk_rri_input(series),
@@ -1826,10 +1983,14 @@ def _full_window_pair_and_dfa(series: dict, fs: float) -> "pd.DataFrame":
         except Exception as exc:
             log.debug("full-window %s failed: %s", fn.__name__, exc)
     part = {}
+    if not dfa:
+        return pd.DataFrame({f"HRV_{k}": [float(v)] for k, v in out.items()})
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            _hrv_dfa(rri, part)
+            # NeuroKit's _hrv_dfa, same numbers bit for bit, ~5x faster
+            # (its per-window polyval loop was most of the analysis time).
+            fast_hrv_dfa(rri, part)
         out.update(part)
     except Exception as exc:
         log.debug("full-window DFA failed: %s", exc)
@@ -1871,6 +2032,7 @@ def analyse_hrv_nonlinear(
     rr_min_ms: float = MouseECG.RR_MIN_MS,
     rr_max_ms: float = MouseECG.RR_MAX_MS,
     breaks: "Optional[np.ndarray]" = None,
+    dfa: bool = False,
 ) -> pd.DataFrame:
     """Non-linear HRV via NeuroKit2: Poincaré SD1/SD2, DFA α1/α2, ApEn/SampEn,
     Porta index, and the rest of nk.hrv_nonlinear()'s standard metric set.
@@ -1966,7 +2128,7 @@ def analyse_hrv_nonlinear(
         if progress_cb:
             progress_cb(45, "Poincaré / DFA on every beat of the window…")
         try:
-            full = _full_window_pair_and_dfa(rr_series, fs)
+            full = _full_window_pair_and_dfa(rr_series, fs, dfa=dfa)
         except Exception as exc:          # NeuroKit internals moved: run it all
             log.warning("analyse_hrv_nonlinear: full-window NeuroKit blocks "
                         "unavailable (%s) — running nk.hrv_nonlinear on all beats", exc)
@@ -1982,7 +2144,7 @@ def analyse_hrv_nonlinear(
             result[col] = float(full[col].iloc[0])
         # A whole-window metric that could not be computed must not keep
         # the value of the capped block.
-        for col in _NL_PAIR_COLUMNS + ("HRV_DFA_alpha1", "HRV_DFA_alpha2"):
+        for col in _NL_PAIR_COLUMNS + (("HRV_DFA_alpha1", "HRV_DFA_alpha2") if dfa else ()):
             if col in result.columns and col not in full.columns:
                 result[col] = float("nan")
         entropy_cols = [c for c in result.columns if c.startswith(_NL_ENTROPY_PREFIXES)]
@@ -2060,8 +2222,50 @@ def analyse_hrv_nonlinear(
     result.attrs["mse_point_estimate"] = mse_point
     result.attrs["pair_metrics_withheld"] = pair_withheld
     result.attrs["nk_failed_reason"] = nk_failed_reason
+    # DFA only when asked (Compute DFA): its cost grows with the square of
+    # the number of beats (NeuroKit's every-integer α2 scales).
+    if not dfa:
+        for col in dfa_columns(result.columns):
+            result[col] = float("nan")
+    result.attrs["dfa_computed"] = bool(dfa)
     result.attrs.update(rr_exclusion_summary(rr_series))
     return result
+
+
+def dfa_columns(columns: "Iterable[str]") -> "list[str]":
+    """The DFA α1 / α2 and multifractal DFA columns of a non-linear table."""
+    return [c for c in columns if str(c).startswith(("HRV_DFA_", "HRV_MFDFA_"))]
+
+
+def dfa_seconds_estimate(n_valid: int) -> float:
+    """Rough time (s) of window_dfa on *n_valid* RR intervals: ~4.6 s for an
+    hour of mouse ECG (30 000 beats), growing with the square of the count."""
+    return 4.6 * (max(int(n_valid), 0) / 30_000.0) ** 2
+
+
+def window_dfa(
+    rpeaks:    np.ndarray,
+    fs:        float,
+    rr_min_ms: float = MouseECG.RR_MIN_MS,
+    rr_max_ms: float = MouseECG.RR_MAX_MS,
+    breaks:    "Optional[np.ndarray]" = None,
+) -> "dict[str, float]":
+    """DFA α1, α2 and the multifractal DFA indices ({"HRV_DFA_alpha1": …})
+    of every valid RR interval of *rpeaks* (the analysis window), as
+    NeuroKit computes them in nk.hrv_nonlinear (same input handling, same
+    scales: ecg.core.fast_dfa gives its numbers bit for bit). Computed on
+    demand (Compute DFA), not by analyse_hrv_nonlinear."""
+    _require_nk()
+    from ecg.core.fast_dfa import hrv_dfa as fast_hrv_dfa
+    from neurokit2.hrv.hrv_utils import _hrv_format_input
+    rpeaks = np.sort(np.asarray(rpeaks, dtype=int).flatten())
+    series = rr_interval_series(rpeaks, fs, rr_min_ms, rr_max_ms, breaks=breaks)
+    rri, _t, _m = _hrv_format_input(nk_rri_input(series), sampling_rate=int(fs))
+    out: dict = {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fast_hrv_dfa(rri, out)
+    return {f"HRV_{k}": float(v) for k, v in out.items()}
 
 
 def compute_qtc(
@@ -3478,10 +3682,11 @@ def compute_segment_stats(
     # Same estimator and withholding rules as analyse_hrv_freq: the spline
     # would otherwise invent RR values across a long excluded stretch.
     vlf_p = lf_p = hf_p = lf_nu = hf_nu = lf_hf_r = _NAN
-    freq_reason = spectral_withheld_reason(rr_all, rr_mask)
+    freq_reason: "Optional[str]" = None
     try:
-        if freq_reason is None and len(rr_ok) >= MIN_BEATS_SPECTRAL:
-            spec = hrv_spectrum(rr_ok, t_ok)
+        if len(rr_ok) >= MIN_BEATS_SPECTRAL:
+            spec, freq_reason = hrv_spectrum_gapped(rr_all, rr_mask, ser["t_s"],
+                                                    min_valid=MIN_BEATS_SPECTRAL)
             if spec is not None:
                 bm = spectral_band_metrics(spec, vlf_band, lf_band, hf_band)
                 vlf_p, lf_p, hf_p = bm["HRV_VLF"], bm["HRV_LF"], bm["HRV_HF"]

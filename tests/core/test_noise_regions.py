@@ -4,6 +4,7 @@ spanning a removed beat is."""
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from ecg.core.analysis import noise_breaks, rr_interval_series
 
@@ -48,7 +49,7 @@ def test_a_drag_in_mark_noise_marks_a_region_and_a_right_click_removes_it():
     changed, status = [], []
     app = NS(detection=DetectionState(), analysis=AnalysisState(),
              signal=NS(fs=1000.0, filtered=np.zeros(20_000)), ui=NS(nav_pos=0.0),
-             _noise_regions_changed=lambda: changed.append(1),
+             _EDIT_UNDO_LIMIT=50, _noise_regions_changed=lambda: changed.append(1),
              _set_status=lambda *a, **k: status.append(a[0]),
              _draw_detail=lambda *a, **k: None)
     ctrl = DetectionController(app)
@@ -74,3 +75,48 @@ def test_the_strip_names_the_noisy_regions():
     t = NS(has=lambda k: k in vals, value=lambda k, d=None: vals.get(k, d))
     assert "spanning a removed beat" in exclusion_field(t).text
     assert "4 in a noisy region or across a removed beat" in exclusion_field(t, True).text
+
+
+def test_ctrl_z_undoes_a_noisy_region_without_touching_the_peaks():
+    from types import SimpleNamespace as NS
+    from ecg.ui.detection_controller import DetectionController
+    from ecg.ui.state import AnalysisState, DetectionState
+    changed = []
+    app = NS(detection=DetectionState(), analysis=AnalysisState(),
+             signal=NS(fs=1000.0, filtered=np.zeros(20_000)), ui=NS(nav_pos=0.0),
+             _EDIT_UNDO_LIMIT=50, _noise_regions_changed=lambda: changed.append(1),
+             _set_status=lambda *a, **k: None, _draw_detail=lambda *a, **k: None)
+    ctrl = DetectionController(app)
+    ctrl.apply_edit_state = lambda: pytest.fail("peaks re-detected")
+    app.detection.edit_mode = True
+    ctrl.toggle_noise_mode()
+    ev = lambda t, b=1: NS(xdata=t, button=b, inaxes=None)
+    ctrl.on_detail_click(ev(2.0)); ctrl.on_detail_release(ev(4.0))
+    ctrl.on_detail_click(ev(8.0)); ctrl.on_detail_release(ev(9.0))
+    assert len(app.analysis.noise_regions) == 2
+    ctrl.undo_edit()
+    assert app.analysis.noise_regions == [{"t_start": 2.0, "t_end": 4.0, "note": ""}]
+    ctrl.undo_edit()
+    assert app.analysis.noise_regions == []
+    ctrl.redo_edit()
+    assert len(app.analysis.noise_regions) == 1
+    ctrl.on_detail_click(ev(3.0, 3))                    # right-click removes: undoable too
+    assert app.analysis.noise_regions == []
+    ctrl.undo_edit()
+    assert len(app.analysis.noise_regions) == 1
+
+
+def test_the_window_is_maximised_on_linux_too():
+    import tkinter as tk
+    from ecg.ui.app import ECGApp
+    calls = []
+
+    class Fake:
+        def state(self, s):
+            calls.append(("state", s))
+            raise tk.TclError('bad argument "zoomed"')
+
+        def attributes(self, *a):
+            calls.append(("attributes",) + a)
+    ECGApp._maximise(Fake())
+    assert calls == [("state", "zoomed"), ("attributes", "-zoomed", True)]

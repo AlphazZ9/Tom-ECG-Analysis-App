@@ -38,7 +38,7 @@ from ecg.core.analysis import (
     rr_bounds_label, LEGACY_SPECTRAL_TEXT,
     rr_exclusion_text,
     rr_interval_series, rr_timeseries,
-    spectral_withheld_reason, successive_valid_pairs, rr_asymmetry_indices,
+    hrv_spectrum_gapped, spectral_withheld_reason, successive_valid_pairs, rr_asymmetry_indices,
     beat_quality_times,
     MIN_BEATS_SPECTRAL, band_mask, hrv_spectrum, mean_hr_bpm,
     spectral_band_metrics,
@@ -1690,13 +1690,19 @@ class PlotController:
                                f"intervals\n(recording has {len(rr_ms)})")
             return out
         if r.get("rr_ms") is not None:
-            reason = spectral_withheld_reason(np.asarray(r["rr_ms"], dtype=float),
-                                              self._rr_valid(r))
-            if reason:
+            # Same rule as analyse_hrv_freq: cut at long excluded runs.
+            rr_all = np.asarray(r["rr_ms"], dtype=float)
+            t_all = r.get("rr_t_s")
+            t_all = (np.asarray(t_all, dtype=float) if t_all is not None
+                     and len(t_all) == len(rr_all) else np.cumsum(rr_all) / 1000.0)
+            spec, reason = hrv_spectrum_gapped(rr_all, self._rr_valid(r), t_all,
+                                               min_valid=MIN_BEATS_SPECTRAL)
+            if spec is None:
                 log.warning("_plot_psd: spectrum withheld — %s", reason)
-                out["withheld"] = "Spectrum withheld\n" + reason.replace(" — ", "\n")
+                out["withheld"] = "Spectrum withheld\n" + str(reason).replace(" — ", "\n")
                 return out
-        spec = hrv_spectrum(rr_ms, ts)
+        else:
+            spec = hrv_spectrum(rr_ms, ts)
         if spec is None:
             out["withheld"] = "RR series too short for a spectrum"
             return out
@@ -2639,7 +2645,7 @@ class PlotController:
             lbl_auto.configure(text=self.app.analysis_ctrl.AUTONOMIC_IDLE_TEXT,
                                text_color=PLOT["muted"])
         self.app._set_result_btns_enabled(
-            False, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl", "btn_run_arrhythmia"))
+            False, ("btn_run_freq", "btn_run_nonlin", "btn_run_dfa", "btn_run_ivl", "btn_run_arrhythmia"))
 
     def reset_hrv_readouts(self) -> None:
         """Results dropped on the same file (peak edit, artifact review): the
@@ -2657,7 +2663,7 @@ class PlotController:
         if self.app.analysis.epoch_df is None:
             self.app.analysis_ctrl.clear_epochs_view()
         self.app._set_result_btns_enabled(
-            False, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl"))
+            False, ("btn_run_freq", "btn_run_nonlin", "btn_run_dfa", "btn_run_ivl"))
         self.app.ui.running_modules.clear()
 
     def reset_kpis(self) -> None:

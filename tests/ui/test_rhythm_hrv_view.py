@@ -581,7 +581,7 @@ def test_dropped_results_clear_labels_boxes_and_buttons():
     assert all(b.text == "" for b in boxes.values())
     for lbl in (app.lbl_freq_status, app.lbl_nonlin_status, app.lbl_ivl_status):
         assert lbl.text == "  Click Analyze first"
-    assert disabled == [(False, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl"))]
+    assert disabled == [(False, ("btn_run_freq", "btn_run_nonlin", "btn_run_dfa", "btn_run_ivl"))]
     assert not app.ui.running_modules
 
 

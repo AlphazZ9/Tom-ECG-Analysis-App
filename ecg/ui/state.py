@@ -69,6 +69,9 @@ class SignalState:
     # time; {} for MATLAB files and before a load. The Compare segments
     # "Stim marker" picker lists them.
     markers: "dict[str, list[float]]" = field(default_factory=dict)
+    # The code of each marker (same channels, same order): the key pressed
+    # on a keyboard channel, '' otherwise (loaders.read_spike2_marker_codes).
+    marker_codes: "dict[str, list[str]]" = field(default_factory=dict)
 
 
 @dataclass

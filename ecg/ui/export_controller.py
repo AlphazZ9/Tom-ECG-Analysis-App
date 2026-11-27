@@ -820,9 +820,12 @@ class ExportController:
                        f"{rep['n_excluded']} excluded from HRV "
                        f"({float(rep['excluded_pct'] or 0.0):.1f} %")
             if rep["n_excluded"]:
+                spanning = ("in noisy regions or across removed beats"
+                            if getattr(self.app.analysis, "noise_regions", None)
+                            else "spanning removed beats")
                 rr_note += (f": {rep['n_too_short']} too short, "
                             f"{rep['n_too_long']} too long, "
-                            f"{rep['n_spanning_removed']} spanning removed beats")
+                            f"{rep['n_spanning_removed']} {spanning}")
             rr_note += f")   |   RR bounds: {rep['rr_min_ms']:.0f}–{rep['rr_max_ms']:.0f} ms"
             fig.text(0.06, 0.902, rr_note, fontsize=8,
                      color=ORANGE if rep["n_excluded"] else mut, va="bottom")

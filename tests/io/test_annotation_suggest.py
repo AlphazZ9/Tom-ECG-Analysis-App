@@ -33,7 +33,7 @@ def test_keyboard_codes_and_a_pulse_train_are_suggested(tmp_path):
     _spike2_mat(p)
     ev = evc.read_event_channels(str(p))
     assert ev == {"Keyboard": [(10.0, "1"), (30.0, "2"), (90.0, "1")]}
-    found, read = collect(str(p), "ECG", None, 120.0, [])
+    found, read, _keys = collect(str(p), "ECG", None, 120.0, [])
     assert set(read) == {"Keyboard", "Stim"}
     labels = [(s["t_start"], s["label"]) for s in found]
     assert (10.0, "Keyboard '1'") in labels and (30.0, "Keyboard '2'") in labels
@@ -41,7 +41,7 @@ def test_keyboard_codes_and_a_pulse_train_are_suggested(tmp_path):
     assert len(stim) == 1 and stim[0]["t_start"] == 60.0
     assert "20 pulses, 20 Hz" in stim[0]["label"] and abs(stim[0]["t_end"] - 61.0) < 0.01
     # The ECG is no pulse train; an annotation there already: not again.
-    found, _ = collect(str(p), "ECG", None, 120.0, [{"t_start": 60.2, "t_end": 61}])
+    found, _, _k = collect(str(p), "ECG", None, 120.0, [{"t_start": 60.2, "t_end": 61}])
     assert not [s for s in found if s["source"] == "Stim"]
 
 
@@ -49,7 +49,7 @@ def test_the_load_crop_moves_the_times(tmp_path):
     p = tmp_path / "rec.mat"
     _spike2_mat(p)
     crop = {"t_start": 20.0, "t_end": 100.0, "file_duration_s": 120.0}
-    found, _ = collect(str(p), "ECG", crop, 80.0, [])
+    found, _, _k = collect(str(p), "ECG", crop, 80.0, [])
     starts = sorted(s["t_start"] for s in found)
     assert starts == [10.0, 40.0, 70.0]                 # 30, 60 (stim), 90 s in file time
 
@@ -105,7 +105,13 @@ def test_the_dialog_adds_the_ticked_suggestions(monkeypatch, tmp_path):
     try:
         found = [{"t_start": 10.0, "t_end": 11.0, "label": "Keyboard '1'", "source": "Keyboard"},
                  {"t_start": 60.0, "t_end": 61.0, "label": "Stim (20 pulses)", "source": "Stim"}]
-        monkeypatch.setattr(asd, "collect", lambda *a: (found, ["Keyboard", "Stim"]))
+        from ecg.io import marker_prefs
+        monkeypatch.setattr(marker_prefs, "PREFS_PATH", tmp_path / "prefs.json")
+        found[0]["code"] = "1"
+        found.append({"t_start": 90.0, "t_end": 91.0, "label": "Keyboard '0'",
+                      "source": "Keyboard", "code": "0"})
+        monkeypatch.setattr(asd, "collect", lambda *a: (found, ["Keyboard", "Stim"],
+                                                        {"1": 1, "0": 1}))
         app = NS(signal=NS(filepath="x.mat", channel="ECG", crop=None), _time=None,
                  analysis=NS(annotations=[]))
         added = []
@@ -116,7 +122,12 @@ def test_the_dialog_adds_the_ticked_suggestions(monkeypatch, tmp_path):
                 break
             import time
             time.sleep(0.02)
-        assert len(dlg._rows) == 2
+        assert len(dlg._rows) == 3
+        dlg._set_key("0", False)                       # untick key '0'
+        assert len(dlg._rows) == 2 and marker_prefs.load_ignored_keys() == {"0"}
+        dlg._set_key("0", True)
+        assert len(dlg._rows) == 3 and marker_prefs.load_ignored_keys() == set()
+        dlg._set_key("0", False)
         dlg._rows[0][0].set(False)
         dlg._rows[1][1].delete(0, "end")
         dlg._rows[1][1].insert(0, "Stim 20 Hz")
@@ -127,18 +138,23 @@ def test_the_dialog_adds_the_ticked_suggestions(monkeypatch, tmp_path):
         root.destroy()
 
 
-def test_keyboard_0_is_left_out_of_suggestions_and_markers(monkeypatch, tmp_path):
-    from ecg.io import loaders
+def test_every_key_is_read_and_only_the_chosen_ones_are_ignored(monkeypatch, tmp_path):
+    from ecg.io import loaders, marker_prefs
     from tests.io.test_spike2_loader import _FakeEventReader, _ecg
-    # MATLAB export: a '0' key among others.
+    monkeypatch.setattr(marker_prefs, "PREFS_PATH", tmp_path / "prefs.json")
+    # MATLAB export: a '0' key among others, all read.
     p = tmp_path / "rec.mat"
     codes = np.zeros((3, 4), dtype=np.uint8)
     codes[:, 0] = [ord("0"), ord("1"), ord("0")]
     scipy.io.savemat(str(p), {"Keyboard": {"title": "Keyboard", "times": np.array([5.0, 9.0, 20.0]),
                                            "codes": codes}})
-    assert evc.read_event_channels(str(p)) == {"Keyboard": [(9.0, "1")]}
-    # Spike2 .smr: the markers (Compare segments' stim markers) and the suggestions.
+    ev = evc.read_event_channels(str(p))
+    assert ev == {"Keyboard": [(5.0, "0"), (9.0, "1"), (20.0, "0")]}
+    assert marker_prefs.key_counts(ev) == {"0": 2, "1": 1}
+    found, _read, keys = collect(str(p), "ECG", None, 30.0, [])
+    assert keys == {"0": 2, "1": 1} and {s["code"] for s in found} == {"0", "1"}
 
+    # Spike2 .smr: the markers keep their codes; nothing ignored by default.
     class _Keys(_FakeEventReader):
         def get_event_timestamps(self, _b, _s, i):
             ts, _d, _l = super().get_event_timestamps(_b, _s, i)
@@ -152,6 +168,11 @@ def test_keyboard_0_is_left_out_of_suggestions_and_markers(monkeypatch, tmp_path
     smr.write_bytes(b"\x05\x00(C) CED 87")
     loaders._MARKER_CACHE.clear()
     m = loaders.read_spike2_markers(str(smr))
-    assert m["Keyboard"] == [2.0] and m["STIM"] == [4.0, 5.0, 6.0]   # only the keyboard
-    ev = evc.read_event_channels(str(smr))
-    assert ev["Keyboard"] == [(2.0, "a")] and len(ev["STIM"]) == 3
+    c = loaders.read_spike2_marker_codes(str(smr))
+    assert m["Keyboard"] == [1.0, 2.0, 3.0] and c["Keyboard"] == ["0", "a", "0"]
+    assert marker_prefs.load_ignored_keys() == set()
+    assert marker_prefs.keep_markers(m, c, set()) == m
+    # The user ignores '0': gone from the keyboard only, remembered.
+    marker_prefs.save_ignored_keys({"0"})
+    kept = marker_prefs.keep_markers(m, c, marker_prefs.load_ignored_keys())
+    assert kept["Keyboard"] == [2.0] and kept["STIM"] == [4.0, 5.0, 6.0]

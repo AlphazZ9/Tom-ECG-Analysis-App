@@ -95,11 +95,29 @@ and *Intervals* are Morphology & Intervals, *Abnormal Events* is Events.
   powers in ms²**. **LFn / HFn** are the Task Force normalised units,
   LF or HF / (LF + HF); LF/HF = LF / HF. The same estimator is used by
   Rolling HRV and Compare Segments.
+- **Long runs of excluded intervals** (a noisy region marked by hand, a long
+  artifact): the spline never bridges a run longer than 2 s. Since 6.2.3 the
+  series is cut there, each stretch in between is resampled and its Welch PSD
+  computed with one common window (≈0.02 Hz resolution, at most half the
+  longest stretch, never under 256 samples = 12.8 s), and the PSDs are
+  averaged weighted by their number of Welch windows (the same as pooling
+  every window of every stretch). Shorter stretches are left out; the 5 %
+  excluded-time rule applies to the stretches used. The status line, the
+  Summary report and the Excel Cover sheet say "averaged over N stretches
+  (X of Y s used)". Before 6.2.3 one such run withheld the spectrum of the
+  whole analysis window. Recordings without such a run give exactly the
+  same spectrum as before. The *spanning removed beats* count (Excel and
+  Prism column names kept for compatibility) includes the intervals of
+  noisy regions.
 - **Non-linear** — Poincaré scatter with an SD1/SD2 ellipse overlay, sample
   entropy, DFA α1/α2, and a **multiscale entropy (MSEn)** curve across
   coarse-graining scales — catches loss of complexity a single-scale SampEn
   can miss. Poincaré SD1/SD2, DFA and the asymmetry/fragmentation indices
-  use **every valid beat of the analysis window**. Only the slow (O(N²))
+  use **every valid beat of the analysis window**. **DFA is computed on
+  demand** (Compute DFA, since 6.2.3), with NeuroKit's method and scales
+  (α1: 4–11 beats; α2: every integer from 12 beats to N/10, so its time grows
+  with N²); `ecg/core/fast_dfa.py` evaluates the windows' trends at once and
+  gives NeuroKit's numbers bit for bit, about 2.3× faster. Only the slow (O(N²))
   entropy block — SampEn, ApEn, FuzzyEn, MSE, CD, … — is capped for
   runtime, to **Entropy cap (RR)** valid intervals (default 2000, set in the
   Non-linear tab; 0 = no cap, a negative entry falls back to 2000), taken as the contiguous block with the

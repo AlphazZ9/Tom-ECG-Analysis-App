@@ -28,7 +28,7 @@ HERE = Path(SPECPATH).resolve()          # packaging/
 ROOT = HERE.parent                       # repository root
 APP_NAME = "Tom ECG Analysis"
 BUNDLE_ID = "com.alphazz9.tom-ecg-analysis"
-VERSION = os.environ.get("APP_VERSION", "").lstrip("v") or "6.2.2"
+VERSION = os.environ.get("APP_VERSION", "").lstrip("v") or "6.2.3"
 IS_MAC = sys.platform == "darwin"
 
 

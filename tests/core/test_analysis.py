@@ -467,15 +467,18 @@ def test_spectral_withheld_reason_thresholds():
 
 
 @requires_nk
-def test_frequency_hrv_withheld_across_a_long_excluded_stretch():
+def test_frequency_hrv_across_a_long_excluded_stretch_uses_the_stretches_around():
+    # A 25 s run of excluded intervals is never interpolated across: the
+    # spectrum is averaged over the stretches before and after it (it used
+    # to be withheld for the whole recording).
     rr = _modulated_rr(2500)
     peaks = rpeaks_from_rr(list(rr[:1000]) + [360.0] * 70 + list(rr[1000:]), FS)
 
     freq = analysis.analyse_hrv_freq(peaks, FS)
 
-    assert freq.empty
-    assert "run of excluded RR intervals" in freq.attrs["withheld_reason"]
+    assert not freq.empty and freq.attrs["psd_segments"] == 2
     assert freq.attrs["n_too_long"] == 70
+    assert "averaged over 2 stretches" in analysis.spectrum_segments_text(freq.attrs)
 
 
 @requires_nk
@@ -497,7 +500,7 @@ def test_too_few_valid_intervals_also_explains_the_empty_spectrum():
     assert "only 30 valid RR intervals" in freq.attrs["withheld_reason"]
 
 
-def test_segment_lf_hf_withheld_across_a_long_excluded_stretch():
+def test_segment_lf_hf_across_a_long_excluded_stretch_uses_the_stretches_around():
     rr = _modulated_rr(600)
     rr_ms = np.r_[rr[:300], [360.0] * 20, rr[300:]]
     peaks = rpeaks_from_rr(list(rr_ms), FS)
@@ -505,10 +508,25 @@ def test_segment_lf_hf_withheld_across_a_long_excluded_stretch():
 
     seg = analysis.compute_segment_stats(signal, peaks, FS, 0.0, peaks[-1] / FS + 0.1)
 
-    assert seg["freq_withheld_reason"] is not None
-    assert np.isnan(seg["lf_hf"]) and np.isnan(seg["lf_nu"])
+    assert seg["freq_withheld_reason"] is None
+    assert np.isfinite(seg["lf_hf"]) and np.isfinite(seg["lf_nu"])
     assert seg["n_too_long"] == 20
     assert np.isfinite(seg["rmssd"])
+
+
+def test_segment_lf_hf_withheld_when_no_stretch_is_long_enough():
+    rr = _modulated_rr(200)
+    # Excluded runs of 2.9 s every 60 beats: no stretch reaches the window.
+    rr_ms: "list[float]" = []
+    for k in range(0, 200, 20):
+        rr_ms += list(rr[k:k + 20]) + [360.0] * 8
+    peaks = rpeaks_from_rr(rr_ms, FS)
+    signal = np.zeros(int(peaks[-1]) + 2000)
+
+    seg = analysis.compute_segment_stats(signal, peaks, FS, 0.0, peaks[-1] / FS + 0.1)
+
+    assert seg["freq_withheld_reason"] is not None
+    assert np.isnan(seg["lf_hf"])
 
 
 # ── Beat window sized from valid intervals ───────────────────────────────
