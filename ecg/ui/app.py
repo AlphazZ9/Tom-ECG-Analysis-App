@@ -319,7 +319,7 @@ class ECGApp(
             self._set_save_session_enabled(True)
         if self._results is not None:
             self._set_result_btns_enabled(
-                True, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl"))
+                True, ("btn_run_freq", "btn_run_nonlin", "btn_run_dfa", "btn_run_ivl"))
             if self.btn_save_session is not None:
                 self._set_save_session_enabled(True)
 

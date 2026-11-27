@@ -129,7 +129,12 @@ est devenu Sliding, *Beat Template* et *Intervals* sont Morphology & Intervals,
   multi-échelle (MSEn)** à travers les échelles de coarse-graining — détecte
   une perte de complexité que la SampEn à échelle unique peut manquer.
   SD1/SD2 de Poincaré, la DFA et les indices d'asymétrie / de fragmentation
-  utilisent **tous les battements valides de la fenêtre d'analyse**. Seul le
+  utilisent **tous les battements valides de la fenêtre d'analyse**. **La
+  DFA est calculée à la demande** (Compute DFA, depuis la 6.2.3), avec la
+  méthode et les échelles de NeuroKit (α1 : 4 à 11 battements ; α2 : chaque
+  entier de 12 battements à N/10, d'où un temps qui croît avec N²) ;
+  `ecg/core/fast_dfa.py` évalue les tendances de toutes les fenêtres d'un coup
+  et donne les chiffres de NeuroKit au bit près, environ 2,3 fois plus vite. Seul le
   bloc d'entropie, lent (O(N²)) — SampEn, ApEn, FuzzyEn, MSE, CD, … — est
   plafonné pour le temps de calcul, à **Entropy cap (RR)** intervalles
   valides (2000 par défaut, réglable dans l'onglet Non-linear ; 0 = pas de

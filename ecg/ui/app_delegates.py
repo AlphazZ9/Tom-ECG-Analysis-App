@@ -626,7 +626,7 @@ class DelegatesMixin:
                     if lbl is not None:
                         lbl.configure(text=warn_text, text_color=ORANGE)
                 self._set_result_btns_enabled(
-                    False, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl"))
+                    False, ("btn_run_freq", "btn_run_nonlin", "btn_run_dfa", "btn_run_ivl"))
             else:
                 self._set_status(art_str, GREEN)
 
@@ -642,6 +642,10 @@ class DelegatesMixin:
     def _run_freq(self: ECGApp) -> None:
         """Compute frequency-domain HRV in background, then render."""
         self.analysis_ctrl.run_freq()
+
+    def _run_dfa(self: ECGApp) -> None:
+        """DFA α1 / α2 on demand (Compute DFA)."""
+        self.analysis_ctrl.run_dfa()
 
     def _run_nonlinear(self: ECGApp) -> None:
         """Compute non-linear HRV in background, then render."""

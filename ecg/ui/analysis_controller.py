@@ -37,6 +37,7 @@ from ecg.core.analysis import (
     mean_hr_bpm, poincare_sd1_sd2,
     recompute_qtc_column, rr_bounds_label, rr_exclusion_text,
     noise_breaks, rr_interval_series, spectrum_segments_text, successive_valid_pairs,
+    dfa_seconds_estimate, window_dfa,
 )
 from ecg.core.autonomic import COV_METHODS, METHOD_NOTES, compute_autonomic_indices
 from ecg.core.filtering import break_line_at_gaps
@@ -355,7 +356,7 @@ class AnalysisController:
     def _disable_result_btns_without_results(self) -> None:
         if self.app.analysis.results is None:
             self.app._set_result_btns_enabled(
-                False, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl"))
+                False, ("btn_run_freq", "btn_run_nonlin", "btn_run_dfa", "btn_run_ivl"))
 
     def _refused_busy(self) -> bool:
         """A job is running, so the busy guard would refuse a new one: say so
@@ -467,7 +468,7 @@ class AnalysisController:
         if nl is None or nl.empty:
             if just_computed:
                 return "  Non-linear HRV could not be computed — see the log", ORANGE
-            return "  Core done — click to compute SampEn / DFA (slow!)", "#9C27B0"
+            return "  Core done — click to compute SampEn (slow!)", "#9C27B0"
         sampen = MISSING
         try:
             sampen = format_metric("hrv_nonlin.HRV_SampEn", nl["HRV_SampEn"].values[0])
@@ -490,7 +491,12 @@ class AnalysisController:
         # asymmetry/fragmentation indices were withheld (core analysis).
         if nl.attrs.get("pair_metrics_withheld"):
             note += "  ·  asymmetry indices withheld (RR gaps)"
-        return f"  Done  SampEn={sampen}{note}", ORANGE if note else GREEN
+        # DFA is computed on demand (its cost grows with the square of the
+        # number of beats); results of older versions always have it.
+        dfa_txt = ""
+        if nl.attrs.get("dfa_computed") is False:
+            dfa_txt = "  ·  DFA not computed: click Compute DFA"
+        return f"  Done  SampEn={sampen}{note}{dfa_txt}", ORANGE if note else GREEN
 
     def refresh_result_labels(self, freq_done_label: str = "Done") -> None:
         """Re-derive lbl_analysis_window, lbl_freq_status, lbl_nonlin_status
@@ -2186,7 +2192,7 @@ class AnalysisController:
         self.app._draw_detail()
         # Enable the per-tab buttons now that core results are available
         self.app._set_result_btns_enabled(
-            True, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl", "btn_run_arrhythmia"))
+            True, ("btn_run_freq", "btn_run_nonlin", "btn_run_dfa", "btn_run_ivl", "btn_run_arrhythmia"))
         # Auto epochs start once frequency HRV -- itself an async job -- has
         # finished: scheduled independently (after(200) at the end of the
         # plot chain) they always hit the busy guard while run_freq was
@@ -2372,7 +2378,7 @@ class AnalysisController:
         self._mark_running("nonlinear")
         if self.app.lbl_nonlin_status is not None:
             self.app.lbl_nonlin_status.configure(  # type: ignore[union-attr]
-                text="  Computing SampEn / DFA… (may take 30 s+)", text_color=ORANGE)
+                text="  Computing SampEn… (may take 30 s+)", text_color=ORANGE)
 
         def _worker():
             def _prog(p, m):
@@ -2411,6 +2417,73 @@ class AnalysisController:
             self.app._run_plot_chain(tasks, on_complete=_finish)
 
         self.app._start_async_result(self.app.btn_run_nonlin, "Computing…", _worker, _done)  # type: ignore[arg-type]
+
+    def run_dfa(self) -> None:
+        """Compute DFA α1 / α2 and the multifractal DFA indices (NeuroKit's
+        method, every valid RR of the analysis window) into the non-linear
+        result, in the background. On demand only: on a long recording it
+        takes minutes (asked first when over a minute)."""
+        res = self.app.analysis.results
+        nl = res.get("hrv_nonlin") if res else None
+        if nl is None or getattr(nl, "empty", True):
+            messagebox.showwarning("Compute DFA", "Compute the non-linear HRV first "
+                                   "(Analyze or Recompute Non-linear).")
+            return
+        rp = self.app._windowed_peaks()
+        if rp is None or len(rp) < 13:
+            messagebox.showwarning("Compute DFA", "Not enough peaks in the analysis window.")
+            return
+        if self._refused_busy():
+            return
+        n_rr = int(nl.attrs.get("n_rr_valid") or len(rp) - 1)
+        est = dfa_seconds_estimate(n_rr)
+        if est > 60:
+            mins = est / 60.0
+            when = f"about {mins:.0f} minutes" if mins < 90 else f"about {mins / 60:.1f} hours"
+            if not messagebox.askyesno(
+                    "Compute DFA",
+                    f"DFA on {n_rr:,} RR intervals takes {when} (its time grows with the "
+                    "square of the number of beats: NeuroKit fits every window size from "
+                    "12 beats to a tenth of the recording).\n\nCompute it now?"):
+                return
+        fs = self.app.signal.fs
+        _gen = getattr(self.app, "_generation", 0)
+        rr_lo, rr_hi = self.results_rr_bounds()
+        breaks = self.hrv_breaks()
+        basis = self._capture_basis(rr_bounds=(rr_lo, rr_hi))
+        self._mark_running("nonlinear")
+        if self.app.lbl_nonlin_status is not None:
+            self.app.lbl_nonlin_status.configure(  # type: ignore[union-attr]
+                text=f"  Computing DFA on {n_rr:,} RR intervals…", text_color=ORANGE)
+
+        def _worker():
+            return window_dfa(rp, fs, rr_min_ms=rr_lo, rr_max_ms=rr_hi, breaks=breaks)
+
+        def _done(values):
+            self._mark_landed("nonlinear")
+            if self._job_is_stale("DFA", "lbl_nonlin_status", _gen, basis):
+                return
+            results = self.app.analysis.results
+            cur = results.get("hrv_nonlin") if results else None
+            if cur is not nl:                  # the non-linear result was replaced
+                log.info("DFA: dropped, the non-linear result changed while it ran")
+                return
+            for k, v in (values or {}).items():
+                cur[k] = v
+            cur.attrs["dfa_computed"] = True
+            if self.app.lbl_nonlin_status is not None:
+                text, color = self._nonlin_status(cur, just_computed=True)
+                self.app.lbl_nonlin_status.configure(  # type: ignore[union-attr]
+                    text=text, text_color=color)
+            self.app._run_plot_chain(
+                [("Non-linear metrics", lambda: self.app._plot_nonlinear(results)),
+                 ("Metrics",            lambda: self.app._plot_table_views(results))],
+                on_complete=lambda: self.app._set_status(
+                    f"DFA done  α1 = {format_metric('hrv_nonlin.HRV_DFA_alpha1', cur['HRV_DFA_alpha1'].values[0])}"
+                    f"  α2 = {format_metric('hrv_nonlin.HRV_DFA_alpha2', cur['HRV_DFA_alpha2'].values[0]) if 'HRV_DFA_alpha2' in cur.columns else MISSING}",
+                    GREEN))
+
+        self.app._start_async_result(self.app.btn_run_dfa, "Computing…", _worker, _done)  # type: ignore[arg-type]
 
     def recording_wave_template(self) -> WaveTemplate:
         """The current recording's wave template, created on first use from

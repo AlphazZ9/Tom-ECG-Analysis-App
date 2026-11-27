@@ -92,6 +92,7 @@ class StateProps:
         # Per-module on-demand analysis buttons + status labels
         self.btn_run_freq:      "Optional[ctk.CTkButton]"  = None
         self.btn_run_nonlin:    "Optional[ctk.CTkButton]"  = None
+        self.btn_run_dfa:       "Optional[ctk.CTkButton]"  = None
         self.btn_run_ivl:       "Optional[ctk.CTkButton]"  = None
         self.btn_run_arrhythmia:"Optional[ctk.CTkButton]"  = None
         self.lbl_freq_status:   "Optional[ctk.CTkLabel]"   = None

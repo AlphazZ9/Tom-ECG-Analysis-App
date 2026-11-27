@@ -252,6 +252,19 @@ class TabHrvMixin:
             "Valid RR intervals used by the entropy block, for runtime (0 = no cap). "
             "SD1 / SD2 and DFA always use every valid RR of the window. "
             "Takes effect at the next Analyze or Recompute.")
+        self.btn_run_dfa = ctk.CTkButton(
+            hdr,
+            text="Compute DFA",
+            command=self._run_dfa,
+            **button_style("secondary"),
+        )
+        self.btn_run_dfa.pack(side="left", padx=(SPACE_M, 0))  # type: ignore[union-attr]
+        self._bind_hover_tip(
+            self.btn_run_dfa,
+            "DFA α1 / α2 and the multifractal DFA indices (NeuroKit's method) on every "
+            "valid RR of the analysis window. Not computed by Analyze: its time grows "
+            "with the square of the number of beats (about 5 s for an hour, 1 min for "
+            "4 h, 40 min for 24 h). Analyze or Recompute Non-linear clears it.")
 
         self.lbl_nonlin_status = ctk.CTkLabel(
             sec, text="  Click Analyze first", font=FONT_SMALL, text_color=MUTED,

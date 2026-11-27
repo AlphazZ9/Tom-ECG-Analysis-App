@@ -1956,7 +1956,7 @@ def entropy_subset(valid: np.ndarray, cap: int) -> "tuple[int, int]":
     return int(k[j]), int(k[j + cap - 1] + 1)
 
 
-def _full_window_pair_and_dfa(series: dict, fs: float) -> "pd.DataFrame":
+def _full_window_pair_and_dfa(series: dict, fs: float, dfa: bool = True) -> "pd.DataFrame":
     """NeuroKit's Poincaré, fragmentation, asymmetry and DFA (α1, α2, MFDFA)
     blocks of nk.hrv_nonlinear on EVERY valid interval of *series* -- the
     cheap part of the non-linear set, recomputed on the whole window when
@@ -1983,6 +1983,8 @@ def _full_window_pair_and_dfa(series: dict, fs: float) -> "pd.DataFrame":
         except Exception as exc:
             log.debug("full-window %s failed: %s", fn.__name__, exc)
     part = {}
+    if not dfa:
+        return pd.DataFrame({f"HRV_{k}": [float(v)] for k, v in out.items()})
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -2030,6 +2032,7 @@ def analyse_hrv_nonlinear(
     rr_min_ms: float = MouseECG.RR_MIN_MS,
     rr_max_ms: float = MouseECG.RR_MAX_MS,
     breaks: "Optional[np.ndarray]" = None,
+    dfa: bool = False,
 ) -> pd.DataFrame:
     """Non-linear HRV via NeuroKit2: Poincaré SD1/SD2, DFA α1/α2, ApEn/SampEn,
     Porta index, and the rest of nk.hrv_nonlinear()'s standard metric set.
@@ -2125,7 +2128,7 @@ def analyse_hrv_nonlinear(
         if progress_cb:
             progress_cb(45, "Poincaré / DFA on every beat of the window…")
         try:
-            full = _full_window_pair_and_dfa(rr_series, fs)
+            full = _full_window_pair_and_dfa(rr_series, fs, dfa=dfa)
         except Exception as exc:          # NeuroKit internals moved: run it all
             log.warning("analyse_hrv_nonlinear: full-window NeuroKit blocks "
                         "unavailable (%s) — running nk.hrv_nonlinear on all beats", exc)
@@ -2141,7 +2144,7 @@ def analyse_hrv_nonlinear(
             result[col] = float(full[col].iloc[0])
         # A whole-window metric that could not be computed must not keep
         # the value of the capped block.
-        for col in _NL_PAIR_COLUMNS + ("HRV_DFA_alpha1", "HRV_DFA_alpha2"):
+        for col in _NL_PAIR_COLUMNS + (("HRV_DFA_alpha1", "HRV_DFA_alpha2") if dfa else ()):
             if col in result.columns and col not in full.columns:
                 result[col] = float("nan")
         entropy_cols = [c for c in result.columns if c.startswith(_NL_ENTROPY_PREFIXES)]
@@ -2219,8 +2222,50 @@ def analyse_hrv_nonlinear(
     result.attrs["mse_point_estimate"] = mse_point
     result.attrs["pair_metrics_withheld"] = pair_withheld
     result.attrs["nk_failed_reason"] = nk_failed_reason
+    # DFA only when asked (Compute DFA): its cost grows with the square of
+    # the number of beats (NeuroKit's every-integer α2 scales).
+    if not dfa:
+        for col in dfa_columns(result.columns):
+            result[col] = float("nan")
+    result.attrs["dfa_computed"] = bool(dfa)
     result.attrs.update(rr_exclusion_summary(rr_series))
     return result
+
+
+def dfa_columns(columns: "Iterable[str]") -> "list[str]":
+    """The DFA α1 / α2 and multifractal DFA columns of a non-linear table."""
+    return [c for c in columns if str(c).startswith(("HRV_DFA_", "HRV_MFDFA_"))]
+
+
+def dfa_seconds_estimate(n_valid: int) -> float:
+    """Rough time (s) of window_dfa on *n_valid* RR intervals: ~4.6 s for an
+    hour of mouse ECG (30 000 beats), growing with the square of the count."""
+    return 4.6 * (max(int(n_valid), 0) / 30_000.0) ** 2
+
+
+def window_dfa(
+    rpeaks:    np.ndarray,
+    fs:        float,
+    rr_min_ms: float = MouseECG.RR_MIN_MS,
+    rr_max_ms: float = MouseECG.RR_MAX_MS,
+    breaks:    "Optional[np.ndarray]" = None,
+) -> "dict[str, float]":
+    """DFA α1, α2 and the multifractal DFA indices ({"HRV_DFA_alpha1": …})
+    of every valid RR interval of *rpeaks* (the analysis window), as
+    NeuroKit computes them in nk.hrv_nonlinear (same input handling, same
+    scales: ecg.core.fast_dfa gives its numbers bit for bit). Computed on
+    demand (Compute DFA), not by analyse_hrv_nonlinear."""
+    _require_nk()
+    from ecg.core.fast_dfa import hrv_dfa as fast_hrv_dfa
+    from neurokit2.hrv.hrv_utils import _hrv_format_input
+    rpeaks = np.sort(np.asarray(rpeaks, dtype=int).flatten())
+    series = rr_interval_series(rpeaks, fs, rr_min_ms, rr_max_ms, breaks=breaks)
+    rri, _t, _m = _hrv_format_input(nk_rri_input(series), sampling_rate=int(fs))
+    out: dict = {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fast_hrv_dfa(rri, out)
+    return {f"HRV_{k}": float(v) for k, v in out.items()}
 
 
 def compute_qtc(

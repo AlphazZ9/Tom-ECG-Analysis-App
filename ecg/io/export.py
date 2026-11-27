@@ -554,6 +554,8 @@ class ExcelExporter:
             cover_rows.append(("Non-linear HRV",
                                nonlinear_subset_text(_nl.attrs)
                                or "all valid RR intervals of the analysis window"))
+            if _nl.attrs.get("dfa_computed") is False:
+                cover_rows.append(("DFA", "not computed (Rhythm & HRV > Compute DFA)"))
             # HRV_PI / HRV_GI of the HRV_NonLinear sheet (NeuroKit's, same
             # conventions as the text report's RR-asymmetry block).
             cover_rows.append(("HR asymmetry (HRV_PI, HRV_GI)", RR_ASYMMETRY_TEXT))

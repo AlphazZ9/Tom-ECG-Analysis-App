@@ -316,6 +316,14 @@ elsewhere), `HRV_LFpeak (Hz)`.
 Sample entropy, DFA, and a multiscale entropy (MSEn) curve across coarse-graining
 scales, then RR asymmetry and the distribution of the valid RR intervals.
 
+**DFA α1 / α2** (and the multifractal DFA indices) are computed only when you
+click **Compute DFA**: NeuroKit's method fits every window size from 12 beats
+to a tenth of the recording, so its time grows with the square of the
+recording length (about 5 s for an hour, 1 min for 4 h, 40 min for 24 h;
+the app asks first when it is over a minute). Analyze or Recompute Non-linear
+clears it; the status line and the Excel Cover sheet say when it was not
+computed.
+
 Poincaré SD1/SD2, DFA α1/α2 and the asymmetry / fragmentation indices use
 **every valid beat of the analysis window**. Only the slow entropy block
 (SampEn, ApEn, FuzzyEn, MSE, CD, …) is capped for runtime, to **Entropy cap

@@ -57,3 +57,27 @@ def test_faster():
     t0 = time.perf_counter(); _hrv_dfa(rri, {}); slow = time.perf_counter() - t0
     t0 = time.perf_counter(); hrv_dfa(rri, {}); fast = time.perf_counter() - t0
     assert fast < slow / 2, (slow, fast)
+
+
+@pytest.mark.parametrize("n_beats", [800, 3000])      # entropy block not capped / capped
+def test_dfa_on_demand_gives_the_values_of_the_former_analysis(n_beats):
+    from ecg.core import analysis as A
+    fs = 2000.0
+    rng = np.random.default_rng(n_beats)
+    rr = 0.12 + 0.004 * np.sin(np.arange(n_beats) / 9) + rng.normal(0, 0.002, n_beats)
+    peaks = (np.cumsum(rr) * fs).astype(int)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        before = A.analyse_hrv_nonlinear(peaks, fs, dfa=True)
+        now = A.analyse_hrv_nonlinear(peaks, fs)
+        dfa = A.window_dfa(peaks, fs)
+    cols = A.dfa_columns(before.columns)
+    assert "HRV_DFA_alpha1" in cols and "HRV_DFA_alpha2" in cols
+    assert now.attrs["dfa_computed"] is False and before.attrs["dfa_computed"] is True
+    for c in cols:
+        assert np.isnan(now[c].iloc[0]), c                 # not computed by default
+        np.testing.assert_array_equal(dfa[c], before[c].iloc[0], err_msg=c)
+    # The rest of the table is untouched.
+    for c in before.columns:
+        if c not in cols:
+            np.testing.assert_array_equal(now[c].values, before[c].values, err_msg=c)

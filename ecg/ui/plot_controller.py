@@ -2645,7 +2645,7 @@ class PlotController:
             lbl_auto.configure(text=self.app.analysis_ctrl.AUTONOMIC_IDLE_TEXT,
                                text_color=PLOT["muted"])
         self.app._set_result_btns_enabled(
-            False, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl", "btn_run_arrhythmia"))
+            False, ("btn_run_freq", "btn_run_nonlin", "btn_run_dfa", "btn_run_ivl", "btn_run_arrhythmia"))
 
     def reset_hrv_readouts(self) -> None:
         """Results dropped on the same file (peak edit, artifact review): the
@@ -2663,7 +2663,7 @@ class PlotController:
         if self.app.analysis.epoch_df is None:
             self.app.analysis_ctrl.clear_epochs_view()
         self.app._set_result_btns_enabled(
-            False, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl"))
+            False, ("btn_run_freq", "btn_run_nonlin", "btn_run_dfa", "btn_run_ivl"))
         self.app.ui.running_modules.clear()
 
     def reset_kpis(self) -> None:

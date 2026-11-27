@@ -113,7 +113,11 @@ and *Intervals* are Morphology & Intervals, *Abnormal Events* is Events.
   entropy, DFA α1/α2, and a **multiscale entropy (MSEn)** curve across
   coarse-graining scales — catches loss of complexity a single-scale SampEn
   can miss. Poincaré SD1/SD2, DFA and the asymmetry/fragmentation indices
-  use **every valid beat of the analysis window**. Only the slow (O(N²))
+  use **every valid beat of the analysis window**. **DFA is computed on
+  demand** (Compute DFA, since 6.2.3), with NeuroKit's method and scales
+  (α1: 4–11 beats; α2: every integer from 12 beats to N/10, so its time grows
+  with N²); `ecg/core/fast_dfa.py` evaluates the windows' trends at once and
+  gives NeuroKit's numbers bit for bit, about 2.3× faster. Only the slow (O(N²))
   entropy block — SampEn, ApEn, FuzzyEn, MSE, CD, … — is capped for
   runtime, to **Entropy cap (RR)** valid intervals (default 2000, set in the
   Non-linear tab; 0 = no cap, a negative entry falls back to 2000), taken as the contiguous block with the

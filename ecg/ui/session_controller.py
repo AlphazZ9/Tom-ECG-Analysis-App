@@ -681,7 +681,7 @@ class SessionController:
         # ── Enable analysis buttons ──────────────────────────────────────
         self.app._set_save_session_enabled(True)
         self.app._set_result_btns_enabled(
-            True, ("btn_run_freq", "btn_run_nonlin", "btn_run_ivl"))
+            True, ("btn_run_freq", "btn_run_nonlin", "btn_run_dfa", "btn_run_ivl"))
 
         n_beats = len(self.app.detection.rpeaks_ok) if self.app.detection.rpeaks_ok is not None else 0
         # The restored results' RR-exclusion disclosure, in orange, as after
