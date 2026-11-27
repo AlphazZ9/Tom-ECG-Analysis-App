@@ -105,8 +105,9 @@ class ECGApp(
         # _build_toolbar) need ~1100 px and the Signal & Detection bar about
         # as much; with no sidebar the tabs get the whole width.
         self.minsize(1280, 720)
-        # Open in fullscreen/maximized state
-        self.after(100, lambda: self.state("zoomed"))  # Windows fullscreen
+        # Open maximised: "zoomed" on Windows and macOS; Linux (X11) has no
+        # such state and maximises with the -zoomed attribute instead.
+        self.after(100, self._maximise)
         self.configure(fg_color=PANEL)
 
         # Forward declarations for widgets built during _build() — lets Pylance
@@ -127,6 +128,15 @@ class ECGApp(
 
     # ─── Startup helpers ──────────────────────────────────────
 
+
+    def _maximise(self) -> None:
+        try:
+            self.state("zoomed")
+        except tk.TclError:
+            try:
+                self.attributes("-zoomed", True)
+            except tk.TclError:
+                pass
     def _load_icon(self) -> None:
         """The app's icon on this window, its dialogs and the taskbar.
 

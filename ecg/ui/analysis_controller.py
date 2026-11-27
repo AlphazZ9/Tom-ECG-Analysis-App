@@ -36,7 +36,7 @@ from ecg.core.analysis import (
     normalize_ensemble_beats,
     mean_hr_bpm, poincare_sd1_sd2,
     recompute_qtc_column, rr_bounds_label, rr_exclusion_text,
-    noise_breaks, rr_interval_series, successive_valid_pairs,
+    noise_breaks, rr_interval_series, spectrum_segments_text, successive_valid_pairs,
 )
 from ecg.core.autonomic import COV_METHODS, METHOD_NOTES, compute_autonomic_indices
 from ecg.core.filtering import break_line_at_gaps
@@ -455,7 +455,9 @@ class AnalysisController:
             n_lf, n_hf = (s if s == MISSING else f"{s}%" for s in (n_lf, n_hf))
         except Exception as _exc:
             log.debug("freq status: LF/HF% formatting failed: %s", _exc, exc_info=True)
-        return f"  {done_label}  LFn={n_lf}  HFn={n_hf}  LF/HF={n_lfhf}", GREEN
+        seg = spectrum_segments_text(getattr(fd, "attrs", None))
+        return (f"  {done_label}  LFn={n_lf}  HFn={n_hf}  LF/HF={n_lfhf}"
+                + (f"  ·  {seg}" if seg else ""), GREEN)
 
     @staticmethod
     def _nonlin_status(nl: "pd.DataFrame | None",
@@ -1604,7 +1606,8 @@ class AnalysisController:
             bounds = rr_bounds_label({"rr_min_ms": rr_lo, "rr_max_ms": rr_hi})
             table_text += (
                 f"\n\n  * {n_excl_win} window(s) contain RR intervals outside "
-                f"{bounds} or spanning removed beats (n_excluded) — "
+                f"{bounds} or spanning removed beats"
+                f"{' or noisy regions' if self.app.analysis.noise_regions else ''} (n_excluded) — "
                 f"excluded from every metric, not bridged.")
             if need_freq:
                 table_text += (
@@ -2824,7 +2827,8 @@ class AnalysisController:
             bounds = rr_bounds_label({"rr_min_ms": rr_lo, "rr_max_ms": rr_hi})
             table_text += (
                 f"\n\n  * {n_excl_ep} epoch(s) contain RR intervals outside "
-                f"{bounds} or spanning removed beats (N_excluded) — "
+                f"{bounds} or spanning removed beats"
+                f"{' or noisy regions' if self.app.analysis.noise_regions else ''} (N_excluded) — "
                 f"excluded from every metric, not bridged.")
         if n_skipped:
             table_text += (

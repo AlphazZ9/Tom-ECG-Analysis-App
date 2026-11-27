@@ -95,6 +95,20 @@ and *Intervals* are Morphology & Intervals, *Abnormal Events* is Events.
   powers in ms²**. **LFn / HFn** are the Task Force normalised units,
   LF or HF / (LF + HF); LF/HF = LF / HF. The same estimator is used by
   Rolling HRV and Compare Segments.
+- **Long runs of excluded intervals** (a noisy region marked by hand, a long
+  artifact): the spline never bridges a run longer than 2 s. Since 6.2.3 the
+  series is cut there, each stretch in between is resampled and its Welch PSD
+  computed with one common window (≈0.02 Hz resolution, at most half the
+  longest stretch, never under 256 samples = 12.8 s), and the PSDs are
+  averaged weighted by their number of Welch windows (the same as pooling
+  every window of every stretch). Shorter stretches are left out; the 5 %
+  excluded-time rule applies to the stretches used. The status line, the
+  Summary report and the Excel Cover sheet say "averaged over N stretches
+  (X of Y s used)". Before 6.2.3 one such run withheld the spectrum of the
+  whole analysis window. Recordings without such a run give exactly the
+  same spectrum as before. The *spanning removed beats* count (Excel and
+  Prism column names kept for compatibility) includes the intervals of
+  noisy regions.
 - **Non-linear** — Poincaré scatter with an SD1/SD2 ellipse overlay, sample
   entropy, DFA α1/α2, and a **multiscale entropy (MSEn)** curve across
   coarse-graining scales — catches loss of complexity a single-scale SampEn

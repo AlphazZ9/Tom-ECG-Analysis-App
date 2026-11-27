@@ -325,10 +325,37 @@ class DetectionController:
         # result can exist without core results.
         self.app.analysis_ctrl.invalidate_autonomic()
 
+    # A noisy-region change is an entry of its own on the same undo stack:
+    # ("noise", regions before it). Undoing it puts the regions back without
+    # re-running detection (the peaks did not change).
+    NOISE_ENTRY = "noise"
+
+    def _noise_snapshot(self) -> tuple:
+        return (self.NOISE_ENTRY, tuple(dict(r) for r in self.app.analysis.noise_regions))
+
+    def push_noise_undo(self) -> None:
+        """Snapshot the noisy regions before one is added or removed."""
+        self.app.detection.edit_undo.append(self._noise_snapshot())
+        if len(self.app.detection.edit_undo) > self.app._EDIT_UNDO_LIMIT:
+            self.app.detection.edit_undo.pop(0)
+        self.app.detection.edit_redo.clear()
+        self.update_undo_btns()
+
+    def _restore_noise(self, entry: tuple, verb: str) -> None:
+        self.app.analysis.noise_regions = [dict(r) for r in entry[1]]
+        self.app._noise_regions_changed()
+        self.app._set_status(f"{verb} the last noisy-region change "
+                             f"({len(self.app.analysis.noise_regions)} noisy region(s))", ORANGE)
+        self.update_undo_btns()
+
     def undo_edit(self, _event=None) -> None:
         """Ctrl+Z — restore previous peak-edit state."""
         if not self.app.detection.edit_undo:
             self.app._set_status("Nothing to undo.", MUTED)
+            return
+        if self.app.detection.edit_undo[-1][0] == self.NOISE_ENTRY:
+            self.app.detection.edit_redo.append(self._noise_snapshot())
+            self._restore_noise(self.app.detection.edit_undo.pop(), "Undone")
             return
         cur = (frozenset(self.app.detection.manual_excluded), frozenset(self.app.detection.manual_added))
         self.app.detection.edit_redo.append(cur)
@@ -345,6 +372,10 @@ class DetectionController:
         """Ctrl+Y — rétablir après undo."""
         if not self.app.detection.edit_redo:
             self.app._set_status("Nothing to redo.", MUTED)
+            return
+        if self.app.detection.edit_redo[-1][0] == self.NOISE_ENTRY:
+            self.app.detection.edit_undo.append(self._noise_snapshot())
+            self._restore_noise(self.app.detection.edit_redo.pop(), "Redone")
             return
         cur = (frozenset(self.app.detection.manual_excluded), frozenset(self.app.detection.manual_added))
         self.app.detection.edit_undo.append(cur)
@@ -422,6 +453,7 @@ class DetectionController:
             hit = [i for i, r in enumerate(regions)
                    if float(r["t_start"]) <= t <= float(r["t_end"])]
             if hit:
+                self.push_noise_undo()
                 for i in reversed(hit):
                     del regions[i]
                 self.app._noise_regions_changed()
@@ -467,13 +499,14 @@ class DetectionController:
         if b - a < self.NOISE_MIN_S:
             self.app._draw_detail(self.app.ui.nav_pos)
             return
+        self.push_noise_undo()
         self.app.analysis.noise_regions.append(
             {"t_start": round(a, 3), "t_end": round(b, 3), "note": ""})
         self.app.analysis.noise_regions.sort(key=lambda r: float(r["t_start"]))
         self.app._noise_regions_changed()
         self.app._set_status(
             f"Noisy region {a:.2f}–{b:.2f} s marked: its RR intervals are left out of HR / "
-            "HRV at the next Analyze.", GREEN)
+            "HRV at the next Analyze (Ctrl+Z to undo).", GREEN)
 
     def toggle_free_placement(self) -> None:
         """Toggle free-placement mode: bypass proximity constraint when adding peaks.

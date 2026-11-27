@@ -1246,6 +1246,7 @@ class NoiseRegionManagerDialog(ctk.CTkToplevel):
             default_start = self._app.ui.nav_pos
             default_end   = min(t_max, default_start + win)
         def _save(period: dict) -> None:
+            self._app.detection_ctrl.push_noise_undo()
             self._app._noise_regions.append(period)
             self._app._noise_regions_changed()
             self._refresh()
@@ -1268,6 +1269,7 @@ class NoiseRegionManagerDialog(ctk.CTkToplevel):
         existing = dict(self._app._noise_regions[idx])
         t_max = float(self._app._time[-1]) if self._app._time is not None else 1e6
         def _save(period: dict) -> None:
+            self._app.detection_ctrl.push_noise_undo()
             self._app._noise_regions[idx] = period
             self._app._noise_regions_changed()
             self._refresh()
@@ -1281,6 +1283,7 @@ class NoiseRegionManagerDialog(ctk.CTkToplevel):
         if not messagebox.askyesno("Confirm delete",
                                    f"Delete {len(sel)} noisy region(s)?", parent=self):
             return
+        self._app.detection_ctrl.push_noise_undo()
         for i in sorted(sel, reverse=True):
             del self._app._noise_regions[i]
         self._app._noise_regions_changed()

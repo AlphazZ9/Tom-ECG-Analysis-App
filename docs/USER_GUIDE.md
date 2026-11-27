@@ -149,9 +149,11 @@ Edit mode on) and drag over the stretch: it is shaded grey and hatched. Every
 RR interval touching it is left out of heart rate and HRV, as an interval
 across a removed beat is — so beats missed in the noise do not read as a
 slower heart rate. Right-click a noisy region to remove it; the **Noise** chip
-of the detection bar lists them all (add, edit, delete by times). Results
-computed before show as out of date: run **Analyze** again. Noisy regions are
-saved with the session.
+of the detection bar lists them all (add, edit, delete by times); **Ctrl+Z**
+undoes the last noisy-region change. Results computed before show as out of
+date: run **Analyze** again. Noisy regions are saved with the session. The
+frequency HRV (LF / HF) is computed on the stretches between noisy regions
+and averaged, never interpolated across them ([Methods](METHODS.md#hrv-analysis)).
 
 The **Signal quality** panel on the right of the plot gives the
 signal-quality score, built from how closely each beat matches the

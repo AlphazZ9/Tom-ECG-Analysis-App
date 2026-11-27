@@ -29,6 +29,7 @@ import pandas as pd
 from ecg.core.analysis import (
     HR_RANGE_PCTL, _NL_ENTROPY_PREFIXES, analysed_duration_s, hrv_freq_is_legacy,
     hrv_freq_withheld_reason, intervals_use_legacy_definitions, mean_hr_bpm,
+    spectrum_segments_text,
     ensemble_short_text, noisy_time_pct, nonlinear_subset_text, qt_beat_variability,
     rr_asymmetry_indices, rr_exclusion_report, rr_valid_mask,
     successive_valid_pairs, LEGACY_SPECTRAL_TEXT,
@@ -536,6 +537,8 @@ def _status_rows(r: dict, rep: dict, epoch_df: Any, rolling_df: Any, autonomic: 
         basis["frequency"] = (rep["n_valid"], rep["n_intervals"], _rr_basis(rep["n_valid"], rep["n_intervals"]))
         if hrv_freq_is_legacy(r):
             notes["frequency"] = LEGACY_SPECTRAL_TEXT
+        elif spectrum_segments_text(getattr(fd, "attrs", None)):
+            notes["frequency"] = "spectrum " + spectrum_segments_text(fd.attrs)
     elif hrv_freq_withheld_reason(r):
         notes["frequency"] = "withheld — " + str(hrv_freq_withheld_reason(r))
     nl = r.get("hrv_nonlin")
