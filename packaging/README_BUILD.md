@@ -23,7 +23,7 @@ Sur Mac : menu Pomme > « À propos de ce Mac ». « Puce Apple M... » = arm64,
 2. Sur <https://github.com/AlphazZ9/Tom-ECG-Analysis-App/commits/sync-local-work>,
    le commit le plus récent est bien cette fusion.
 
-Le build vérifie de lui-même que le tag (`v6.2.1`) correspond à la version
+Le build vérifie de lui-même que le tag (`v6.2.2`) correspond à la version
 écrite dans le code (tâche « Check the version ») : un tag posé sur un ancien
 commit échoue en quelques secondes, sans rien publier. Il suffit alors de
 supprimer la Release et le tag (voir plus bas), puis de recommencer.
@@ -31,7 +31,7 @@ supprimer la Release et le tag (voir plus bas), puis de recommencer.
 ### Méthode 1 : depuis le site GitHub (le plus simple)
 
 1. Onglet **Releases** > **Draft a new release**.
-2. **Choose a tag** : taper `v6.2.1`, puis **Create new tag: v6.2.1 on
+2. **Choose a tag** : taper `v6.2.2`, puis **Create new tag: v6.2.2 on
    publish**.
 3. **Target** : `sync-local-work`.
 4. **Generate release notes**, puis **Publish release**.
@@ -44,19 +44,19 @@ Le workflow « Build apps » démarre (onglet **Actions**) et, environ
 Depuis le dossier du projet, une fois le travail committé et poussé :
 
 ```bash
-git tag v6.2.1          # numéro de version au format vX.Y.Z
-git push origin v6.2.1
+git tag v6.2.2          # numéro de version au format vX.Y.Z
+git push origin v6.2.2
 ```
 
 Le workflow « Build apps » démarre tout seul (onglet **Actions** du dépôt
-GitHub). Comptez 10 à 20 minutes. À la fin, une **Release** `v6.2.1` est
+GitHub). Comptez 10 à 20 minutes. À la fin, une **Release** `v6.2.2` est
 créée dans l'onglet **Releases**, avec les trois zips attachés et des notes
 de version générées automatiquement (modifiables ensuite sur GitHub).
 
 Si une des trois plateformes échoue, les zips ne sont pas attachés : corriger,
 puis supprimer la Release et le tag (sur GitHub : la Release > **Delete**,
-puis onglet **Tags** > le tag > **Delete**), ou en ligne de commande supprimer et recréer le tag (`git tag -d v6.2.1`,
-`git push origin :refs/tags/v6.2.1`, puis recommencer), ou choisir un
+puis onglet **Tags** > le tag > **Delete**), ou en ligne de commande supprimer et recréer le tag (`git tag -d v6.2.2`,
+`git push origin :refs/tags/v6.2.2`, puis recommencer), ou choisir un
 nouveau numéro.
 
 ### Méthode 2 : à la main (sans Release, pour tester)

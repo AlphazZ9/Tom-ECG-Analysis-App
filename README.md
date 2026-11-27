@@ -32,7 +32,7 @@ strain and experimental conditions.
    `python ecg_app.py` (details in [Development](docs/DEVELOPMENT.md)).
 
 **Updating.** The version shows next to the app name in the header (e.g.
-*ECG Analysis v6.2.1*). For the downloaded app, take the zip of the
+*ECG Analysis v6.2.2*). For the downloaded app, take the zip of the
 [latest release](https://github.com/AlphazZ9/Tom-ECG-Analysis-App/releases/latest)
 and replace the old copy (your sessions and settings are kept: they are not
 inside the app). From the code (VS Code, launcher): `git checkout
