@@ -32,7 +32,7 @@ les mesures selon la souche et les conditions de votre étude.
    (en anglais).
 
 **Mettre à jour.** La version s'affiche à côté du nom de l'application,
-dans l'en-tête (par ex. *ECG Analysis v6.2.1*). Pour l'application
+dans l'en-tête (par ex. *ECG Analysis v6.2.2*). Pour l'application
 téléchargée, prenez le zip de la
 [dernière version](https://github.com/AlphazZ9/Tom-ECG-Analysis-App/releases/latest)
 et remplacez l'ancienne copie (sessions et réglages sont conservés : ils ne
