@@ -26,7 +26,7 @@ from ecg.core.detection import (
 )
 from ecg.core.ml_detector import detect_peaks_ml, MLPeakModel, NoModelError
 from ecg.ui.ml_examples import NO_MODEL_STATUS
-from ecg.io.loaders import load_mat_signal, read_spike2_markers
+from ecg.io.loaders import load_mat_signal, read_spike2_marker_codes, read_spike2_markers
 from ecg.io.db import _DB_AVAILABLE, get_notes
 from ecg.io.subject_name import (
     DEFAULT_SUBJECT, is_default_subject, subject_from_filename,
@@ -435,6 +435,7 @@ class SignalController:
         sig = sig[i0:i1]
         # Spike2 marker channels in this signal's time base ({} otherwise).
         markers = read_spike2_markers(self.app.signal.filepath, t0, t1)
+        marker_codes = read_spike2_marker_codes(self.app.signal.filepath, t0, t1)
 
         if sig.std() < 1e-10:
             raise ValueError("Signal is flat — wrong channel.")
@@ -457,6 +458,7 @@ class SignalController:
             "dur_s":        dur_s,
             "signal_crop":  signal_crop,
             "markers":      markers,
+            "marker_codes": marker_codes,
             "detected_ch":  detected_ch,
             "detected_fs":  detected_fs,
             "requested_ch": params["channel"],
@@ -494,6 +496,7 @@ class SignalController:
         self.app.signal.prepare_params   = None
         self.app.signal.crop             = bundle.get("signal_crop")
         self.app.signal.markers          = bundle.get("markers") or {}
+        self.app.signal.marker_codes     = bundle.get("marker_codes") or {}
         self.app.signal.inverted  = False
         self.app.signal.raw_only_loaded  = True
         self.app.ui.nav_pos          = 0.0
@@ -652,6 +655,7 @@ class SignalController:
         sig = sig[i0:i1]
         # Spike2 marker channels in this signal's time base ({} otherwise).
         markers = read_spike2_markers(self.app.signal.filepath, t0, t1)
+        marker_codes = read_spike2_marker_codes(self.app.signal.filepath, t0, t1)
 
         if sig.std() < 1e-10:
             raise ValueError("Signal is flat — wrong channel.")
@@ -685,6 +689,7 @@ class SignalController:
             "dur_s":           dur_s,
             "signal_crop":     signal_crop,
             "markers":         markers,
+            "marker_codes":    marker_codes,
             "detected_ch":     detected_ch,
             "detected_fs":     detected_fs,
             "requested_ch":    params["channel"],
@@ -753,6 +758,7 @@ class SignalController:
         self.app.signal.prepare_params  = bundle.get("prepare_params")
         self.app.signal.crop            = bundle.get("signal_crop")
         self.app.signal.markers         = bundle.get("markers") or {}
+        self.app.signal.marker_codes    = bundle.get("marker_codes") or {}
         self.app.signal.inverted = bundle.get("inverted", False)
         self.app.signal.raw_only_loaded = False
         # recommended_min_rr_ms supprimé — ent_minrr non modifié automatiquement.
@@ -1304,6 +1310,7 @@ class SignalController:
         self.app.signal.inverted      = False
         self.app.signal.channel       = None
         self.app.signal.markers       = {}
+        self.app.signal.marker_codes  = {}
         self.app.signal.raw_only_loaded      = False
         self.app.ui.thr_debounce_id      = None
         self.app.analysis.annotations          = []

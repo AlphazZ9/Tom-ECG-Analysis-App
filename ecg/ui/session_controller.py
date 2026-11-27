@@ -26,7 +26,7 @@ from ecg.core.analysis import (
     recompute_qtc_column, signal_crop_info,
 )
 from ecg.io.loaders import (
-    load_mat_signal, read_spike2_markers, _serialise_results, _deserialise_results,
+    load_mat_signal, read_spike2_marker_codes, read_spike2_markers, _serialise_results, _deserialise_results,
 )
 from ecg.io.session import load_session, save_session, delete_session
 from ecg.io.subject_name import is_default_subject
@@ -303,6 +303,7 @@ class SessionController:
         signal_crop = signal_crop_info(prep.t_start, prep.t_end, len(sig_raw) / fs)
         # Spike2 markers re-read from the file (not saved in the session).
         markers = read_spike2_markers(path, prep.t_start, prep.t_end)
+        marker_codes = read_spike2_marker_codes(path, prep.t_start, prep.t_end)
         sig_raw = sig_raw[i0:i1]
         n_samples = len(sig_raw)
 
@@ -346,6 +347,7 @@ class SessionController:
             "signal_bundle":    signal_bundle,
             "signal_crop":      signal_crop,
             "markers":          markers,
+            "marker_codes":     marker_codes,
             "filter_params":    fp,
             "thresh_amp":       float(state.get("threshold", float(state.get("thresh_amp", 0.5)))),
             # The slider FRACTION (0.01-2.0, apply_threshold()'s thresh_frac
@@ -475,6 +477,7 @@ class SessionController:
         self.app.signal.prepare_params  = sb.get("prepare_params")
         self.app.signal.crop            = bundle.get("signal_crop")
         self.app.signal.markers         = bundle.get("markers") or {}
+        self.app.signal.marker_codes    = bundle.get("marker_codes") or {}
         self.app.signal.inverted = sb.get("inverted", False)
 
         # ── Restore user-edited state (session values win over freshly

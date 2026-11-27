@@ -73,8 +73,7 @@ def _events(times: Any, codes: Any, t0: float, t1: Optional[float],
         elif n == 1:
             labels = [code_text(c.flatten()[0] if c.dtype.kind in "OUS" and c.size else c)]
     ok = np.isfinite(t) & _crop(np.nan_to_num(t, nan=-1.0), t0, t1)
-    out = [(round(float(x) - t0, 6), lab) for x, lab, k in zip(t, labels, ok)
-           if k and not loaders.ignored_marker(channel, lab)]
+    out = [(round(float(x) - t0, 6), lab) for x, lab, k in zip(t, labels, ok) if k]
     return sorted(out)[:MAX_EVENTS]
 
 
