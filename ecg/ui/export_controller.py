@@ -55,7 +55,7 @@ from ecg.ui.plots import (
 )
 from ecg.ui.theme import (
     PLOT, GREEN, ORANGE, RED, ORANGE_DARK,
-    GREEN_MID, AMBER, RED_MID, NAVY, GRAY_LIGHT, CYAN_BRIGHT,
+    GREEN_MID, AMBER, RED_MID, NAVY, GRAY_LIGHT, CYAN_BRIGHT, FIG_W_2COL, publication_style,
 )
 
 if TYPE_CHECKING:
@@ -409,10 +409,13 @@ class ExportController:
         return message
 
     def export_figures(self) -> None:
-        """Export curated publication-ready PNG figures to a chosen folder.
+        """Export curated publication-ready figures to a chosen folder.
 
-        Exports 11 figures at 200 DPI.  The RR tachogram is regenerated
-        without spike markers so it is clean for publication.
+        Each figure in three files: PNG (300 dpi), PDF and SVG (vector, text
+        kept as text, editable in Illustrator / Inkscape), on white with the
+        publication style (theme.publication_style: journal font sizes,
+        double-column width 17.5 cm), whatever the theme on screen. The RR
+        tachogram is regenerated without spike markers.
         """
         app = self.app
         if app.analysis.results is None:
@@ -507,44 +510,44 @@ class ExportController:
         ]
 
         saved, skipped = 0, 0
-        DPI = 200; FIG_W, FIG_H = 10.0, 5.0
+        DPI = 300
+        FIG_W, FIG_H = FIG_W_2COL, FIG_W_2COL / 2.0      # 17.5 × 8.8 cm
 
-        for slot_key, stem, custom_fn in catalogue:
-            fpath = _os.path.join(out_dir, f"{stem}.png")
-            try:
-                export_fig = Figure(
-                    figsize=(FIG_W, FIG_H), dpi=DPI,
-                    facecolor=PLOT.get("bg", "#1A1A2E"), layout="constrained")
-                if hasattr(export_fig, "set_constrained_layout_pads"):
-                    getattr(export_fig, "set_constrained_layout_pads")(
-                        w_pad=0.08, h_pad=0.08, hspace=0.05, wspace=0.05)
-                if custom_fn is not None:
-                    custom_fn(export_fig)
-                else:
-                    slot = app._slots.get(slot_key)
-                    if slot is None or slot._draw_fn is None:
-                        skipped += 1
-                        plt.close(export_fig)
-                        continue
-                    try:
-                        slot._draw_fn(export_fig)
-                    except Exception as exc:
-                        log.warning("Export figure '%s': %s", stem, exc)
-                        skipped += 1
-                        plt.close(export_fig)
-                        continue
-                export_fig.savefig(fpath, dpi=DPI,
-                                   facecolor=export_fig.get_facecolor(),
-                                   bbox_inches="tight")
-                plt.close(export_fig)
-                saved += 1
-            except Exception as exc:
-                log.warning("Could not save '%s': %s", stem, exc)
-                skipped += 1
+        with publication_style():
+            for slot_key, stem, custom_fn in catalogue:
+                try:
+                    export_fig = Figure(figsize=(FIG_W, FIG_H), dpi=DPI,
+                                        facecolor="white", layout="constrained")
+                    if hasattr(export_fig, "set_constrained_layout_pads"):
+                        getattr(export_fig, "set_constrained_layout_pads")(
+                            w_pad=0.04, h_pad=0.04, hspace=0.04, wspace=0.04)
+                    if custom_fn is not None:
+                        custom_fn(export_fig)
+                    else:
+                        slot = app._slots.get(slot_key)
+                        if slot is None or slot._draw_fn is None:
+                            skipped += 1
+                            plt.close(export_fig)
+                            continue
+                        try:
+                            slot._draw_fn(export_fig)
+                        except Exception as exc:
+                            log.warning("Export figure '%s': %s", stem, exc)
+                            skipped += 1
+                            plt.close(export_fig)
+                            continue
+                    for ext in (".png", ".pdf", ".svg"):
+                        export_fig.savefig(_os.path.join(out_dir, stem + ext), dpi=DPI,
+                                           facecolor="white", bbox_inches="tight")
+                    plt.close(export_fig)
+                    saved += 1
+                except Exception as exc:
+                    log.warning("Could not save '%s': %s", stem, exc)
+                    skipped += 1
 
         skip_note = f" ({skipped} skipped)" if skipped else ""
         app._set_status(
-            f"Figures exported — {saved} PNG files{skip_note} → "
+            f"Figures exported — {saved} figures (PNG + PDF + SVG){skip_note} → "
             f"{_os.path.basename(out_dir)}  ✓", GREEN)
 
     def build_excel_workbook(self) -> "Workbook":

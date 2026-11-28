@@ -35,7 +35,7 @@ from ecg.ui.theme import (
     card_style,
 )
 import tkinter as tk
-from ecg.ui.theme import button_style, disabled_style, light_plot_theme, toggle_style
+from ecg.ui.theme import button_style, disabled_style, light_plot_theme, publication_style, toggle_style
 from ecg.ui.poincare_figure import draw_poincare_set
 from ecg.io.group_table import append_group_row, group_row
 from ecg.io.subject_name import normalise_sex
@@ -1569,10 +1569,13 @@ class CompareSegmentsMixin:
                                                    ncols=p_cols))):
                 out = base + suffix + ext
                 try:
-                    fig = Figure(figsize=figsize, dpi=300, facecolor="white", layout="constrained")
-                    if draw(fig) is not False:
-                        fig.savefig(out, dpi=300, facecolor="white", bbox_inches="tight")
-                        written.append(os.path.basename(out))
+                    # On white with the publication style, whatever the theme.
+                    with publication_style():
+                        fig = Figure(figsize=figsize, dpi=300, facecolor="white",
+                                     layout="constrained")
+                        if draw(fig) is not False:
+                            fig.savefig(out, dpi=300, facecolor="white", bbox_inches="tight")
+                            written.append(os.path.basename(out))
                     plt.close(fig)
                 except Exception as exc:
                     log.warning("comparison figure %s: %s", out, exc)
@@ -2040,7 +2043,7 @@ class CompareSegmentsMixin:
         fig = Figure(figsize=_GROUP_FIG_SIZE, dpi=300, facecolor="white", layout="constrained")
         try:
             # On white whatever the theme on screen.
-            with light_plot_theme():
+            with publication_style():
                 draw_group_figure(fig, rows, a, b, names, colors)
                 fig.savefig(out, dpi=300, facecolor="white", bbox_inches="tight")
         except Exception as exc:

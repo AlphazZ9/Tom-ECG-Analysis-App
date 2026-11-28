@@ -1278,7 +1278,9 @@ the series those values come from, without basis n or state.
   result and an **Include** tick. A line out of date says why next to its value.
 - **Export Excel**, **GraphPad Prism**, **PDF report**, **Copy text** and
   **Save .txt**. **More ▾** holds the other exports: RR intervals CSV, Figures
-  (PNG), Everything (ZIP: Excel + figures) and Events PDF.
+  (each in PNG 300 dpi, PDF and SVG, on white whatever the theme, 17.5 cm wide
+  with journal font sizes; the PDF / SVG text stays editable in Illustrator or
+  Inkscape), Everything (ZIP: Excel + figures) and Events PDF.
 
 **Include** decides what the Excel workbook, the ZIP (its workbook and its
 figures), the Prism file, the PDF report and the text report hold. It is on by default for what is

@@ -37,7 +37,7 @@ from ecg.ui.widgets import FamilyCombo
 from ecg.ui.theme import (
     BG, BORDER, BORDER2, CARD, GREEN, MUTED, ORANGE, RED, TEXT, THEME, BLUE, CARD_PAD,
     FONT_HINT, FONT_SECTION_HDR, FONT_SMALL, PAGE_GAP, PAGE_PAD_X, PAGE_PAD_Y, SPACE_M,
-    SPACE_S, SPACE_XS, button_style, card_style, combo_style, input_style, light_plot_theme,
+    SPACE_S, SPACE_XS, button_style, card_style, combo_style, input_style, light_plot_theme, publication_style,
 )
 
 # Mixin of ECGApp: `self: ECGApp` shows pyright the whole app surface, so a
@@ -1051,7 +1051,7 @@ class TabGroupMixin:
             fig = Figure(figsize=FIG_SIZE, dpi=300, facecolor="white", layout="constrained")
             try:
                 # On white whatever the theme on screen.
-                with light_plot_theme():
+                with publication_style():
                     draw_group_tab_figure(fig, res, metric=st["fig_metric"] or None,
                                           show_animals=st["lines"])
                     fig.savefig(path, dpi=300, facecolor="white", bbox_inches="tight")

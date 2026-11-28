@@ -714,6 +714,31 @@ def light_plot_theme():
         PLOT.update(saved)
 
 
+# Figures written to a file for a paper: one style for every export.
+# Journal sizes (≈8 pt text, 7 pt ticks), a sans-serif font available on
+# Windows and macOS (Arial / Helvetica), and text kept as text in PDF and
+# SVG so it stays editable in Illustrator / Inkscape.
+PUBLICATION_RC: "dict[str, object]" = {
+    "font.family": "sans-serif",
+    "font.sans-serif": ["Arial", "Helvetica", "Liberation Sans", "DejaVu Sans"],
+    "font.size": 8, "axes.titlesize": 9, "axes.labelsize": 8,
+    "xtick.labelsize": 7, "ytick.labelsize": 7, "legend.fontsize": 7,
+    "axes.linewidth": 0.6, "xtick.major.width": 0.6, "ytick.major.width": 0.6,
+    "lines.linewidth": 1.0, "savefig.dpi": 300,
+    "svg.fonttype": "none", "pdf.fonttype": 42, "ps.fonttype": 42,
+}
+# Widths of a journal figure (single and double column), inches.
+FIG_W_1COL, FIG_W_2COL = 3.35, 6.9
+
+
+@contextlib.contextmanager
+def publication_style():
+    """light_plot_theme (on white whatever the theme on screen) with
+    PUBLICATION_RC: the style of every figure written to a file."""
+    with light_plot_theme() as plot, plt.rc_context(PUBLICATION_RC):
+        yield plot
+
+
 def make_font(size: int = 12, bold: "bool | str" = False) -> "tuple[str, int, str]":
     """Return a font tuple scaled by the active THEME.font_scale."""
     return THEME.font(size, bold)

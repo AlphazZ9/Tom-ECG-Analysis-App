@@ -442,9 +442,12 @@ class PlotController:
                         alpha=0.6, zorder=2)
             else:
                 ax.plot(rr[0], rr[1], color=PLOT["signal"], lw=0.8, zorder=2)
+                # On a panel-coloured backing: it was written over the trace.
                 ax.text(0.004, 0.94, f"RR · whole recording · {rr[2]:.0f}–{rr[3]:.0f} ms",
                         transform=ax.transAxes, ha="left", va="top", fontsize=7,
-                        color=PLOT["muted"], zorder=8)
+                        color=PLOT["muted"], zorder=8,
+                        bbox=dict(boxstyle="round,pad=0.2", fc=PLOT["axes"], ec="none",
+                                  alpha=0.85))
 
             # Event marks -- annotation/noisy-region start times across the
             # WHOLE recording, not just the current window. Cheap: a handful
@@ -814,8 +817,14 @@ class PlotController:
             # accepted-peak markers both tend to sit under an upper-right
             # legend in zoomed views. A semi-opaque panel-matched background
             # keeps it readable over the trace instead of floating text.
-            ax.legend(loc="lower right", framealpha=0.85,
-                      facecolor=PLOT["axes"], edgecolor=PLOT["border"])
+            # One row in headroom added above the trace: inside the data it
+            # hid beats (lower right) or the tallest peaks (upper right).
+            ax.autoscale_view()
+            _y0, _y1 = ax.get_ylim()
+            ax.set_ylim(_y0, _y1 + 0.16 * (_y1 - _y0))
+            ax.legend(loc="upper right", ncol=4, fontsize=7.5, framealpha=0.85,
+                      facecolor=PLOT["axes"], edgecolor=PLOT["border"],
+                      borderpad=0.3, handlelength=1.4, columnspacing=1.0)
 
         self.app._slots["detail"].update(draw)
 
@@ -953,7 +962,7 @@ class PlotController:
             in_view_q = (q_t >= t0) & (q_t <= t1)
 
         def draw(fig):
-            gs = fig.add_gridspec(3, 1, hspace=0.15)
+            gs = fig.add_gridspec(3, 1, hspace=0.22)
             ax_rr = fig.add_subplot(gs[0])
             ax_hr = fig.add_subplot(gs[1], sharex=ax_rr)
             ax_q  = fig.add_subplot(gs[2], sharex=ax_rr)
@@ -970,13 +979,26 @@ class PlotController:
                 # 0.90 matches the "Beats < 0.90 corr." threshold already
                 # used by the Statistics panel and the Report tab.
                 ax_q.axhline(0.90, color=PLOT["muted"], lw=0.6, ls="--")
-            ax_rr.set_ylabel("RR (ms)", fontsize=7, color=PLOT["muted"])
-            ax_hr.set_ylabel("HR (bpm)", fontsize=7, color=PLOT["muted"])
-            ax_q.set_ylabel("Quality", fontsize=7, color=PLOT["muted"])
+            # Three rows of ~15 px: rotated y labels and tick labels overlapped
+            # each other. Each row's name and the range of what is in view
+            # sit inside it (top left) instead, with no y tick labels.
+            def _rng(v, fmt):
+                v = np.asarray(v, dtype=float)
+                v = v[np.isfinite(v)]
+                return f"  {fmt.format(v.min())}–{fmt.format(v.max())}" if len(v) else ""
+            q_vals = d.beat_corr[in_view_q] if has_quality else []
+            for ax_, name in ((ax_rr, f"RR{_rng(rr_ms[in_view], '{:.0f}')} ms"),
+                              (ax_hr, f"HR{_rng(hr_bpm[in_view], '{:.0f}')} bpm"),
+                              (ax_q, f"Quality{_rng(q_vals, '{:.2f}')}")):
+                ax_.text(0.004, 0.92, name, transform=ax_.transAxes, ha="left", va="top",
+                         fontsize=7, color=PLOT["muted"], zorder=8,
+                         bbox=dict(boxstyle="round,pad=0.15", fc=PLOT["axes"], ec="none",
+                                   alpha=0.8))
+                ax_.tick_params(axis="y", left=False, labelleft=False)
             ax_q.set_xlabel("Time (s)", fontsize=7, color=PLOT["muted"])
-            ax_rr.tick_params(labelbottom=False, labelsize=7)
-            ax_hr.tick_params(labelbottom=False, labelsize=7)
-            ax_q.tick_params(labelsize=7)
+            ax_rr.tick_params(axis="x", labelbottom=False, labelsize=7)
+            ax_hr.tick_params(axis="x", labelbottom=False, labelsize=7)
+            ax_q.tick_params(axis="x", labelsize=7)
             ax_rr.set_xlim(t0, t1)
             ax_hr.set_xlim(t0, t1)
             # Centred on the mean of what is in view.
