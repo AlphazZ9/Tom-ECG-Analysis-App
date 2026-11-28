@@ -9,6 +9,8 @@ dist/
 .scratch/
 .pytest_cache/
 .mypy_cache/
+.coverage
+htmlcov/
 .idea/
 *.log
 
