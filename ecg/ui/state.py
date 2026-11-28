@@ -248,7 +248,7 @@ class UIState:
     """Transient view/render state: navigation position, caches, mpl event ids."""
     nav_pos: float = 0.0
     show_raw: bool = True                       # raw/filtered toggle
-    rrhr_strip_visible: bool = True              # RR/HR/Quality sub-plot strip toggle
+    rrhr_strip_visible: bool = False             # RR/HR/Quality sub-plot strip toggle
     show_spike_markers: bool = True              # RR/HR tachogram spike-marker toggle
     # (No sidebar / right-panel collapse flags: both panels are gone. A UI
     # snapshot taken before still holds them; restore_ui_state ignores them.)

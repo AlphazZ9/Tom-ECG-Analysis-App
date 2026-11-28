@@ -824,6 +824,7 @@ class PlotController:
             ax.set_ylim(_y0, _y1 + 0.16 * (_y1 - _y0))
             ax.legend(loc="upper right", ncol=4, fontsize=7.5, framealpha=0.85,
                       facecolor=PLOT["axes"], edgecolor=PLOT["border"],
+                      labelcolor=PLOT.get("text", "#333"),
                       borderpad=0.3, handlelength=1.4, columnspacing=1.0)
 
         self.app._slots["detail"].update(draw)

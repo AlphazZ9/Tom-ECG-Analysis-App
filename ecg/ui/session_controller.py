@@ -1562,7 +1562,7 @@ class SessionController:
             log.debug("restore current_tab failed: %s", _exc, exc_info=True)
         # Re-apply non-widget state
         self.app.ui.nav_pos  = float(s.get("nav_pos",  0.0))
-        saved_rrhr_visible = bool(s.get("rrhr_strip_visible", True))
+        saved_rrhr_visible = bool(s.get("rrhr_strip_visible", False))
         if saved_rrhr_visible != self.app.ui.rrhr_strip_visible:
             self.app._toggle_rrhr_strip()
         # "left_panel_collapsed" / "right_panel_collapsed" of a snapshot taken
